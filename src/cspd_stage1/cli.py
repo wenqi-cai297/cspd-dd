@@ -9,12 +9,7 @@ from cspd_stage1.pipeline import config_from_args, run_stage1
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the CLI parser.
-
-    We use a subcommand structure even though there is only `run` today,
-    because future stages / utilities will probably want to live under the same
-    executable without turning the argument surface into soup.
-    """
+    """Build the CLI parser."""
     parser = argparse.ArgumentParser(description="CSPD Stage 1 attribute extraction")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -53,6 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=256,
         help="Generation cap for local VLM backends",
+    )
+    run_parser.add_argument(
+        "--class-name-map",
+        default=None,
+        help="Optional JSON file that maps raw folder labels (e.g. synset ids) to readable class names.",
     )
     return parser
 

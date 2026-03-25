@@ -4,26 +4,15 @@ from __future__ import annotations
 
 This module ties together:
 - ImageFolder-style dataset scanning,
-- prompt construction,
+- optional class-label mapping for synset-style folders,
+- class-adaptive slot schema selection,
 - VLM invocation,
 - response validation / normalization,
 - artifact writing,
 - progress reporting for long-running CLI jobs.
-
-The current implementation assumes the input dataset uses a simple ImageFolder
-layout:
-    dataset_root/
-      class_a/
-        img1.jpg
-        img2.jpg
-      class_b/
-        img3.jpg
-
-That assumption is deliberate for now because the user's current datasets all
-follow that structure, and there is no point pretending we need a general data
-abstraction layer before the actual method is even running.
 """
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,7 +21,14 @@ from tqdm.auto import tqdm
 
 from cspd_stage1.io_utils import write_json, write_jsonl
 from cspd_stage1.prompting import SYSTEM_PROMPT, build_user_prompt
-from cspd_stage1.schema import AttributeRecord, SampleRecord, validate_attribute_payload
+from cspd_stage1.schema import (
+    SampleRecord,
+    extract_attribute_mapping,
+    get_slot_schema,
+    infer_archetype,
+    normalize_attributes,
+    validate_attribute_payload,
+)
 from cspd_stage1.vlm.base import BaseVLMClient
 from cspd_stage1.vlm.factory import create_vlm_client
 
@@ -53,17 +49,13 @@ class Stage1Config:
     device_map: str = "auto"
     use_fast_processor: bool = True
     max_new_tokens: int = 256
+    class_name_map: str | None = None
 
 
 def run_stage1(config: Stage1Config) -> dict[str, Any]:
-    """Run attribute extraction over an ImageFolder-style dataset.
-
-    Output artifacts:
-    - attributes.jsonl: successful extractions
-    - failed_samples.jsonl: failures that need inspection or rerun
-    - stage1_stats.json: high-level summary for quick debugging
-    """
-    samples = build_samples_from_imagefolder(config.dataset_root)
+    """Run attribute extraction over an ImageFolder-style dataset."""
+    class_name_map = load_class_name_map(config.class_name_map)
+    samples = build_samples_from_imagefolder(config.dataset_root, class_name_map)
     client = create_vlm_client(
         config.backend,
         model_name=config.model_name,
@@ -84,7 +76,10 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
             "sample_id": sample.sample_id,
             "image_path": sample.image_path,
             "class_id": sample.class_id,
+            "class_name_raw": sample.class_name_raw,
             "class_name": sample.class_name,
+            "archetype": sample.archetype,
+            "slot_schema": sample.slot_schema,
         }
         if result["status"] == "success":
             row = {
@@ -126,18 +121,38 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
         "model_name": config.model_name,
         "torch_dtype": config.torch_dtype,
         "device_map": config.device_map,
-        "num_classes": len({sample.class_name for sample in samples}),
+        "num_classes": len({sample.class_name_raw for sample in samples}),
+        "class_name_map": config.class_name_map,
+        "archetypes": sorted({sample.archetype for sample in samples}),
     }
     write_json(output_dir / "stage1_stats.json", stats)
     return stats
 
 
-def build_samples_from_imagefolder(dataset_root: str) -> list[SampleRecord]:
-    """Scan an ImageFolder-style dataset and build Stage 1 sample records.
+def load_class_name_map(path: str | None) -> dict[str, str]:
+    """Load an optional class-name mapping JSON file.
 
-    Class ids are assigned by sorting subdirectory names alphabetically, which is
-    deterministic and matches common ImageFolder conventions.
+    Expected format:
+        {"n01440764": "tench, Tinca tinca", ...}
     """
+    if path is None:
+        return {}
+    mapping_path = Path(path)
+    if not mapping_path.exists():
+        raise FileNotFoundError(f"Class-name map not found: {mapping_path}")
+    payload = json.loads(mapping_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise ValueError("Class-name map must be a JSON object")
+    normalized: dict[str, str] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError("Class-name map must be a string-to-string mapping")
+        normalized[key] = value
+    return normalized
+
+
+def build_samples_from_imagefolder(dataset_root: str, class_name_map: dict[str, str]) -> list[SampleRecord]:
+    """Scan an ImageFolder-style dataset and build Stage 1 sample records."""
     root = Path(dataset_root)
     if not root.exists():
         raise FileNotFoundError(f"Dataset root not found: {root}")
@@ -150,7 +165,10 @@ def build_samples_from_imagefolder(dataset_root: str) -> list[SampleRecord]:
 
     samples: list[SampleRecord] = []
     for class_id, class_dir in enumerate(class_dirs):
-        class_name = class_dir.name
+        class_name_raw = class_dir.name
+        class_name = class_name_map.get(class_name_raw, class_name_raw)
+        archetype = infer_archetype(class_name)
+        slot_schema = get_slot_schema(archetype)
         image_files = sorted(
             [path for path in class_dir.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS]
         )
@@ -161,6 +179,9 @@ def build_samples_from_imagefolder(dataset_root: str) -> list[SampleRecord]:
                     image_path=str(image_path),
                     class_id=class_id,
                     class_name=class_name,
+                    class_name_raw=class_name_raw,
+                    archetype=archetype,
+                    slot_schema=list(slot_schema),
                     sample_id=sample_id,
                 )
             )
@@ -171,16 +192,10 @@ def build_samples_from_imagefolder(dataset_root: str) -> list[SampleRecord]:
 
 
 def _process_sample(sample: SampleRecord, client: BaseVLMClient, max_retries: int) -> dict[str, Any]:
-    """Run extraction for a single sample with retry and schema validation.
-
-    We treat malformed payloads and backend exceptions the same way at the
-    control-flow level: retry a limited number of times, then mark the sample as
-    failed with the last observed error.
-    """
+    """Run extraction for a single sample with retry and schema validation."""
     system_prompt = SYSTEM_PROMPT
     user_prompt = build_user_prompt(sample)
 
-    # `max_retries=2` means 1 initial attempt + 2 retries = 3 total tries.
     attempts = max_retries + 1
     last_error = ""
     last_raw = None
@@ -189,19 +204,18 @@ def _process_sample(sample: SampleRecord, client: BaseVLMClient, max_retries: in
         try:
             response = client.extract_attributes(sample, user_prompt=user_prompt, system_prompt=system_prompt)
             last_raw = response.raw_text
-            valid, errors = validate_attribute_payload(response.payload)
+            valid, errors = validate_attribute_payload(response.payload, sample.slot_schema)
             if not valid:
                 last_error = "; ".join(errors)
                 continue
-            attributes = AttributeRecord.from_dict(response.payload)
+            attribute_mapping = extract_attribute_mapping(response.payload)
+            attributes = normalize_attributes(attribute_mapping, sample.slot_schema)
             return {
                 "status": "success",
-                "attributes": attributes.to_dict(),
+                "attributes": attributes,
                 "raw_response": response.raw_text,
             }
         except Exception as exc:  # noqa: BLE001
-            # We keep broad exception capture here because backend integrations
-            # may fail in many messy ways: transport, auth, parsing, timeouts...
             last_error = str(exc)
 
     return {
@@ -212,16 +226,14 @@ def _process_sample(sample: SampleRecord, client: BaseVLMClient, max_retries: in
 
 
 def _build_progress_postfix(sample: SampleRecord, num_success: int, num_failed: int) -> str:
-    """Build a compact progress summary shown next to the tqdm bar."""
     sample_label = sample.sample_id or Path(sample.image_path).name
     return (
-        f"class={sample.class_name} | success={num_success} | failed={num_failed} | "
-        f"sample={_truncate_text(sample_label, 48)}"
+        f"class={sample.class_name_raw}→{sample.archetype} | success={num_success} | failed={num_failed} | "
+        f"sample={_truncate_text(sample_label, 36)}"
     )
 
 
 def _truncate_text(text: str, max_length: int) -> str:
-    """Shorten long sample ids so the progress bar stays readable."""
     if len(text) <= max_length:
         return text
     return text[: max_length - 3] + "..."
@@ -240,4 +252,5 @@ def config_from_args(args) -> Stage1Config:
         device_map=args.device_map,
         use_fast_processor=not args.disable_fast_processor,
         max_new_tokens=args.max_new_tokens,
+        class_name_map=args.class_name_map,
     )

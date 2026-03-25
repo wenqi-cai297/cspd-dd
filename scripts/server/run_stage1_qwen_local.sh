@@ -35,15 +35,26 @@ cd "$REPO_ROOT"
 
 mkdir -p "$OUTPUT_DIR"
 
-echo "[INFO] dataset_root: $DATASET_ROOT"
-echo "[INFO] output_dir:   $OUTPUT_DIR"
-echo "[INFO] max_tokens:   $MAX_NEW_TOKENS"
+echo "[INFO] dataset_root:   $DATASET_ROOT"
+echo "[INFO] output_dir:     $OUTPUT_DIR"
+echo "[INFO] max_tokens:     $MAX_NEW_TOKENS"
+if [[ -n "$CLASS_NAME_MAP" ]]; then
+  echo "[INFO] class_name_map: $CLASS_NAME_MAP"
+fi
 
-cspd-stage1 run \
-  --dataset-root "$DATASET_ROOT" \
-  --output-dir "$OUTPUT_DIR" \
-  --backend qwen_local \
-  --model-name "$MODEL_NAME" \
-  --torch-dtype "$TORCH_DTYPE" \
-  --device-map "$DEVICE_MAP" \
+CMD=(
+  cspd-stage1 run
+  --dataset-root "$DATASET_ROOT"
+  --output-dir "$OUTPUT_DIR"
+  --backend qwen_local
+  --model-name "$MODEL_NAME"
+  --torch-dtype "$TORCH_DTYPE"
+  --device-map "$DEVICE_MAP"
   --max-new-tokens "$MAX_NEW_TOKENS"
+)
+
+if [[ -n "$CLASS_NAME_MAP" ]]; then
+  CMD+=(--class-name-map "$CLASS_NAME_MAP")
+fi
+
+"${CMD[@]}"

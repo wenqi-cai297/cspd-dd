@@ -19,13 +19,15 @@ This script:
 bash scripts/server/run_stage1_qwen_local.sh /path/to/dataset
 ```
 
-Optional second argument:
-- `max_new_tokens`
+Optional arguments:
+- second argument: `max_new_tokens`
+- third argument: `class_name_map`
 
 Example:
 
 ```bash
 bash scripts/server/run_stage1_qwen_local.sh /data/cifar10_small 256
+bash scripts/server/run_stage1_qwen_local.sh /data/imagenette 256 /data/imagenette/classes.json
 ```
 
 The output directory is generated automatically as:
