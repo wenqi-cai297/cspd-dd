@@ -16,16 +16,22 @@ This script:
 ## 2. Run Stage 1 with the real local Qwen backend
 
 ```bash
-bash scripts/server/run_stage1_qwen_local.sh /path/to/dataset /path/to/output_dir
+bash scripts/server/run_stage1_qwen_local.sh /path/to/dataset
 ```
 
-Optional third argument:
+Optional second argument:
 - `max_new_tokens`
 
 Example:
 
 ```bash
-bash scripts/server/run_stage1_qwen_local.sh /data/cifar10_small runs/stage1_qwen 256
+bash scripts/server/run_stage1_qwen_local.sh /data/cifar10_small 256
+```
+
+The output directory is generated automatically as:
+
+```text
+runs/attributes/<dataset_name>/qwen_local/<timestamp>
 ```
 
 ## 3. Run Stage 1 with the mock backend

@@ -60,13 +60,16 @@ Example usage on the Linux GPU server:
 ```bash
 cspd-stage1 run \
   --dataset-root /path/to/imagefolder_dataset \
-  --output-dir runs/stage1_qwen \
+  --output-dir runs/attributes/my_dataset/qwen_local/2026-03-25_170000 \
   --backend qwen_local \
   --model-name Qwen/Qwen2.5-VL-7B-Instruct \
   --torch-dtype float16 \
   --device-map auto \
   --max-new-tokens 256
 ```
+
+If you use the provided shell helper instead, you only need to pass the dataset path
+(and optionally `max_new_tokens`); the output directory is generated automatically.
 
 Useful options:
 - `--disable-fast-processor`: use the slower processor path if the fast processor behaves oddly
