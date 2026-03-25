@@ -3,32 +3,44 @@ from __future__ import annotations
 """Main execution pipeline for CSPD Stage 1.
 
 This module ties together:
-- dataset loading,
+- ImageFolder-style dataset scanning,
 - prompt construction,
 - VLM invocation,
 - response validation / normalization,
 - artifact writing.
 
-The current implementation is intentionally conservative: correctness and clear
-artifacts matter more than premature optimization.
+The current implementation assumes the input dataset uses a simple ImageFolder
+layout:
+    dataset_root/
+      class_a/
+        img1.jpg
+        img2.jpg
+      class_b/
+        img3.jpg
+
+That assumption is deliberate for now because the user's current datasets all
+follow that structure, and there is no point pretending we need a general data
+abstraction layer before the actual method is even running.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from cspd_stage1.io_utils import read_jsonl, write_json, write_jsonl
+from cspd_stage1.io_utils import write_json, write_jsonl
 from cspd_stage1.prompting import SYSTEM_PROMPT, build_user_prompt
 from cspd_stage1.schema import AttributeRecord, SampleRecord, validate_attribute_payload
 from cspd_stage1.vlm.base import BaseVLMClient
 from cspd_stage1.vlm.factory import create_vlm_client
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
 @dataclass(slots=True)
 class Stage1Config:
     """Runtime configuration for Stage 1."""
 
-    input_path: str
+    dataset_root: str
     output_dir: str
     backend: str = "mock"
     max_retries: int = 2
@@ -41,15 +53,14 @@ class Stage1Config:
 
 
 def run_stage1(config: Stage1Config) -> dict[str, Any]:
-    """Run attribute extraction over the full input dataset.
+    """Run attribute extraction over an ImageFolder-style dataset.
 
     Output artifacts:
     - attributes.jsonl: successful extractions
     - failed_samples.jsonl: failures that need inspection or rerun
     - stage1_stats.json: high-level summary for quick debugging
     """
-    raw_samples = read_jsonl(config.input_path)
-    samples = [SampleRecord.from_dict(item) for item in raw_samples]
+    samples = build_samples_from_imagefolder(config.dataset_root)
     client = create_vlm_client(
         config.backend,
         model_name=config.model_name,
@@ -93,6 +104,7 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
     write_jsonl(output_dir / "attributes.jsonl", success_rows)
     write_jsonl(output_dir / "failed_samples.jsonl", failed_rows)
     stats = {
+        "dataset_root": str(Path(config.dataset_root).resolve()),
         "num_samples": len(samples),
         "num_success": len(success_rows),
         "num_failed": len(failed_rows),
@@ -101,9 +113,48 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
         "model_name": config.model_name,
         "torch_dtype": config.torch_dtype,
         "device_map": config.device_map,
+        "num_classes": len({sample.class_name for sample in samples}),
     }
     write_json(output_dir / "stage1_stats.json", stats)
     return stats
+
+
+def build_samples_from_imagefolder(dataset_root: str) -> list[SampleRecord]:
+    """Scan an ImageFolder-style dataset and build Stage 1 sample records.
+
+    Class ids are assigned by sorting subdirectory names alphabetically, which is
+    deterministic and matches common ImageFolder conventions.
+    """
+    root = Path(dataset_root)
+    if not root.exists():
+        raise FileNotFoundError(f"Dataset root not found: {root}")
+    if not root.is_dir():
+        raise NotADirectoryError(f"Dataset root is not a directory: {root}")
+
+    class_dirs = sorted([path for path in root.iterdir() if path.is_dir()], key=lambda p: p.name)
+    if not class_dirs:
+        raise ValueError(f"No class subdirectories found under dataset root: {root}")
+
+    samples: list[SampleRecord] = []
+    for class_id, class_dir in enumerate(class_dirs):
+        class_name = class_dir.name
+        image_files = sorted(
+            [path for path in class_dir.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS]
+        )
+        for image_path in image_files:
+            sample_id = str(image_path.relative_to(root)).replace("\\", "/")
+            samples.append(
+                SampleRecord(
+                    image_path=str(image_path),
+                    class_id=class_id,
+                    class_name=class_name,
+                    sample_id=sample_id,
+                )
+            )
+
+    if not samples:
+        raise ValueError(f"No image files found under dataset root: {root}")
+    return samples
 
 
 def _process_sample(sample: SampleRecord, client: BaseVLMClient, max_retries: int) -> dict[str, Any]:
@@ -150,7 +201,7 @@ def _process_sample(sample: SampleRecord, client: BaseVLMClient, max_retries: in
 def config_from_args(args) -> Stage1Config:
     """Map parsed CLI args into a structured config object."""
     return Stage1Config(
-        input_path=args.input,
+        dataset_root=args.dataset_root,
         output_dir=args.output_dir,
         backend=args.backend,
         max_retries=args.max_retries,

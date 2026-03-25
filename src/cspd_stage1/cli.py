@@ -19,7 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run Stage 1 attribute extraction")
-    run_parser.add_argument("--input", required=True, help="Path to input JSONL")
+    run_parser.add_argument(
+        "--dataset-root",
+        required=True,
+        help="Path to an ImageFolder-style dataset root. Each class must be a subdirectory.",
+    )
     run_parser.add_argument("--output-dir", required=True, help="Directory for output artifacts")
     run_parser.add_argument("--backend", default="mock", help="VLM backend name")
     run_parser.add_argument("--max-retries", type=int, default=2, help="Retries after initial attempt")

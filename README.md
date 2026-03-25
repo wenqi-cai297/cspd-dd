@@ -5,7 +5,7 @@ Minimal executable scaffold for **Stage 1: Attribute Extraction** in the CSPD-DD
 ## Current Stage 1 scope
 
 - Unified attribute schema
-- JSONL dataset input
+- Direct input from an **ImageFolder-style dataset root**
 - Pluggable VLM client interface
 - `mock` backend for local pipeline plumbing tests
 - `qwen_local` backend for real local GPU inference with Qwen2.5-VL
@@ -15,21 +15,25 @@ Minimal executable scaffold for **Stage 1: Attribute Extraction** in the CSPD-DD
   - `failed_samples.jsonl`
   - `stage1_stats.json`
 
-## Dataset input format
+## Expected dataset layout
 
-Input file must be a JSONL file with one sample per line:
+Stage 1 currently assumes a simple ImageFolder layout:
 
-```json
-{"sample_id":"000001","image_path":"/path/to/image.jpg","class_id":0,"class_name":"cat"}
+```text
+dataset_root/
+  class_a/
+    img1.jpg
+    img2.jpg
+  class_b/
+    img3.jpg
+    img4.png
 ```
 
-Required fields:
-- `image_path`
-- `class_id`
-- `class_name`
-
-Optional fields:
-- `sample_id`
+Notes:
+- each immediate subdirectory under `dataset_root` is treated as one class,
+- class ids are assigned by sorting class directory names alphabetically,
+- images are discovered recursively inside each class folder,
+- supported extensions: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.webp`.
 
 ## Local development quick start
 
@@ -42,7 +46,7 @@ pip install -e .
 Run with mock backend:
 
 ```bash
-cspd-stage1 run --input data/samples.jsonl --output-dir runs/stage1_mock --backend mock
+cspd-stage1 run --dataset-root path/to/dataset --output-dir runs/stage1_mock --backend mock
 ```
 
 ## Real local VLM backend
@@ -55,7 +59,7 @@ Example usage on the Linux GPU server:
 
 ```bash
 cspd-stage1 run \
-  --input data/samples.jsonl \
+  --dataset-root /path/to/imagefolder_dataset \
   --output-dir runs/stage1_qwen \
   --backend qwen_local \
   --model-name Qwen/Qwen2.5-VL-7B-Instruct \
@@ -80,4 +84,4 @@ Two helper scripts are included under `scripts/vlm/`:
 - `mock` backend is for plumbing tests only.
 - `qwen_local` is intended for server-side GPU execution.
 - The pipeline enforces a unified schema and writes `unknown` / `not_applicable` / `null` when appropriate.
-- Real large-scale runs should start with a small batch first to inspect speed, failure rate, and output quality.
+- Real large-scale runs should still start with a small dataset slice first to inspect speed, failure rate, and output quality.
