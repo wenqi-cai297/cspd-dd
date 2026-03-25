@@ -1,13 +1,14 @@
-# CSPD Stage 1
+# CSPD-DD
 
-Minimal executable scaffold for **Stage 1: Attribute Extraction** in the CSPD pipeline.
+Minimal executable scaffold for **Stage 1: Attribute Extraction** in the CSPD-DD pipeline.
 
-## Current scope
+## Current Stage 1 scope
 
 - Unified attribute schema
 - JSONL dataset input
 - Pluggable VLM client interface
-- Deterministic mock backend for local pipeline testing
+- `mock` backend for local pipeline plumbing tests
+- `qwen_local` backend for real local GPU inference with Qwen2.5-VL
 - Retry + validation + failure logging
 - Outputs:
   - `attributes.jsonl`
@@ -27,10 +28,10 @@ Required fields:
 - `class_id`
 - `class_name`
 
-Optional:
+Optional fields:
 - `sample_id`
 
-## Quick start
+## Local development quick start
 
 ```bash
 python -m venv .venv
@@ -41,11 +42,42 @@ pip install -e .
 Run with mock backend:
 
 ```bash
-cspd-stage1 run --input data/samples.jsonl --output-dir runs/stage1 --backend mock
+cspd-stage1 run --input data/samples.jsonl --output-dir runs/stage1_mock --backend mock
 ```
+
+## Real local VLM backend
+
+The repository now includes a real local backend:
+- backend name: `qwen_local`
+- default model: `Qwen/Qwen2.5-VL-7B-Instruct`
+
+Example usage on the Linux GPU server:
+
+```bash
+cspd-stage1 run \
+  --input data/samples.jsonl \
+  --output-dir runs/stage1_qwen \
+  --backend qwen_local \
+  --model-name Qwen/Qwen2.5-VL-7B-Instruct \
+  --torch-dtype float16 \
+  --device-map auto \
+  --max-new-tokens 256
+```
+
+Useful options:
+- `--disable-fast-processor`: use the slower processor path if the fast processor behaves oddly
+- `--no-raw-response`: skip saving raw model text in success rows
+
+## VLM smoke-test scripts
+
+Two helper scripts are included under `scripts/vlm/`:
+
+- `test_qwen_vl_load.py`: verify the local Qwen model loads on the server
+- `test_single_image_infer.py`: run one image through the local VLM and inspect JSON output
 
 ## Notes
 
 - `mock` backend is for plumbing tests only.
-- Real VLM integration should be implemented by adding a new client under `src/cspd_stage1/vlm/`.
+- `qwen_local` is intended for server-side GPU execution.
 - The pipeline enforces a unified schema and writes `unknown` / `not_applicable` / `null` when appropriate.
+- Real large-scale runs should start with a small batch first to inspect speed, failure rate, and output quality.

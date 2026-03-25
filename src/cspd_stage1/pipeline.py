@@ -20,6 +20,7 @@ from typing import Any
 from cspd_stage1.io_utils import read_jsonl, write_json, write_jsonl
 from cspd_stage1.prompting import SYSTEM_PROMPT, build_user_prompt
 from cspd_stage1.schema import AttributeRecord, SampleRecord, validate_attribute_payload
+from cspd_stage1.vlm.base import BaseVLMClient
 from cspd_stage1.vlm.factory import create_vlm_client
 
 
@@ -32,6 +33,11 @@ class Stage1Config:
     backend: str = "mock"
     max_retries: int = 2
     save_raw_response: bool = True
+    model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct"
+    torch_dtype: str = "float16"
+    device_map: str = "auto"
+    use_fast_processor: bool = True
+    max_new_tokens: int = 256
 
 
 def run_stage1(config: Stage1Config) -> dict[str, Any]:
@@ -44,7 +50,14 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
     """
     raw_samples = read_jsonl(config.input_path)
     samples = [SampleRecord.from_dict(item) for item in raw_samples]
-    client = create_vlm_client(config.backend)
+    client = create_vlm_client(
+        config.backend,
+        model_name=config.model_name,
+        torch_dtype=config.torch_dtype,
+        device_map=config.device_map,
+        use_fast_processor=config.use_fast_processor,
+        max_new_tokens=config.max_new_tokens,
+    )
 
     success_rows: list[dict[str, Any]] = []
     failed_rows: list[dict[str, Any]] = []
@@ -85,12 +98,15 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
         "num_failed": len(failed_rows),
         "backend": config.backend,
         "max_retries": config.max_retries,
+        "model_name": config.model_name,
+        "torch_dtype": config.torch_dtype,
+        "device_map": config.device_map,
     }
     write_json(output_dir / "stage1_stats.json", stats)
     return stats
 
 
-def _process_sample(sample: SampleRecord, client, max_retries: int) -> dict[str, Any]:
+def _process_sample(sample: SampleRecord, client: BaseVLMClient, max_retries: int) -> dict[str, Any]:
     """Run extraction for a single sample with retry and schema validation.
 
     We treat malformed payloads and backend exceptions the same way at the
@@ -139,4 +155,9 @@ def config_from_args(args) -> Stage1Config:
         backend=args.backend,
         max_retries=args.max_retries,
         save_raw_response=not args.no_raw_response,
+        model_name=args.model_name,
+        torch_dtype=args.torch_dtype,
+        device_map=args.device_map,
+        use_fast_processor=not args.disable_fast_processor,
+        max_new_tokens=args.max_new_tokens,
     )

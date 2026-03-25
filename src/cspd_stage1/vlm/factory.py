@@ -8,6 +8,7 @@ Real model integrations can be added later without rewriting pipeline logic.
 
 from cspd_stage1.vlm.base import BaseVLMClient
 from cspd_stage1.vlm.mock import MockVLMClient
+from cspd_stage1.vlm.qwen_local import QwenLocalVLMClient
 
 
 class UnsupportedBackendError(ValueError):
@@ -29,15 +30,31 @@ class PlaceholderVLMClient(BaseVLMClient):
         )
 
 
-def create_vlm_client(backend: str) -> BaseVLMClient:
+def create_vlm_client(
+    backend: str,
+    *,
+    model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct",
+    torch_dtype: str = "float16",
+    device_map: str = "auto",
+    use_fast_processor: bool = True,
+    max_new_tokens: int = 256,
+) -> BaseVLMClient:
     """Instantiate the requested backend implementation.
 
-    Today only `mock` is real. The named placeholders are here so the config/API
-    shape is already frozen before we wire an actual provider.
+    The extra keyword arguments are ignored by lightweight backends like `mock`
+    but consumed by real local model backends such as `qwen_local`.
     """
     backend = backend.lower().strip()
     if backend == "mock":
         return MockVLMClient()
+    if backend == "qwen_local":
+        return QwenLocalVLMClient(
+            model_name=model_name,
+            torch_dtype=torch_dtype,
+            device_map=device_map,
+            use_fast_processor=use_fast_processor,
+            max_new_tokens=max_new_tokens,
+        )
     if backend in {"openai", "qwen-vl", "internvl", "llava", "claude-vision"}:
         return PlaceholderVLMClient(backend)
     raise UnsupportedBackendError(f"Unsupported backend: {backend}")

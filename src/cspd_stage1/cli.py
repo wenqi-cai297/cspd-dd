@@ -24,6 +24,32 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--backend", default="mock", help="VLM backend name")
     run_parser.add_argument("--max-retries", type=int, default=2, help="Retries after initial attempt")
     run_parser.add_argument("--no-raw-response", action="store_true", help="Do not persist raw backend text")
+    run_parser.add_argument(
+        "--model-name",
+        default="Qwen/Qwen2.5-VL-7B-Instruct",
+        help="Model identifier used by local real backends such as qwen_local",
+    )
+    run_parser.add_argument(
+        "--torch-dtype",
+        default="float16",
+        help="Torch dtype for local model loading: float16, bfloat16, or float32",
+    )
+    run_parser.add_argument(
+        "--device-map",
+        default="auto",
+        help="Transformers device_map for local model loading",
+    )
+    run_parser.add_argument(
+        "--disable-fast-processor",
+        action="store_true",
+        help="Use the slow processor implementation instead of the fast default",
+    )
+    run_parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=256,
+        help="Generation cap for local VLM backends",
+    )
     return parser
 
 
