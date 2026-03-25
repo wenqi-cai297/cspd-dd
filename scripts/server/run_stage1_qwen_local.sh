@@ -26,7 +26,15 @@ DEVICE_MAP="auto"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-DATASET_NAME="$(basename "$DATASET_ROOT")"
+# If the user passes a split directory like .../ImageNette/train, use the parent
+# dataset directory name (`ImageNette`) instead of the split name (`train`).
+DATASET_BASENAME="$(basename "$DATASET_ROOT")"
+DATASET_PARENT_BASENAME="$(basename "$(dirname "$DATASET_ROOT")")"
+if [[ "$DATASET_BASENAME" == "train" || "$DATASET_BASENAME" == "val" || "$DATASET_BASENAME" == "test" ]]; then
+  DATASET_NAME="$DATASET_PARENT_BASENAME"
+else
+  DATASET_NAME="$DATASET_BASENAME"
+fi
 TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
 OUTPUT_DIR="runs/attributes/${DATASET_NAME}/qwen_local/${TIMESTAMP}"
 
