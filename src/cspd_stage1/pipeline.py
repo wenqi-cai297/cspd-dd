@@ -7,7 +7,8 @@ This module ties together:
 - prompt construction,
 - VLM invocation,
 - response validation / normalization,
-- artifact writing.
+- artifact writing,
+- progress reporting for long-running CLI jobs.
 
 The current implementation assumes the input dataset uses a simple ImageFolder
 layout:
@@ -26,6 +27,8 @@ abstraction layer before the actual method is even running.
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from tqdm.auto import tqdm
 
 from cspd_stage1.io_utils import write_json, write_jsonl
 from cspd_stage1.prompting import SYSTEM_PROMPT, build_user_prompt
@@ -73,7 +76,9 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
     success_rows: list[dict[str, Any]] = []
     failed_rows: list[dict[str, Any]] = []
 
-    for sample in samples:
+    progress = tqdm(samples, desc="Stage1 attribute extraction", unit="img", dynamic_ncols=True)
+    for index, sample in enumerate(progress, start=1):
+        progress.set_postfix_str(_build_progress_postfix(sample, len(success_rows), len(failed_rows)))
         result = _process_sample(sample=sample, client=client, max_retries=config.max_retries)
         base = {
             "sample_id": sample.sample_id,
@@ -99,6 +104,14 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
                     "raw_response": result.get("raw_response"),
                 }
             )
+
+        progress.set_postfix_str(_build_progress_postfix(sample, len(success_rows), len(failed_rows)))
+        if index == len(samples) or index % 10 == 0:
+            progress.write(
+                f"[progress] {index}/{len(samples)} done | success={len(success_rows)} | failed={len(failed_rows)}"
+            )
+
+    progress.close()
 
     output_dir = Path(config.output_dir)
     write_jsonl(output_dir / "attributes.jsonl", success_rows)
@@ -196,6 +209,22 @@ def _process_sample(sample: SampleRecord, client: BaseVLMClient, max_retries: in
         "error_message": last_error or "attribute extraction failed",
         "raw_response": last_raw,
     }
+
+
+def _build_progress_postfix(sample: SampleRecord, num_success: int, num_failed: int) -> str:
+    """Build a compact progress summary shown next to the tqdm bar."""
+    sample_label = sample.sample_id or Path(sample.image_path).name
+    return (
+        f"class={sample.class_name} | success={num_success} | failed={num_failed} | "
+        f"sample={_truncate_text(sample_label, 48)}"
+    )
+
+
+def _truncate_text(text: str, max_length: int) -> str:
+    """Shorten long sample ids so the progress bar stays readable."""
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 3] + "..."
 
 
 def config_from_args(args) -> Stage1Config:

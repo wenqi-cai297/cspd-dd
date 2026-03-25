@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Stage 1 attribute extraction scaffold for CSPD"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "tqdm>=4.66",
+]
 
 [project.scripts]
 cspd-stage1 = "cspd_stage1.cli:main"

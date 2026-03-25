@@ -10,6 +10,7 @@ Minimal executable scaffold for **Stage 1: Attribute Extraction** in the CSPD-DD
 - `mock` backend for local pipeline plumbing tests
 - `qwen_local` backend for real local GPU inference with Qwen2.5-VL
 - Retry + validation + failure logging
+- CLI progress bar with success / failure counters and current sample summary
 - Outputs:
   - `attributes.jsonl`
   - `failed_samples.jsonl`
