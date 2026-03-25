@@ -55,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSON file that maps raw folder labels (e.g. synset ids) to readable class names.",
     )
     run_parser.add_argument(
+        "--class-archetype-map",
+        default=None,
+        help="Optional JSON file that maps raw folder labels to frozen archetypes.",
+    )
+    run_parser.add_argument(
         "--flush-every",
         type=int,
         default=10,

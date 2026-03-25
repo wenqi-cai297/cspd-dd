@@ -79,6 +79,8 @@ If you use the provided shell helper instead, you only need to pass the dataset 
 Useful options:
 - `--disable-fast-processor`: use the slower processor path if the fast processor behaves oddly
 - `--no-raw-response`: skip saving raw model text in success rows
+- `--class-name-map /path/to/classes.json`: map raw folder labels such as `n01440764` to readable class names
+- `--class-archetype-map /path/to/class_to_archetype.json`: freeze raw folder labels to explicit archetypes before slot schema selection
 
 ## VLM smoke-test scripts
 

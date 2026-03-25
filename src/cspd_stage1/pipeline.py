@@ -5,6 +5,7 @@ from __future__ import annotations
 This module ties together:
 - ImageFolder-style dataset scanning,
 - optional class-label mapping for synset-style folders,
+- optional explicit class->archetype mapping,
 - class-adaptive slot schema selection,
 - VLM invocation,
 - response validation / normalization,
@@ -50,13 +51,15 @@ class Stage1Config:
     use_fast_processor: bool = True
     max_new_tokens: int = 256
     class_name_map: str | None = None
+    class_archetype_map: str | None = None
     flush_every: int = 10
 
 
 def run_stage1(config: Stage1Config) -> dict[str, Any]:
     """Run attribute extraction over an ImageFolder-style dataset."""
-    class_name_map = load_class_name_map(config.class_name_map)
-    samples = build_samples_from_imagefolder(config.dataset_root, class_name_map)
+    class_name_map = load_string_mapping(config.class_name_map, "class-name map")
+    class_archetype_map = load_string_mapping(config.class_archetype_map, "class-archetype map")
+    samples = build_samples_from_imagefolder(config.dataset_root, class_name_map, class_archetype_map)
     client = create_vlm_client(
         config.backend,
         model_name=config.model_name,
@@ -72,7 +75,6 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
     failed_path = output_dir / "failed_samples.jsonl"
     stats_path = output_dir / "stage1_stats.json"
 
-    # Start each run with fresh artifact files so append mode does not mix runs.
     write_jsonl(success_path, [])
     write_jsonl(failed_path, [])
 
@@ -145,7 +147,6 @@ def _flush_partial_results(
     pending_failed_rows: list[dict[str, Any]],
     stats: dict[str, Any],
 ) -> None:
-    """Flush newly produced rows and current stats to disk."""
     if pending_success_rows:
         append_jsonl(success_path, pending_success_rows)
         pending_success_rows.clear()
@@ -161,7 +162,6 @@ def _build_stats(
     success_rows: list[dict[str, Any]],
     failed_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Build a serializable stats snapshot for the current run state."""
     return {
         "dataset_root": str(Path(config.dataset_root).resolve()),
         "num_samples": len(samples),
@@ -174,30 +174,35 @@ def _build_stats(
         "device_map": config.device_map,
         "num_classes": len({sample.class_name_raw for sample in samples}),
         "class_name_map": config.class_name_map,
+        "class_archetype_map": config.class_archetype_map,
         "archetypes": sorted({sample.archetype for sample in samples}),
         "flush_every": config.flush_every,
     }
 
 
-def load_class_name_map(path: str | None) -> dict[str, str]:
-    """Load an optional class-name mapping JSON file."""
+def load_string_mapping(path: str | None, mapping_name: str) -> dict[str, str]:
+    """Load an optional string->string JSON mapping file."""
     if path is None:
         return {}
     mapping_path = Path(path)
     if not mapping_path.exists():
-        raise FileNotFoundError(f"Class-name map not found: {mapping_path}")
+        raise FileNotFoundError(f"{mapping_name} not found: {mapping_path}")
     payload = json.loads(mapping_path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict):
-        raise ValueError("Class-name map must be a JSON object")
+        raise ValueError(f"{mapping_name} must be a JSON object")
     normalized: dict[str, str] = {}
     for key, value in payload.items():
         if not isinstance(key, str) or not isinstance(value, str):
-            raise ValueError("Class-name map must be a string-to-string mapping")
+            raise ValueError(f"{mapping_name} must be a string-to-string mapping")
         normalized[key] = value
     return normalized
 
 
-def build_samples_from_imagefolder(dataset_root: str, class_name_map: dict[str, str]) -> list[SampleRecord]:
+def build_samples_from_imagefolder(
+    dataset_root: str,
+    class_name_map: dict[str, str],
+    class_archetype_map: dict[str, str],
+) -> list[SampleRecord]:
     """Scan an ImageFolder-style dataset and build Stage 1 sample records."""
     root = Path(dataset_root)
     if not root.exists():
@@ -213,7 +218,7 @@ def build_samples_from_imagefolder(dataset_root: str, class_name_map: dict[str, 
     for class_id, class_dir in enumerate(class_dirs):
         class_name_raw = class_dir.name
         class_name = class_name_map.get(class_name_raw, class_name_raw)
-        archetype = infer_archetype(class_name)
+        archetype = class_archetype_map.get(class_name_raw, infer_archetype(class_name))
         slot_schema = get_slot_schema(archetype)
         image_files = sorted(
             [path for path in class_dir.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS]
@@ -238,7 +243,6 @@ def build_samples_from_imagefolder(dataset_root: str, class_name_map: dict[str, 
 
 
 def _process_sample(sample: SampleRecord, client: BaseVLMClient, max_retries: int) -> dict[str, Any]:
-    """Run extraction for a single sample with retry and schema validation."""
     system_prompt = SYSTEM_PROMPT
     user_prompt = build_user_prompt(sample)
 
@@ -262,8 +266,6 @@ def _process_sample(sample: SampleRecord, client: BaseVLMClient, max_retries: in
                 "raw_response": response.raw_text,
             }
         except VLMOutputParseError as exc:
-            # Preserve the raw model output when JSON parsing fails so failed
-            # samples remain debuggable instead of collapsing into opaque errors.
             last_error = str(exc)
             last_raw = exc.raw_text
         except Exception as exc:  # noqa: BLE001
@@ -291,7 +293,6 @@ def _truncate_text(text: str, max_length: int) -> str:
 
 
 def config_from_args(args) -> Stage1Config:
-    """Map parsed CLI args into a structured config object."""
     return Stage1Config(
         dataset_root=args.dataset_root,
         output_dir=args.output_dir,
@@ -304,5 +305,6 @@ def config_from_args(args) -> Stage1Config:
         use_fast_processor=not args.disable_fast_processor,
         max_new_tokens=args.max_new_tokens,
         class_name_map=args.class_name_map,
+        class_archetype_map=args.class_archetype_map,
         flush_every=args.flush_every,
     )
