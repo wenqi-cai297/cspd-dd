@@ -261,6 +261,11 @@ def _process_sample(sample: SampleRecord, client: BaseVLMClient, max_retries: in
                 "attributes": attributes,
                 "raw_response": response.raw_text,
             }
+        except VLMOutputParseError as exc:
+            # Preserve the raw model output when JSON parsing fails so failed
+            # samples remain debuggable instead of collapsing into opaque errors.
+            last_error = str(exc)
+            last_raw = exc.raw_text
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
 
