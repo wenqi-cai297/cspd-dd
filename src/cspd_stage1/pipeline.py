@@ -29,7 +29,7 @@ from cspd_stage1.schema import (
     normalize_attributes,
     validate_attribute_payload,
 )
-from cspd_stage1.vlm.base import BaseVLMClient
+from cspd_stage1.vlm.base import BaseVLMClient, VLMOutputParseError
 from cspd_stage1.vlm.factory import create_vlm_client
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -298,6 +298,10 @@ def config_from_args(args) -> Stage1Config:
         device_map=args.device_map,
         use_fast_processor=not args.disable_fast_processor,
         max_new_tokens=args.max_new_tokens,
+        class_name_map=args.class_name_map,
+        flush_every=args.flush_every,
+    )
+ns,
         class_name_map=args.class_name_map,
         flush_every=args.flush_every,
     )

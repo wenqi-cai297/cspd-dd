@@ -22,6 +22,19 @@ class VLMResponse:
     raw_text: str | None = None
 
 
+class VLMOutputParseError(ValueError):
+    """Raised when a backend produced text but the text could not be parsed.
+
+    We carry `raw_text` with the exception so Stage 1 can preserve failed model
+    output inside `failed_samples.jsonl` instead of dropping the most useful
+    debugging signal.
+    """
+
+    def __init__(self, message: str, raw_text: str | None = None):
+        super().__init__(message)
+        self.raw_text = raw_text
+
+
 class BaseVLMClient(ABC):
     """Common interface all concrete VLM clients must implement."""
 

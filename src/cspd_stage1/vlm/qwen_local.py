@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-"""Local Qwen2.5-VL backend for Stage 1 attribute extraction.
-
-This backend is meant for server-side execution where the model is loaded from
-Hugging Face and run on local GPUs. The model/processor are loaded lazily in the
-constructor so the rest of the pipeline can stay backend-agnostic.
-"""
+"""Local Qwen2.5-VL backend for Stage 1 attribute extraction."""
 
 from pathlib import Path
 
 from PIL import Image
 
 from cspd_stage1.schema import SampleRecord
-from cspd_stage1.vlm.base import BaseVLMClient, VLMResponse
+from cspd_stage1.vlm.base import BaseVLMClient, VLMOutputParseError, VLMResponse
 from cspd_stage1.vlm.json_utils import parse_json_object
 
 
@@ -33,8 +28,6 @@ class QwenLocalVLMClient(BaseVLMClient):
         self.use_fast_processor = use_fast_processor
         self.max_new_tokens = max_new_tokens
 
-        # Import transformers/torch lazily so the mock backend and lightweight
-        # local checks do not require heavyweight GPU dependencies.
         import torch
         from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
@@ -79,7 +72,6 @@ class QwenLocalVLMClient(BaseVLMClient):
             padding=True,
             return_tensors="pt",
         )
-
         inputs = {
             key: value.to(self._model.device) if hasattr(value, "to") else value
             for key, value in inputs.items()
@@ -99,11 +91,13 @@ class QwenLocalVLMClient(BaseVLMClient):
             clean_up_tokenization_spaces=False,
         )[0]
 
-        payload = parse_json_object(output_text)
+        try:
+            payload = parse_json_object(output_text)
+        except Exception as exc:  # noqa: BLE001
+            raise VLMOutputParseError(str(exc), raw_text=output_text) from exc
         return VLMResponse(payload=payload, raw_text=output_text)
 
     def _resolve_torch_dtype(self, torch_dtype: str):
-        """Map a user-friendly dtype string into a torch dtype object."""
         normalized = torch_dtype.strip().lower()
         mapping = {
             "float16": self._torch.float16,
