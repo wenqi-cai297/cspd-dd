@@ -79,6 +79,14 @@ Two helper scripts are included under `scripts/vlm/`:
 - `test_qwen_vl_load.py`: verify the local Qwen model loads on the server
 - `test_single_image_infer.py`: run one image through the local VLM and inspect JSON output
 
+## Server shell scripts
+
+To avoid repeatedly typing the same CLI commands on the server, helper shell scripts are included under `scripts/server/`:
+
+- `setup_cspd_stage1.sh`: activate `cspd_vlm`, install the repo with `pip install -e .`, and check the CLI
+- `run_stage1_qwen_local.sh`: run Stage 1 on an ImageFolder dataset with the real local Qwen backend
+- `run_stage1_mock.sh`: quick mock-backend plumbing run
+
 ## Notes
 
 - `mock` backend is for plumbing tests only.
