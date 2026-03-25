@@ -301,7 +301,3 @@ def config_from_args(args) -> Stage1Config:
         class_name_map=args.class_name_map,
         flush_every=args.flush_every,
     )
-ns,
-        class_name_map=args.class_name_map,
-        flush_every=args.flush_every,
-    )
