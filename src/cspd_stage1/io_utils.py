@@ -40,6 +40,19 @@ def write_jsonl(path: str | Path, rows: Iterable[dict]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def append_jsonl(path: str | Path, rows: Iterable[dict]) -> None:
+    """Append rows to an existing JSONL file.
+
+    This is used for long-running Stage 1 jobs so partial results become visible
+    on disk before the full dataset finishes.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def write_json(path: str | Path, payload: dict) -> None:
     """Write a pretty-printed JSON file for human inspection and debugging."""
     path = Path(path)

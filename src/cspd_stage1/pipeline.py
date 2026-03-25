@@ -8,7 +8,7 @@ This module ties together:
 - class-adaptive slot schema selection,
 - VLM invocation,
 - response validation / normalization,
-- artifact writing,
+- incremental artifact writing,
 - progress reporting for long-running CLI jobs.
 """
 
@@ -19,7 +19,7 @@ from typing import Any
 
 from tqdm.auto import tqdm
 
-from cspd_stage1.io_utils import write_json, write_jsonl
+from cspd_stage1.io_utils import append_jsonl, write_json, write_jsonl
 from cspd_stage1.prompting import SYSTEM_PROMPT, build_user_prompt
 from cspd_stage1.schema import (
     SampleRecord,
@@ -50,6 +50,7 @@ class Stage1Config:
     use_fast_processor: bool = True
     max_new_tokens: int = 256
     class_name_map: str | None = None
+    flush_every: int = 10
 
 
 def run_stage1(config: Stage1Config) -> dict[str, Any]:
@@ -65,8 +66,20 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
         max_new_tokens=config.max_new_tokens,
     )
 
+    output_dir = Path(config.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    success_path = output_dir / "attributes.jsonl"
+    failed_path = output_dir / "failed_samples.jsonl"
+    stats_path = output_dir / "stage1_stats.json"
+
+    # Start each run with fresh artifact files so append mode does not mix runs.
+    write_jsonl(success_path, [])
+    write_jsonl(failed_path, [])
+
     success_rows: list[dict[str, Any]] = []
     failed_rows: list[dict[str, Any]] = []
+    pending_success_rows: list[dict[str, Any]] = []
+    pending_failed_rows: list[dict[str, Any]] = []
 
     progress = tqdm(samples, desc="Stage1 attribute extraction", unit="img", dynamic_ncols=True)
     for index, sample in enumerate(progress, start=1):
@@ -90,28 +103,66 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
             if config.save_raw_response:
                 row["raw_response"] = result.get("raw_response")
             success_rows.append(row)
+            pending_success_rows.append(row)
         else:
-            failed_rows.append(
-                {
-                    **base,
-                    "extraction_status": "failed",
-                    "error_message": result.get("error_message", "unknown error"),
-                    "raw_response": result.get("raw_response"),
-                }
-            )
+            row = {
+                **base,
+                "extraction_status": "failed",
+                "error_message": result.get("error_message", "unknown error"),
+                "raw_response": result.get("raw_response"),
+            }
+            failed_rows.append(row)
+            pending_failed_rows.append(row)
 
         progress.set_postfix_str(_build_progress_postfix(sample, len(success_rows), len(failed_rows)))
-        if index == len(samples) or index % 10 == 0:
+        should_flush = index == len(samples) or index % max(config.flush_every, 1) == 0
+        if should_flush:
+            _flush_partial_results(
+                success_path=success_path,
+                failed_path=failed_path,
+                stats_path=stats_path,
+                pending_success_rows=pending_success_rows,
+                pending_failed_rows=pending_failed_rows,
+                stats=_build_stats(config, samples, success_rows, failed_rows),
+            )
             progress.write(
                 f"[progress] {index}/{len(samples)} done | success={len(success_rows)} | failed={len(failed_rows)}"
             )
 
     progress.close()
 
-    output_dir = Path(config.output_dir)
-    write_jsonl(output_dir / "attributes.jsonl", success_rows)
-    write_jsonl(output_dir / "failed_samples.jsonl", failed_rows)
-    stats = {
+    final_stats = _build_stats(config, samples, success_rows, failed_rows)
+    write_json(stats_path, final_stats)
+    return final_stats
+
+
+def _flush_partial_results(
+    *,
+    success_path: Path,
+    failed_path: Path,
+    stats_path: Path,
+    pending_success_rows: list[dict[str, Any]],
+    pending_failed_rows: list[dict[str, Any]],
+    stats: dict[str, Any],
+) -> None:
+    """Flush newly produced rows and current stats to disk."""
+    if pending_success_rows:
+        append_jsonl(success_path, pending_success_rows)
+        pending_success_rows.clear()
+    if pending_failed_rows:
+        append_jsonl(failed_path, pending_failed_rows)
+        pending_failed_rows.clear()
+    write_json(stats_path, stats)
+
+
+def _build_stats(
+    config: Stage1Config,
+    samples: list[SampleRecord],
+    success_rows: list[dict[str, Any]],
+    failed_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build a serializable stats snapshot for the current run state."""
+    return {
         "dataset_root": str(Path(config.dataset_root).resolve()),
         "num_samples": len(samples),
         "num_success": len(success_rows),
@@ -124,17 +175,12 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
         "num_classes": len({sample.class_name_raw for sample in samples}),
         "class_name_map": config.class_name_map,
         "archetypes": sorted({sample.archetype for sample in samples}),
+        "flush_every": config.flush_every,
     }
-    write_json(output_dir / "stage1_stats.json", stats)
-    return stats
 
 
 def load_class_name_map(path: str | None) -> dict[str, str]:
-    """Load an optional class-name mapping JSON file.
-
-    Expected format:
-        {"n01440764": "tench, Tinca tinca", ...}
-    """
+    """Load an optional class-name mapping JSON file."""
     if path is None:
         return {}
     mapping_path = Path(path)
@@ -253,4 +299,5 @@ def config_from_args(args) -> Stage1Config:
         use_fast_processor=not args.disable_fast_processor,
         max_new_tokens=args.max_new_tokens,
         class_name_map=args.class_name_map,
+        flush_every=args.flush_every,
     )

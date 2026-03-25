@@ -13,6 +13,7 @@ Minimal executable scaffold for **Stage 1: Attribute Extraction** in the CSPD-DD
 - Class-adaptive slot schemas chosen from the class semantic archetype
 - Retry + validation + failure logging
 - CLI progress bar with success / failure counters and current sample summary
+- Incremental JSONL flushing so partial results are visible on disk during long runs
 - Outputs:
   - `attributes.jsonl`
   - `failed_samples.jsonl`

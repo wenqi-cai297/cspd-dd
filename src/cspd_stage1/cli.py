@@ -54,6 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional JSON file that maps raw folder labels (e.g. synset ids) to readable class names.",
     )
+    run_parser.add_argument(
+        "--flush-every",
+        type=int,
+        default=10,
+        help="Write partial JSONL results to disk every N samples.",
+    )
     return parser
 
 

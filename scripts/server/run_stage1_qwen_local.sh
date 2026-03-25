@@ -61,10 +61,15 @@ CMD=(
   --torch-dtype "$TORCH_DTYPE"
   --device-map "$DEVICE_MAP"
   --max-new-tokens "$MAX_NEW_TOKENS"
+  --flush-every "$FLUSH_EVERY"
 )
 
 if [[ -n "$CLASS_NAME_MAP" ]]; then
   CMD+=(--class-name-map "$CLASS_NAME_MAP")
+fi
+
+"${CMD[@]}"
+_MAP")
 fi
 
 "${CMD[@]}"
