@@ -9,6 +9,7 @@ Minimal executable scaffold for **Stage 1: Attribute Extraction** in the CSPD-DD
 - Pluggable VLM client interface
 - `mock` backend for local pipeline plumbing tests
 - `qwen_local` backend for real local GPU inference with Qwen2.5-VL
+- Prompting uses an explicit JSON template, plus a narrow fallback parser for bullet-style pseudo-JSON outputs
 - Optional class-name mapping for synset-style datasets such as ImageNette / ImageNet subsets
 - Class-adaptive slot schemas chosen from the class semantic archetype
 - Retry + validation + failure logging
