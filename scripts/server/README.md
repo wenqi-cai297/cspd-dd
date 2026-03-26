@@ -44,11 +44,10 @@ If you want Qwen to first propose a better archetype taxonomy from the full clas
 
 ```bash
 python scripts/data/generate_archetype_taxonomy_candidate_vlm.py \
-  --input /path/to/classes.json \
-  --output runs/prep/taxonomy_candidate.json
+  --input /path/to/classes.json
 ```
 
-This produces a taxonomy candidate JSON that you can review before freezing the final archetype list and class-to-archetype mapping.
+This now creates a timestamped task directory under `runs/taxonomy_tasks/`, writes a per-round summary file, incrementally builds `archetype_taxonomy_candidate.json`, performs conflict checks for newly proposed archetypes, and writes a final review JSON.
 
 ### 3. Run the full Stage 1 workflow end-to-end
 

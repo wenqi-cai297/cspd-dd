@@ -94,11 +94,10 @@ Before freezing a small archetype set, you can now ask Qwen to inspect the full 
 
 ```bash
 python scripts/data/generate_archetype_taxonomy_candidate_vlm.py \
-  --input /path/to/classes.json \
-  --output runs/prep/taxonomy_candidate.json
+  --input /path/to/classes.json
 ```
 
-This step is intended to support Stage 1 taxonomy design before locking in a final `class -> archetype` mapping.
+This step now creates a timestamped task directory under `runs/taxonomy_tasks/`, writes a summary JSON after each round, incrementally builds `archetype_taxonomy_candidate.json`, and records conflict checks before accepting new archetypes.
 
 ## Server shell scripts
 
