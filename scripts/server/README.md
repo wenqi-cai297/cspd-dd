@@ -75,7 +75,7 @@ This script performs the full chain:
 6. small mock smoke run on the first 3 classes with the first 10 images per class
 7. final `qwen_local` attribute extraction run
 
-The underlying `cspd-stage1 run` command now supports resume by default: if you rerun with the same output directory, it will read existing `attributes.jsonl` / `failed_samples.jsonl`, skip already processed records, and continue appending new results. Use `--no-resume` only if you intentionally want to restart from scratch.
+The underlying `cspd-stage1 run` command now supports resume by default: if you rerun with the same output directory, it will read existing `attributes.jsonl` / `failed_samples.jsonl`, skip previously successful records, retry records listed in `failed_samples.jsonl`, and continue appending new results. Use `--no-resume` only if you intentionally want to restart from scratch.
 
 If you omit the final sample-image argument, the script auto-picks the first image under the dataset root.
 

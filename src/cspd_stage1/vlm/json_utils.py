@@ -30,17 +30,32 @@ def clean_json_text(raw_text: str) -> str:
 def parse_json_object(raw_text: str) -> dict[str, Any]:
     """Parse a JSON object from VLM output text.
 
-    First try strict JSON parsing. If that fails, apply a very conservative
-    fallback for the specific pseudo-JSON pattern we have observed from the VLM:
-    bullet-style lines such as `- key: value` inside the `attributes` block.
+    First try strict JSON parsing. If that yields a top-level JSON list, accept
+    the first dictionary item as the payload. This makes Stage 1 tolerant to
+    outputs like `[ { ... } ]` or `[ { ... }, { ... } ]`.
+
+    If strict parsing fails, apply a conservative fallback parser for the
+    pseudo-JSON pattern we have observed from the VLM.
     """
     cleaned_text = clean_json_text(raw_text)
     try:
         parsed = json.loads(cleaned_text)
+        parsed = _coerce_top_level_list_to_object(parsed)
     except json.JSONDecodeError:
         parsed = _parse_bullet_style_attributes(cleaned_text)
     if not isinstance(parsed, dict):
         raise ValueError(f"Expected a JSON object, got {type(parsed).__name__}")
+    return parsed
+
+
+def _coerce_top_level_list_to_object(parsed: Any) -> Any:
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, dict):
+                return item
+        raise ValueError("Expected a JSON object or a list containing at least one object")
     return parsed
 
 

@@ -94,9 +94,14 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
     if config.resume and not failed_path.exists():
         write_jsonl(failed_path, [])
 
-    processed_record_ids = {
+    processed_success_record_ids = {
         str(row.get("record_id"))
-        for row in [*success_rows, *failed_rows]
+        for row in success_rows
+        if isinstance(row, dict) and row.get("record_id") is not None
+    }
+    failed_record_ids_to_retry = {
+        str(row.get("record_id"))
+        for row in failed_rows
         if isinstance(row, dict) and row.get("record_id") is not None
     }
 
@@ -104,8 +109,12 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
     pending_failed_rows: list[dict[str, Any]] = []
 
     samples_to_process = [
-        sample for sample in samples if _build_record_id(sample) not in processed_record_ids
+        sample for sample in samples if _build_record_id(sample) not in processed_success_record_ids
     ]
+
+    if config.resume and failed_record_ids_to_retry:
+        failed_rows = []
+        write_jsonl(failed_path, [])
 
     progress = tqdm(samples_to_process, desc="Stage1 attribute extraction", unit="img", dynamic_ncols=True)
     for index, sample in enumerate(progress, start=1):
@@ -141,15 +150,31 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
                 stats_path=stats_path,
                 pending_success_rows=pending_success_rows,
                 pending_failed_rows=pending_failed_rows,
-                stats=_build_stats(config, samples, success_rows, failed_rows, len(samples_to_process), len(processed_record_ids)),
+                stats=_build_stats(
+                    config,
+                    samples,
+                    success_rows,
+                    failed_rows,
+                    len(samples_to_process),
+                    len(processed_success_record_ids),
+                    len(failed_record_ids_to_retry),
+                ),
             )
             progress.write(
-                f"[progress] {index}/{len(samples_to_process)} new done | success={len(success_rows)} | failed={len(failed_rows)} | resumed={len(processed_record_ids)}"
+                f"[progress] {index}/{len(samples_to_process)} new done | success={len(success_rows)} | failed={len(failed_rows)} | resumed_success={len(processed_success_record_ids)} | retried_failed={len(failed_record_ids_to_retry)}"
             )
 
     progress.close()
 
-    final_stats = _build_stats(config, samples, success_rows, failed_rows, len(samples_to_process), len(processed_record_ids))
+    final_stats = _build_stats(
+        config,
+        samples,
+        success_rows,
+        failed_rows,
+        len(samples_to_process),
+        len(processed_success_record_ids),
+        len(failed_record_ids_to_retry),
+    )
     write_json(stats_path, final_stats)
     return final_stats
 
@@ -208,13 +233,15 @@ def _build_stats(
     success_rows: list[dict[str, Any]],
     failed_rows: list[dict[str, Any]],
     num_new_samples_attempted: int,
-    num_resumed_skipped: int,
+    num_resumed_skipped_success: int,
+    num_failed_retried: int,
 ) -> dict[str, Any]:
     return {
         "dataset_root": str(Path(config.dataset_root).resolve()),
         "num_samples_total": len(samples),
         "num_samples_attempted_this_run": num_new_samples_attempted,
-        "num_samples_skipped_via_resume": num_resumed_skipped,
+        "num_samples_skipped_via_resume_success": num_resumed_skipped_success,
+        "num_failed_samples_retried_this_run": num_failed_retried,
         "num_success_total": len(success_rows),
         "num_failed_total": len(failed_rows),
         "backend": config.backend,
