@@ -5,6 +5,7 @@ This script is designed to reduce single-step pressure on the VLM:
 2. Later rounds propose a few new archetypes at a time.
 3. Each round writes a summary file into a task-specific timestamp directory.
 4. Each new archetype is checked against existing ones for obvious conflicts before acceptance.
+5. Coverage is tracked programmatically so later rounds are pushed toward uncovered semantic regions.
 
 Outputs are stored under a task directory like:
     runs/taxonomy_tasks/2026-03-26_133500_taxonomy/
@@ -24,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from cspd_stage1.io_utils import append_jsonl, read_jsonl, write_json, write_jsonl
+from cspd_stage1.io_utils import append_jsonl, write_json, write_jsonl
 from cspd_stage1.vlm.json_utils import parse_json_object
 
 MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
@@ -32,6 +33,24 @@ SYSTEM_PROMPT = (
     "You are designing a semantic archetype taxonomy for image dataset classes. "
     "Return JSON only. Do not include markdown or explanations outside JSON."
 )
+
+COVERAGE_TARGETS = [
+    "animal",
+    "plant",
+    "food",
+    "vehicle",
+    "clothing",
+    "furniture",
+    "tool",
+    "device_or_appliance",
+    "container",
+    "instrument",
+    "structure_or_building",
+    "sports_or_toy",
+    "weapon",
+    "household_object",
+    "decorative_or_symbolic_object",
+]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--proposal-rounds",
         type=int,
-        default=4,
+        default=5,
         help="How many proposal rounds to run after the initial global summary round",
     )
     return parser
@@ -92,6 +111,27 @@ def load_local_qwen(model_name: str, torch_dtype: str, device_map: str):
 def build_classes_payload(classes: dict[str, str], max_classes_in_prompt: int) -> list[dict[str, str]]:
     items = list(classes.items())[:max_classes_in_prompt]
     return [{"raw_label": raw_label, "readable_name": readable_name} for raw_label, readable_name in items]
+
+
+def normalize_archetype_name(name: str) -> str:
+    return "_".join(name.strip().lower().split())
+
+
+def compute_coverage_state(accepted_archetypes: list[dict[str, Any]]) -> dict[str, list[str]]:
+    accepted_names = {normalize_archetype_name(str(item.get("name", ""))) for item in accepted_archetypes}
+    covered: list[str] = []
+    uncovered: list[str] = []
+    for target in COVERAGE_TARGETS:
+        if target in accepted_names:
+            covered.append(target)
+        else:
+            uncovered.append(target)
+    extra = sorted(name for name in accepted_names if name and name not in COVERAGE_TARGETS)
+    return {
+        "covered_targets": covered,
+        "uncovered_targets": uncovered,
+        "accepted_extra_names": extra,
+    }
 
 
 def build_round1_prompt(classes_payload: list[dict[str, str]]) -> str:
@@ -132,6 +172,7 @@ def build_proposal_prompt(
     classes_payload: list[dict[str, str]],
     latest_summary: dict[str, Any],
     accepted_archetypes: list[dict[str, Any]],
+    coverage_state: dict[str, list[str]],
     new_archetypes_per_round: int,
     round_index: int,
 ) -> str:
@@ -143,12 +184,13 @@ def build_proposal_prompt(
                 "definition": "mobile man-made transport categories with distinct physical form",
                 "inclusion_guidelines": ["cars, trucks, buses, boats, aircraft"],
                 "example_classes": ["sports car", "school bus", "airliner"],
-                "conflict_risk_with_existing": ["device"],
-                "why_needed": "covers a major non-animal semantic region",
+                "conflict_risk_with_existing": ["device_or_appliance"],
+                "why_needed": "covers a major uncovered semantic region",
+                "target_coverage_region": "vehicle",
             }
         ],
-        "remaining_regions_to_cover": ["plants", "furniture", "clothing"],
-        "notes": ["propose only a small number of new archetypes this round"],
+        "remaining_regions_to_cover": ["device_or_appliance", "container", "instrument"],
+        "notes": ["prioritize uncovered regions and avoid repeating accepted archetypes"],
     }
     return (
         f"You are continuing taxonomy design for round {round_index}.\n"
@@ -156,9 +198,15 @@ def build_proposal_prompt(
         "Important constraints:\n"
         "- Propose only archetypes at the same abstraction level as existing accepted archetypes\n"
         "- Do not create parent-child conflicts with accepted archetypes\n"
-        "- Prefer major uncovered semantic regions\n"
+        "- Do not repeat accepted archetypes or simple synonyms of them\n"
+        "- You MUST prioritize uncovered semantic regions listed below\n"
         f"- Propose at most {new_archetypes_per_round} new archetypes this round\n"
+        "- If a region is already covered, do not propose it again unless you can justify a necessary split\n"
         "- Return JSON only\n"
+        "Program-maintained covered targets:\n"
+        f"{json.dumps(coverage_state['covered_targets'], ensure_ascii=False, indent=2)}\n"
+        "Program-maintained uncovered targets:\n"
+        f"{json.dumps(coverage_state['uncovered_targets'], ensure_ascii=False, indent=2)}\n"
         "Current accepted archetypes:\n"
         f"{json.dumps(accepted_archetypes, ensure_ascii=False, indent=2)}\n"
         "Latest round summary:\n"
@@ -170,22 +218,31 @@ def build_proposal_prompt(
     )
 
 
-def build_review_prompt(classes_payload: list[dict[str, str]], accepted_archetypes: list[dict[str, Any]]) -> str:
+def build_review_prompt(
+    classes_payload: list[dict[str, str]],
+    accepted_archetypes: list[dict[str, Any]],
+    coverage_state: dict[str, list[str]],
+) -> str:
     template = {
         "coverage_assessment": {
             "animal_regions_covered": True,
             "non_animal_regions_covered": True,
-            "major_missing_regions": [],
+            "major_missing_regions": ["container", "instrument"],
         },
-        "overlap_risks": ["possible overlap between tool and device"],
+        "overlap_risks": ["possible overlap between tool and device_or_appliance"],
         "final_notes": ["taxonomy is usable as a candidate for manual review"],
     }
     return (
-        "Perform a final review of the current taxonomy candidate.\n"
+        "Perform a strict final review of the current taxonomy candidate.\n"
         "Check coverage, overlap, and abstraction-level consistency.\n"
-        "Do not invent new archetypes here unless necessary; focus on review.\n"
+        "You must explicitly mention major missing regions if they still appear uncovered.\n"
+        "Do not claim full coverage unless justified.\n"
         "Return JSON only in this exact top-level structure:\n"
         f"{json.dumps(template, ensure_ascii=False, indent=2)}\n"
+        "Program-maintained covered targets:\n"
+        f"{json.dumps(coverage_state['covered_targets'], ensure_ascii=False, indent=2)}\n"
+        "Program-maintained uncovered targets:\n"
+        f"{json.dumps(coverage_state['uncovered_targets'], ensure_ascii=False, indent=2)}\n"
         "Accepted archetypes:\n"
         f"{json.dumps(accepted_archetypes, ensure_ascii=False, indent=2)}\n"
         "Dataset classes:\n"
@@ -213,10 +270,6 @@ def run_text_round(model, processor, user_prompt: str, max_new_tokens: int) -> t
     )[0]
     payload = parse_json_object(output_text)
     return payload, output_text
-
-
-def normalize_archetype_name(name: str) -> str:
-    return "_".join(name.strip().lower().split())
 
 
 def conflict_check(candidate: dict[str, Any], accepted: list[dict[str, Any]]) -> dict[str, Any]:
@@ -295,17 +348,20 @@ def main() -> None:
             "classes_in_prompt": len(classes_payload),
             "summary": round1_payload,
             "accepted_archetype_count": len(accepted_archetypes),
+            "coverage_state": compute_coverage_state(accepted_archetypes),
             "raw_response": round1_raw,
         }
         write_json(task_dir / "round_001_summary.json", round1_summary)
         latest_summary = round1_summary
         round_index = 2
 
-    for proposal_round in range(args.proposal_rounds):
+    for _ in range(args.proposal_rounds):
+        coverage_state = compute_coverage_state(accepted_archetypes)
         proposal_prompt = build_proposal_prompt(
             classes_payload=classes_payload,
             latest_summary=latest_summary,
             accepted_archetypes=accepted_archetypes,
+            coverage_state=coverage_state,
             new_archetypes_per_round=args.new_archetypes_per_round,
             round_index=round_index,
         )
@@ -338,19 +394,22 @@ def main() -> None:
             "round_type": "proposal",
             "accepted_new_archetypes": accepted_this_round,
             "accepted_archetype_count": len(accepted_archetypes),
-            "remaining_regions_to_cover": proposal_payload.get("remaining_regions_to_cover", []),
+            "coverage_state": compute_coverage_state(accepted_archetypes),
+            "model_reported_remaining_regions": proposal_payload.get("remaining_regions_to_cover", []),
             "notes": proposal_payload.get("notes", []),
             "raw_response": proposal_raw,
         }
         write_json(task_dir / f"round_{round_index:03d}_summary.json", latest_summary)
         round_index += 1
 
-    review_prompt = build_review_prompt(classes_payload, accepted_archetypes)
+    coverage_state = compute_coverage_state(accepted_archetypes)
+    review_prompt = build_review_prompt(classes_payload, accepted_archetypes, coverage_state)
     review_payload, review_raw = run_text_round(model, processor, review_prompt, args.max_new_tokens)
     write_json(review_path, {
         "review": review_payload,
         "raw_response": review_raw,
         "accepted_archetype_count": len(accepted_archetypes),
+        "coverage_state": coverage_state,
     })
 
     print(f"[OK] Taxonomy task directory: {task_dir}")

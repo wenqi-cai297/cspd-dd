@@ -97,7 +97,7 @@ python scripts/data/generate_archetype_taxonomy_candidate_vlm.py \
   --input /path/to/classes.json
 ```
 
-This step now creates a timestamped task directory under `runs/taxonomy_tasks/`, writes a summary JSON after each round, incrementally builds `archetype_taxonomy_candidate.json`, and records conflict checks before accepting new archetypes.
+This step now creates a timestamped task directory under `runs/taxonomy_tasks/`, writes a summary JSON after each round, incrementally builds `archetype_taxonomy_candidate.json`, records conflict checks before accepting new archetypes, and programmatically tracks uncovered semantic regions to steer later rounds.
 
 ## Server shell scripts
 
