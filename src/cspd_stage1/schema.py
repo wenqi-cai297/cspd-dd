@@ -2,9 +2,8 @@ from __future__ import annotations
 
 """Core schema utilities for CSPD Stage 1.
 
-Stage 1 now supports class-adaptive slot schemas instead of forcing every image
-through one universal attribute template. The overall idea is:
-- infer a semantic archetype from the class name,
+Stage 1 uses class-adaptive slot schemas:
+- map each class to a fixed semantic archetype,
 - choose the slot family associated with that archetype,
 - ask the VLM to fill only those slots.
 """
@@ -14,18 +13,33 @@ from typing import Any
 
 ALLOWED_SPECIAL_VALUES = {"unknown", "not_applicable", None}
 
-# Slot schemas keyed by semantic archetype. The exact slot names are chosen to
-# be descriptive enough for downstream rendering while remaining short enough
-# for reliable VLM JSON generation.
 ARCHETYPE_SLOT_SCHEMAS: dict[str, list[str]] = {
     "animal": [
         "species_or_category",
-        "color",
+        "color_or_pattern",
         "body_trait",
         "pose_or_state",
         "background_or_habitat",
         "viewpoint",
-        "material",
+        "salient_part_or_focus",
+    ],
+    "plant_or_fungus": [
+        "plant_or_fungus_type",
+        "color",
+        "shape_or_growth_form",
+        "visible_part",
+        "growth_state",
+        "background_or_habitat",
+        "viewpoint",
+    ],
+    "food_and_drink": [
+        "food_or_drink_type",
+        "color",
+        "shape_or_structure",
+        "preparation_or_serving_style",
+        "container_or_context",
+        "viewpoint",
+        "salient_topping_or_ingredient",
     ],
     "vehicle": [
         "vehicle_type",
@@ -34,119 +48,160 @@ ARCHETYPE_SLOT_SCHEMAS: dict[str, list[str]] = {
         "state_or_action",
         "environment",
         "viewpoint",
-        "material",
+        "salient_part_or_accessory",
     ],
-    "food": [
-        "food_type",
-        "color",
-        "shape_or_structure",
-        "state_or_serving_style",
-        "container_or_context",
+    "clothing_and_wearable": [
+        "wearable_type",
+        "color_or_pattern",
+        "material_or_texture",
+        "shape_or_style",
+        "wearing_state_or_pose",
+        "background_or_context",
         "viewpoint",
+    ],
+    "furniture": [
+        "furniture_type",
+        "color",
         "material",
+        "shape_or_structure",
+        "usage_state",
+        "background_or_room_context",
+        "viewpoint",
+    ],
+    "container": [
+        "container_type",
+        "color",
+        "material",
+        "shape_or_structure",
+        "fill_state_or_contents_visibility",
+        "background_or_context",
+        "viewpoint",
+    ],
+    "tool": [
+        "tool_type",
+        "color",
+        "material",
+        "shape_or_structure",
+        "usage_state",
+        "background_or_context",
+        "viewpoint",
+    ],
+    "device_or_appliance": [
+        "device_or_appliance_type",
+        "color",
+        "material_or_finish",
+        "shape_or_structure",
+        "operating_state_or_display_state",
+        "background_or_context",
+        "viewpoint",
     ],
     "instrument": [
         "instrument_type",
         "color",
+        "material",
         "shape_or_structure",
         "playing_state_or_pose",
         "background_or_context",
         "viewpoint",
-        "material",
     ],
-    "generic_object": [
-        "object_type",
+    "weapon": [
+        "weapon_type",
         "color",
+        "material",
         "shape_or_structure",
-        "state_or_usage",
+        "usage_or_display_state",
         "background_or_context",
         "viewpoint",
+    ],
+    "sports_or_toy": [
+        "sports_or_toy_type",
+        "color_or_pattern",
         "material",
+        "shape_or_structure",
+        "activity_or_usage_state",
+        "background_or_context",
+        "viewpoint",
+    ],
+    "household_object": [
+        "household_object_type",
+        "color",
+        "material",
+        "shape_or_structure",
+        "usage_state",
+        "background_or_room_context",
+        "viewpoint",
+    ],
+    "structure_or_building": [
+        "structure_or_building_type",
+        "material_or_surface",
+        "architectural_style_or_form",
+        "scale_or_extent",
+        "surrounding_environment",
+        "viewpoint",
+        "salient_structural_part",
+    ],
+    "natural_scene_or_landform": [
+        "scene_or_landform_type",
+        "dominant_color_or_tone",
+        "terrain_or_surface_trait",
+        "weather_or_water_state",
+        "vegetation_or_natural_context",
+        "viewpoint",
+        "salient_geographic_feature",
+    ],
+    "human_or_person": [
+        "person_type_or_role",
+        "clothing_or_gear",
+        "body_pose_or_action",
+        "visible_body_trait",
+        "background_or_activity_context",
+        "viewpoint",
+        "held_object_or_equipment",
+    ],
+    "text_or_media_object": [
+        "text_or_media_object_type",
+        "dominant_color",
+        "layout_or_format",
+        "content_or_symbol_type",
+        "physical_or_display_state",
+        "background_or_context",
+        "viewpoint",
+    ],
+    "decorative_or_symbolic_object": [
+        "decorative_or_symbolic_object_type",
+        "color_or_pattern",
+        "material",
+        "ornamentation_or_symbolic_trait",
+        "display_or_usage_context",
+        "background_or_context",
+        "viewpoint",
     ],
 }
 
-DEFAULT_ARCHETYPE = "generic_object"
+DEFAULT_ARCHETYPE = "household_object"
 
-# Lightweight heuristics for mapping readable class names to semantic archetypes.
 ARCHETYPE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "animal": (
-        "dog",
-        "cat",
-        "bird",
-        "fish",
-        "tench",
-        "springer",
-        "shark",
-        "hen",
-        "cock",
-        "ostrich",
-        "snake",
-        "lizard",
-        "frog",
-        "monkey",
-        "bear",
-        "lion",
-        "tiger",
-        "wolf",
-        "fox",
-        "horse",
-        "sheep",
-        "cow",
-        "elephant",
-        "penguin",
-        "duck",
-        "eagle",
-        "ray",
-        "stingray",
+        "dog", "cat", "bird", "fish", "shark", "ray", "hen", "cock", "ostrich", "snake", "lizard",
+        "frog", "monkey", "bear", "lion", "tiger", "wolf", "fox", "horse", "sheep", "cow",
+        "elephant", "penguin", "duck", "eagle", "whale", "jellyfish", "crab", "lobster", "spider",
+    ),
+    "plant_or_fungus": (
+        "daisy", "corn", "acorn", "rapeseed", "fungus", "mushroom", "bolete", "earthstar", "flower",
+        "tree", "leaf", "plant", "cactus",
+    ),
+    "food_and_drink": (
+        "pizza", "hotdog", "banana", "apple", "orange", "burger", "cake", "bread", "ice cream",
+        "icecream", "espresso", "wine", "eggnog", "potpie", "burrito", "guacamole",
     ),
     "vehicle": (
-        "car",
-        "truck",
-        "bus",
-        "bicycle",
-        "bike",
-        "motorcycle",
-        "ship",
-        "boat",
-        "airplane",
-        "plane",
-        "train",
-        "locomotive",
-        "ambulance",
-        "taxi",
-        "jeep",
-        "van",
-        "tractor",
-        "submarine",
-        "scooter",
-    ),
-    "food": (
-        "pizza",
-        "hotdog",
-        "banana",
-        "apple",
-        "orange",
-        "sandwich",
-        "burger",
-        "cake",
-        "bread",
-        "ice cream",
-        "icecream",
-        "dish",
-        "plate",
+        "car", "truck", "bus", "bicycle", "bike", "motorcycle", "ship", "boat", "airplane", "plane",
+        "train", "locomotive", "ambulance", "taxi", "jeep", "van", "tractor", "submarine", "scooter",
+        "airliner", "warplane", "tank", "cart", "canoe", "cab",
     ),
     "instrument": (
-        "guitar",
-        "piano",
-        "violin",
-        "trumpet",
-        "drum",
-        "flute",
-        "sax",
-        "saxophone",
-        "harp",
-        "accordion",
-        "cello",
+        "guitar", "piano", "violin", "trumpet", "drum", "flute", "sax", "saxophone", "harp",
+        "accordion", "cello", "banjo", "oboe", "trombone", "marimba", "harmonica", "ocarina",
     ),
 }
 
@@ -165,11 +220,10 @@ class SampleRecord:
 
 
 def infer_archetype(class_name: str) -> str:
-    """Infer a semantic archetype from a readable class name.
+    """Heuristic fallback for class-level archetype assignment.
 
-    This is intentionally heuristic and class-level, not image-level. The goal
-    is to keep slot schemas stable within a class so downstream aggregation does
-    not become a mess.
+    This remains as a weak fallback only. The preferred path is to pass an
+    explicit fixed class->archetype mapping file.
     """
     lowered = class_name.lower()
     for archetype, keywords in ARCHETYPE_KEYWORDS.items():
@@ -194,14 +248,7 @@ def normalize_attributes(payload: dict[str, Any], expected_fields: list[str]) ->
 
 
 def validate_attribute_payload(payload: dict[str, Any], expected_fields: list[str]) -> tuple[bool, list[str]]:
-    """Validate a VLM response against the current sample's slot schema.
-
-    The VLM may return either:
-    - a flat object with the slot fields directly at top level, or
-    - {"archetype": ..., "attributes": {...}}
-
-    We accept both to keep the parser tolerant while migrating prompts.
-    """
+    """Validate a VLM response against the current sample's slot schema."""
     errors: list[str] = []
     attribute_payload = payload.get("attributes", payload)
     if not isinstance(attribute_payload, dict):
