@@ -15,6 +15,7 @@ This module ties together:
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +79,7 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
     write_jsonl(success_path, [])
     write_jsonl(failed_path, [])
 
+    dataset_root_resolved = str(Path(config.dataset_root).resolve())
     success_rows: list[dict[str, Any]] = []
     failed_rows: list[dict[str, Any]] = []
     pending_success_rows: list[dict[str, Any]] = []
@@ -87,15 +89,7 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
     for index, sample in enumerate(progress, start=1):
         progress.set_postfix_str(_build_progress_postfix(sample, len(success_rows), len(failed_rows)))
         result = _process_sample(sample=sample, client=client, max_retries=config.max_retries)
-        base = {
-            "sample_id": sample.sample_id,
-            "image_path": sample.image_path,
-            "class_id": sample.class_id,
-            "class_name_raw": sample.class_name_raw,
-            "class_name": sample.class_name,
-            "archetype": sample.archetype,
-            "slot_schema": sample.slot_schema,
-        }
+        base = _build_sample_metadata(sample, config, dataset_root_resolved)
         if result["status"] == "success":
             row = {
                 **base,
@@ -136,6 +130,31 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
     final_stats = _build_stats(config, samples, success_rows, failed_rows)
     write_json(stats_path, final_stats)
     return final_stats
+
+
+def _build_sample_metadata(sample: SampleRecord, config: Stage1Config, dataset_root_resolved: str) -> dict[str, Any]:
+    image_path = Path(sample.image_path)
+    relative_path = sample.sample_id or image_path.name
+    split = Path(dataset_root_resolved).name
+    extracted_at = datetime.now(timezone.utc).isoformat()
+    record_id = f"{sample.class_name_raw}::{relative_path}"
+    return {
+        "record_id": record_id,
+        "dataset_root": dataset_root_resolved,
+        "split": split,
+        "sample_id": sample.sample_id,
+        "relative_image_path": relative_path,
+        "image_path": sample.image_path,
+        "file_name": image_path.name,
+        "class_id": sample.class_id,
+        "class_name_raw": sample.class_name_raw,
+        "class_name": sample.class_name,
+        "archetype": sample.archetype,
+        "slot_schema": sample.slot_schema,
+        "backend": config.backend,
+        "model_name": config.model_name,
+        "extracted_at": extracted_at,
+    }
 
 
 def _flush_partial_results(
