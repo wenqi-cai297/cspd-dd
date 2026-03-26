@@ -77,7 +77,7 @@ python scripts/vlm/test_qwen_vl_load.py | tee "$TEST_DIR/qwen_load_test.log"
 
 echo "[STEP 5/7] Single-image inference test"
 if [[ -z "$SAMPLE_IMAGE" ]]; then
-  SAMPLE_IMAGE="$(find "$DATASET_ROOT" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.bmp' -o -iname '*.webp' \) | head -n 1)"
+  SAMPLE_IMAGE="$(find "$DATASET_ROOT" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.bmp' -o -iname '*.webp' \) -print -quit)"
 fi
 if [[ -z "$SAMPLE_IMAGE" ]]; then
   echo "Could not find a sample image under dataset root: $DATASET_ROOT"
