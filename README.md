@@ -73,8 +73,7 @@ cspd-stage1 run \
   --max-new-tokens 256
 ```
 
-If you use the provided shell helper instead, you only need to pass the dataset path
-(and optionally `max_new_tokens`); the output directory is generated automatically.
+If you use the provided shell helpers, the workflow can now be driven end-to-end from environment setup through final attribute extraction.
 
 Useful options:
 - `--disable-fast-processor`: use the slower processor path if the fast processor behaves oddly
@@ -93,9 +92,14 @@ Two helper scripts are included under `scripts/vlm/`:
 
 To avoid repeatedly typing the same CLI commands on the server, helper shell scripts are included under `scripts/server/`:
 
+- `check_stage1_env.sh`: check Python / torch / CUDA, install missing runtime dependencies, and verify imports
+- `prepare_stage1_metadata.sh`: prepare `classes.json` and `class_to_archetype.json`
 - `setup_cspd_stage1.sh`: activate `cspd_vlm`, install the repo with `pip install -e .`, and check the CLI
-- `run_stage1_qwen_local.sh`: run Stage 1 on an ImageFolder dataset with the real local Qwen backend
 - `run_stage1_mock.sh`: quick mock-backend plumbing run
+- `run_stage1_qwen_local.sh`: run Stage 1 on an ImageFolder dataset with the real local Qwen backend
+- `run_stage1_full_workflow.sh`: complete Stage 1 shell workflow from env checks to final attribute extraction
+
+See `scripts/server/README.md` for the recommended order and detailed examples.
 
 ## Notes
 
