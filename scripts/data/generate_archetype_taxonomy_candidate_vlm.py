@@ -7,6 +7,7 @@ This script is designed to reduce single-step pressure on the VLM:
 4. Each new archetype is checked against existing ones for obvious conflicts before acceptance.
 5. Coverage is tracked programmatically so later rounds are pushed toward uncovered semantic regions.
 6. Repair rounds are triggered when the model keeps proposing already-covered regions.
+7. Example-consistency checks reject archetypes whose example classes obviously contradict the target region.
 """
 
 from __future__ import annotations
@@ -60,6 +61,40 @@ SEMANTIC_OVERLAP_RULES = {
     },
     "container": {
         "required_terms": ["hold", "store", "carry"],
+    },
+}
+EXAMPLE_KEYWORD_GUARDS = {
+    "animal": {
+        "required_any": ["dog", "cat", "bird", "fish", "shark", "snake", "frog", "bear", "tiger", "hen"],
+    },
+    "plant": {
+        "required_any": ["tree", "flower", "plant", "leaf", "corn", "acorn", "daisy", "mushroom"],
+    },
+    "food": {
+        "required_any": ["pizza", "salad", "cake", "apple", "banana", "bread", "burger", "hotdog"],
+    },
+    "vehicle": {
+        "required_any": ["car", "bus", "truck", "boat", "ship", "airliner", "train", "bicycle"],
+    },
+    "clothing": {
+        "required_any": ["shirt", "dress", "jacket", "shoe", "hat", "scarf", "sweatshirt", "jean"],
+    },
+    "furniture": {
+        "required_any": ["chair", "table", "bed", "sofa", "desk", "cabinet", "stool"],
+    },
+    "tool": {
+        "required_any": ["hammer", "wrench", "screwdriver", "pliers", "saw", "chisel", "drill"],
+        "forbidden_any": ["shark", "goldfish", "dog", "bird", "flower", "pizza"],
+    },
+    "device_or_appliance": {
+        "required_any": ["microwave", "washer", "computer", "radio", "vacuum", "refrigerator", "printer"],
+        "forbidden_any": ["hammer", "wrench", "screwdriver", "pliers"],
+    },
+    "container": {
+        "required_any": ["bottle", "bucket", "bag", "basket", "box", "trash can", "vase"],
+    },
+    "instrument": {
+        "required_any": ["guitar", "piano", "violin", "drum", "trumpet", "flute"],
     },
 }
 
@@ -318,6 +353,26 @@ def semantic_overlap_guard(candidate: dict[str, Any], accepted: list[dict[str, A
     return {"accepted": len(conflicts) == 0, "conflicts": conflicts}
 
 
+def example_consistency_check(candidate: dict[str, Any]) -> dict[str, Any]:
+    candidate_name = normalize_archetype_name(str(candidate.get("name", "")))
+    examples = [str(x).lower() for x in candidate.get("example_classes", [])]
+    text = " ".join(examples)
+    if not examples:
+        return {"accepted": False, "conflicts": ["missing_examples"]}
+    rules = EXAMPLE_KEYWORD_GUARDS.get(candidate_name)
+    if not rules:
+        return {"accepted": True, "conflicts": []}
+    conflicts: list[str] = []
+    required_any = rules.get("required_any", [])
+    if required_any and not any(token in text for token in required_any):
+        conflicts.append(f"examples_missing_expected_keywords:{'|'.join(required_any[:5])}")
+    forbidden_any = rules.get("forbidden_any", [])
+    for token in forbidden_any:
+        if token in text:
+            conflicts.append(f"examples_contain_forbidden_keyword:{token}")
+    return {"accepted": len(conflicts) == 0, "conflicts": conflicts}
+
+
 def conflict_check(candidate: dict[str, Any], accepted: list[dict[str, Any]]) -> dict[str, Any]:
     candidate_name = normalize_archetype_name(str(candidate.get("name", "")))
     candidate_definition = str(candidate.get("definition", "")).strip().lower()
@@ -401,7 +456,8 @@ def main() -> None:
             gate = coverage_gate(candidate, coverage_state)
             name_check = conflict_check(candidate, accepted_archetypes)
             overlap_check = semantic_overlap_guard(candidate, accepted_archetypes)
-            accepted_flag = gate["accepted"] and name_check["accepted"] and overlap_check["accepted"]
+            example_check = example_consistency_check(candidate)
+            accepted_flag = gate["accepted"] and name_check["accepted"] and overlap_check["accepted"] and example_check["accepted"]
             row = {
                 "round_index": round_index,
                 "round_mode": round_mode,
@@ -409,6 +465,7 @@ def main() -> None:
                 "coverage_gate": gate,
                 "name_conflict_check": name_check,
                 "semantic_overlap_check": overlap_check,
+                "example_consistency_check": example_check,
                 "accepted": accepted_flag,
             }
             conflict_rows.append(row)

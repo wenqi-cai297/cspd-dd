@@ -47,7 +47,7 @@ python scripts/data/generate_archetype_taxonomy_candidate_vlm.py \
   --input /path/to/classes.json
 ```
 
-This now creates a timestamped task directory under `runs/taxonomy_tasks/`, writes a per-round summary file, incrementally builds `archetype_taxonomy_candidate.json`, performs conflict checks for newly proposed archetypes, programmatically tracks uncovered semantic regions, applies a coverage gate, triggers repair rounds when needed, and writes a final review JSON.
+This now creates a timestamped task directory under `runs/taxonomy_tasks/`, writes a per-round summary file, incrementally builds `archetype_taxonomy_candidate.json`, performs conflict checks for newly proposed archetypes, programmatically tracks uncovered semantic regions, applies a coverage gate, triggers repair rounds when needed, rejects archetypes whose example classes contradict the target region, and writes a final review JSON.
 
 ### 3. Run the full Stage 1 workflow end-to-end
 
