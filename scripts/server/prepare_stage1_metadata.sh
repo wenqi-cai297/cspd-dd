@@ -13,7 +13,7 @@ fi
 CLASSES_SOURCE="$1"
 CLASS_VAR_NAME="${2:-}"
 ARCHETYPE_MODE="${3:-heuristic}"
-ENV_NAME="cspd_vlm"
+ENV_NAME="cspd-dd"
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 TORCH_DTYPE="float16"
 DEVICE_MAP="auto"

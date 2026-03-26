@@ -106,7 +106,7 @@ To avoid repeatedly typing the same CLI commands on the server, helper shell scr
 
 - `check_stage1_env.sh`: check Python / torch / CUDA, install missing runtime dependencies, and verify imports
 - `prepare_stage1_metadata.sh`: prepare `classes.json` and `class_to_archetype.json`
-- `setup_cspd_stage1.sh`: activate `cspd_vlm`, install the repo with `pip install -e .`, and check the CLI
+- `setup_cspd_stage1.sh`: activate `cspd-dd`, install the repo with `pip install -e .`, and check the CLI
 - `run_stage1_mock.sh`: quick mock-backend plumbing run
 - `run_stage1_qwen_local.sh`: run Stage 1 on an ImageFolder dataset with the real local Qwen backend
 - `run_stage1_full_workflow.sh`: complete Stage 1 shell workflow from env checks to final attribute extraction

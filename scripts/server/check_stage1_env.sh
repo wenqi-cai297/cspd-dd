@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage:
 #   bash scripts/server/check_stage1_env.sh
 
-ENV_NAME="cspd_vlm"
+ENV_NAME="cspd-dd"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 

@@ -13,7 +13,7 @@ bash scripts/server/check_stage1_env.sh
 ```
 
 This script:
-- activates `cspd_vlm`
+- activates `cspd-dd`
 - checks Python / torch / CUDA
 - installs missing runtime packages such as `transformers` and `Pillow`
 - runs `pip install -e .`
@@ -82,7 +82,7 @@ bash scripts/server/setup_cspd_stage1.sh
 ```
 
 This script:
-- activates `cspd_vlm`
+- activates `cspd-dd`
 - runs `pip install -e .`
 - checks that `cspd-stage1` is available
 

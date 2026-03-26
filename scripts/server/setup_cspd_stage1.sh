@@ -9,7 +9,7 @@ set -euo pipefail
 #   - the environment name is cspd_vlm
 #   - this script is executed from anywhere after the repo is cloned
 
-ENV_NAME="cspd_vlm"
+ENV_NAME="cspd-dd"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 

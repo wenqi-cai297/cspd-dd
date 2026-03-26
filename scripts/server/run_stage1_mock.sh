@@ -12,7 +12,7 @@ fi
 
 DATASET_ROOT="$1"
 OUTPUT_DIR="$2"
-ENV_NAME="cspd_vlm"
+ENV_NAME="cspd-dd"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
