@@ -88,6 +88,18 @@ Two helper scripts are included under `scripts/vlm/`:
 - `test_qwen_vl_load.py`: verify the local Qwen model loads on the server
 - `test_single_image_infer.py`: run one image through the local VLM and inspect JSON output
 
+## Taxonomy proposal step
+
+Before freezing a small archetype set, you can now ask Qwen to inspect the full `classes.json` file and propose a compact but expressive archetype taxonomy candidate:
+
+```bash
+python scripts/data/generate_archetype_taxonomy_candidate_vlm.py \
+  --input /path/to/classes.json \
+  --output runs/prep/taxonomy_candidate.json
+```
+
+This step is intended to support Stage 1 taxonomy design before locking in a final `class -> archetype` mapping.
+
 ## Server shell scripts
 
 To avoid repeatedly typing the same CLI commands on the server, helper shell scripts are included under `scripts/server/`:

@@ -19,7 +19,9 @@ This script:
 - runs `pip install -e .`
 - verifies that `transformers` and `PIL` import correctly
 
-### 2. Prepare `classes.json` and `class_to_archetype.json`
+### 2. Prepare `classes.json` and propose an archetype taxonomy candidate
+
+If you start from a Python class mapping file, first prepare metadata:
 
 ```bash
 bash scripts/server/prepare_stage1_metadata.sh /path/to/classes.py IMAGENET2012_CLASSES heuristic
@@ -33,10 +35,20 @@ bash scripts/server/prepare_stage1_metadata.sh /path/to/classes.json "" heuristi
 
 This script:
 - converts `classes.py` into `classes.json` when needed
-- generates `class_to_archetype.json`
+- can still generate `class_to_archetype.json`
 - supports two modes:
   - `heuristic`
   - `vlm`
+
+If you want Qwen to first propose a better archetype taxonomy from the full class list, run:
+
+```bash
+python scripts/data/generate_archetype_taxonomy_candidate_vlm.py \
+  --input /path/to/classes.json \
+  --output runs/prep/taxonomy_candidate.json
+```
+
+This produces a taxonomy candidate JSON that you can review before freezing the final archetype list and class-to-archetype mapping.
 
 ### 3. Run the full Stage 1 workflow end-to-end
 
