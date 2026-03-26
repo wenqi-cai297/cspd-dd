@@ -73,7 +73,7 @@ cspd-stage1 run \
   --max-new-tokens 256
 ```
 
-If you use the provided shell helpers, the workflow can now be driven end-to-end from environment setup through final attribute extraction.
+If you use the provided shell helpers, the workflow can now be driven end-to-end from environment setup through final attribute extraction. The full workflow script uses only a small mock smoke subset by default (first 3 classes, first 10 images per class), and also supports `--skip-smoke`.
 
 Useful options:
 - `--disable-fast-processor`: use the slower processor path if the fast processor behaves oddly

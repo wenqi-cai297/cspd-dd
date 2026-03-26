@@ -72,7 +72,7 @@ This script performs the full chain:
 3. copy fixed `class_to_archetype.json`
 4. Qwen load test
 5. single-image inference test
-6. mock smoke run
+6. small mock smoke run on the first 3 classes with the first 10 images per class
 7. final `qwen_local` attribute extraction run
 
 If you omit the final sample-image argument, the script auto-picks the first image under the dataset root.
@@ -113,6 +113,21 @@ runs/attributes/<dataset_name>/qwen_local/<timestamp>
 
 ```bash
 bash scripts/server/run_stage1_mock.sh /path/to/dataset /path/to/output_dir
+```
+
+## Dataset assumption
+
+All Stage 1 run scripts assume an ImageFolder-style dataset layout:
+
+```text
+dataset_root/
+  class_a/
+    1.jpg
+    2.jpg
+  class_b/
+    3.jpg
+```
+th/to/dataset /path/to/output_dir
 ```
 
 ## Dataset assumption

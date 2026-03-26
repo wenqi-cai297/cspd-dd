@@ -4,6 +4,7 @@ set -euo pipefail
 # Full Stage 1 shell workflow from environment checks to final attribute extraction.
 # Usage:
 #   bash scripts/server/run_stage1_full_workflow.sh \
+#     [--skip-smoke] \
 #     <dataset_root> \
 #     <classes_py_or_json> \
 #     <class_archetype_json> \
@@ -11,8 +12,14 @@ set -euo pipefail
 #     [max_new_tokens=256] \
 #     [sample_image_for_single_test]
 
+SKIP_SMOKE=0
+if [[ "${1:-}" == "--skip-smoke" ]]; then
+  SKIP_SMOKE=1
+  shift
+fi
+
 if [[ $# -lt 3 ]]; then
-  echo "Usage: bash scripts/server/run_stage1_full_workflow.sh <dataset_root> <classes_py_or_json> <class_archetype_json> [class_var_name] [max_new_tokens=256] [sample_image_for_single_test]"
+  echo "Usage: bash scripts/server/run_stage1_full_workflow.sh [--skip-smoke] <dataset_root> <classes_py_or_json> <class_archetype_json> [class_var_name] [max_new_tokens=256] [sample_image_for_single_test]"
   exit 1
 fi
 
@@ -27,6 +34,8 @@ MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 TORCH_DTYPE="float16"
 DEVICE_MAP="auto"
 FLUSH_EVERY="10"
+SMOKE_NUM_CLASSES="3"
+SMOKE_NUM_IMAGES_PER_CLASS="10"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -44,6 +53,9 @@ TEST_DIR="runs/tests/${DATASET_NAME}/${TIMESTAMP}"
 ATTR_DIR="runs/attributes/${DATASET_NAME}/qwen_local/${TIMESTAMP}"
 CLASSES_JSON="$PREP_DIR/classes.json"
 ARCHETYPE_JSON="$PREP_DIR/class_to_archetype.json"
+SMOKE_DATASET_DIR="$TEST_DIR/mock_subset"
+SMOKE_CLASSES_JSON="$TEST_DIR/mock_subset_classes.json"
+SMOKE_ARCHETYPE_JSON="$TEST_DIR/mock_subset_class_to_archetype.json"
 
 mkdir -p "$PREP_DIR" "$TEST_DIR" "$ATTR_DIR"
 
@@ -90,13 +102,57 @@ python scripts/vlm/test_single_image_infer.py \
   --max-new-tokens "$MAX_NEW_TOKENS" | tee "$TEST_DIR/single_image_test.log"
 
 echo "[STEP 6/7] Mock smoke run"
-cspd-stage1 run \
-  --dataset-root "$DATASET_ROOT" \
-  --output-dir "$TEST_DIR/mock_smoke_run" \
-  --backend mock \
-  --class-name-map "$CLASSES_JSON" \
-  --class-archetype-map "$ARCHETYPE_JSON" \
-  --flush-every 1 | tee "$TEST_DIR/mock_smoke_run.log"
+if [[ "$SKIP_SMOKE" == "1" ]]; then
+  echo "[INFO] --skip-smoke enabled; skipping mock smoke run"
+else
+  rm -rf "$SMOKE_DATASET_DIR"
+  mkdir -p "$SMOKE_DATASET_DIR"
+  python - <<'PY' "$DATASET_ROOT" "$CLASSES_JSON" "$ARCHETYPE_JSON" "$SMOKE_DATASET_DIR" "$SMOKE_CLASSES_JSON" "$SMOKE_ARCHETYPE_JSON" "$SMOKE_NUM_CLASSES" "$SMOKE_NUM_IMAGES_PER_CLASS"
+import json
+import shutil
+import sys
+from pathlib import Path
+
+image_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.jpeg', '.JPEG', '.JPG', '.PNG', '.BMP', '.WEBP'}
+
+dataset_root = Path(sys.argv[1])
+classes_json_path = Path(sys.argv[2])
+archetype_json_path = Path(sys.argv[3])
+smoke_dataset_dir = Path(sys.argv[4])
+smoke_classes_json = Path(sys.argv[5])
+smoke_archetype_json = Path(sys.argv[6])
+num_classes = int(sys.argv[7])
+num_images = int(sys.argv[8])
+
+class_name_map = json.loads(classes_json_path.read_text(encoding='utf-8-sig'))
+class_archetype_map = json.loads(archetype_json_path.read_text(encoding='utf-8-sig'))
+selected_classes = {}
+selected_archetypes = {}
+
+class_dirs = sorted([p for p in dataset_root.iterdir() if p.is_dir()], key=lambda p: p.name)[:num_classes]
+for class_dir in class_dirs:
+    target_dir = smoke_dataset_dir / class_dir.name
+    target_dir.mkdir(parents=True, exist_ok=True)
+    images = [p for p in sorted(class_dir.rglob('*')) if p.is_file() and p.suffix.lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}]
+    for image_path in images[:num_images]:
+        shutil.copy2(image_path, target_dir / image_path.name)
+    selected_classes[class_dir.name] = class_name_map.get(class_dir.name, class_dir.name)
+    if class_dir.name in class_archetype_map:
+        selected_archetypes[class_dir.name] = class_archetype_map[class_dir.name]
+
+smoke_classes_json.write_text(json.dumps(selected_classes, ensure_ascii=False, indent=2), encoding='utf-8')
+smoke_archetype_json.write_text(json.dumps(selected_archetypes, ensure_ascii=False, indent=2), encoding='utf-8')
+print(f"[INFO] Built smoke subset with {len(class_dirs)} classes at {smoke_dataset_dir}")
+PY
+
+  cspd-stage1 run \
+    --dataset-root "$SMOKE_DATASET_DIR" \
+    --output-dir "$TEST_DIR/mock_smoke_run" \
+    --backend mock \
+    --class-name-map "$SMOKE_CLASSES_JSON" \
+    --class-archetype-map "$SMOKE_ARCHETYPE_JSON" \
+    --flush-every 1 | tee "$TEST_DIR/mock_smoke_run.log"
+fi
 
 echo "[STEP 7/7] Qwen local attribute extraction run"
 cspd-stage1 run \
