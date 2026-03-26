@@ -19,35 +19,40 @@ This script:
 - runs `pip install -e .`
 - verifies that `transformers` and `PIL` import correctly
 
-### 2. Prepare `classes.json` and propose an archetype taxonomy candidate
+### 2. Prepare `classes.json` and use a fixed `class_to_archetype.json`
 
-If you start from a Python class mapping file, first prepare metadata:
+If you start from a Python class mapping file, prepare metadata like this:
 
 ```bash
-bash scripts/server/prepare_stage1_metadata.sh /path/to/classes.py IMAGENET2012_CLASSES heuristic
+bash scripts/server/prepare_stage1_metadata.sh /path/to/classes.py /path/to/class_to_archetype.json IMAGENET2012_CLASSES
 ```
 
 If you already have a JSON mapping file instead of a Python file:
 
 ```bash
-bash scripts/server/prepare_stage1_metadata.sh /path/to/classes.json "" heuristic
+bash scripts/server/prepare_stage1_metadata.sh /path/to/classes.json /path/to/class_to_archetype.json
 ```
 
 This script:
 - converts `classes.py` into `classes.json` when needed
-- can still generate `class_to_archetype.json`
-- supports two modes:
-  - `heuristic`
-  - `vlm`
+- copies a fixed `class_to_archetype.json` into the run prep directory
+- does not run VLM-based taxonomy discovery
 
-If you want Qwen to first propose a better archetype taxonomy from the full class list, run:
+If you still want VLM to produce `class_to_archetype.json`, use the fixed manual taxonomy as the allowed label set:
 
 ```bash
-python scripts/data/generate_archetype_taxonomy_candidate_vlm.py \
-  --input /path/to/classes.json
+python scripts/data/generate_class_to_archetype_map_vlm.py \
+  --input /path/to/classes.json \
+  --output /path/to/class_to_archetype.json \
+  --detail-output /path/to/class_to_archetype_details.jsonl \
+  --taxonomy configs/stage1/archetype_taxonomy_manual.json
 ```
 
-This now creates a timestamped task directory under `runs/taxonomy_tasks/`, writes a per-round summary file, incrementally builds `archetype_taxonomy_candidate.json`, performs conflict checks for newly proposed archetypes, programmatically tracks uncovered semantic regions, applies a coverage gate, triggers repair rounds when needed, rejects archetypes whose example classes contradict the target region, batch-schedules uncovered targets for each round, rejects placeholder/template outputs, retries failed batches before moving on, and writes a final review JSON.
+The manually fixed taxonomy definition now lives in:
+
+```text
+configs/stage1/archetype_taxonomy_manual.json
+```
 
 ### 3. Run the full Stage 1 workflow end-to-end
 
@@ -55,8 +60,8 @@ This now creates a timestamped task directory under `runs/taxonomy_tasks/`, writ
 bash scripts/server/run_stage1_full_workflow.sh \
   /path/to/dataset_root \
   /path/to/classes.py \
+  /path/to/class_to_archetype.json \
   IMAGENET2012_CLASSES \
-  heuristic \
   256 \
   /path/to/sample_image.jpg
 ```
@@ -64,7 +69,7 @@ bash scripts/server/run_stage1_full_workflow.sh \
 This script performs the full chain:
 1. environment checks
 2. `classes.py -> classes.json`
-3. `classes.json -> class_to_archetype.json`
+3. copy fixed `class_to_archetype.json`
 4. Qwen load test
 5. single-image inference test
 6. mock smoke run

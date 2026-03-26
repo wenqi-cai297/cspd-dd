@@ -1,23 +1,8 @@
 """Generate a raw-class-label -> archetype mapping from classes.json using a local Qwen model.
 
-This script is meant to replace the crude keyword heuristic with an explicit
-model-based class-level categorization pass.
-
-Input:
-    {
-      "n01440764": "tench, Tinca tinca",
-      ...
-    }
-
-Output artifacts:
-- mapping JSON: raw class label -> archetype
-- detail JSONL: one row per class with readable name, raw model output, etc.
-
-Example:
-    python scripts/data/generate_class_to_archetype_map_vlm.py \
-      --input /path/to/classes.json \
-      --output /path/to/class_to_archetype.json \
-      --detail-output /path/to/class_to_archetype_details.jsonl
+This script no longer discovers the taxonomy itself. Instead, it loads a fixed
+manual taxonomy definition and asks the VLM to classify each class into exactly
+one archetype from that fixed list.
 """
 
 from __future__ import annotations
@@ -30,16 +15,9 @@ from pathlib import Path
 from cspd_stage1.io_utils import append_jsonl, write_jsonl
 from cspd_stage1.vlm.json_utils import parse_json_object
 
-ALLOWED_ARCHETYPES = [
-    "animal",
-    "vehicle",
-    "food",
-    "instrument",
-    "generic_object",
-]
-
+DEFAULT_TAXONOMY_PATH = "configs/stage1/archetype_taxonomy_manual.json"
 SYSTEM_PROMPT = (
-    "You are classifying ImageNet-style class names into a small fixed semantic archetype set. "
+    "You are classifying ImageNet-style class names into a fixed manual semantic archetype set. "
     "Return JSON only. Do not include explanations."
 )
 
@@ -49,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, help="Path to classes.json")
     parser.add_argument("--output", required=True, help="Path to output mapping JSON")
     parser.add_argument("--detail-output", required=True, help="Path to output detail JSONL")
+    parser.add_argument("--taxonomy", default=DEFAULT_TAXONOMY_PATH, help="Path to fixed taxonomy JSON")
     parser.add_argument("--model-name", default="Qwen/Qwen2.5-VL-7B-Instruct", help="Local Qwen model name")
     parser.add_argument("--torch-dtype", default="float16", help="Torch dtype for local model loading")
     parser.add_argument("--device-map", default="auto", help="Transformers device_map")
@@ -56,19 +35,48 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_user_prompt(raw_label: str, readable_name: str) -> str:
+def load_taxonomy(path: str) -> tuple[list[str], dict[str, dict]]:
+    taxonomy_path = Path(path)
+    payload = json.loads(taxonomy_path.read_text(encoding="utf-8-sig"))
+    archetypes = payload.get("archetypes", [])
+    if not isinstance(archetypes, list) or not archetypes:
+        raise ValueError("Taxonomy file must contain a non-empty 'archetypes' list")
+    names: list[str] = []
+    details: dict[str, dict] = {}
+    for item in archetypes:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ValueError("Each taxonomy archetype entry must be an object with a string 'name'")
+        name = item["name"].strip()
+        names.append(name)
+        details[name] = item
+    return names, details
+
+
+def build_user_prompt(raw_label: str, readable_name: str, allowed_archetypes: list[str], taxonomy_details: dict[str, dict]) -> str:
+    short_taxonomy = []
+    for name in allowed_archetypes:
+        item = taxonomy_details[name]
+        short_taxonomy.append(
+            {
+                "name": name,
+                "definition": item.get("definition", ""),
+                "includes": item.get("includes", [])[:4],
+                "excludes": item.get("excludes", []),
+                "notes": item.get("notes", []),
+            }
+        )
     template = {
         "raw_label": raw_label,
         "readable_name": readable_name,
-        "archetype": "one of: animal | vehicle | food | instrument | generic_object",
+        "archetype": f"one of: {' | '.join(allowed_archetypes)}",
     }
     return (
-        "Classify the following dataset class into exactly one semantic archetype.\n"
-        f"Allowed archetypes: {', '.join(ALLOWED_ARCHETYPES)}\n"
+        "Classify the following dataset class into exactly one semantic archetype from the fixed manual taxonomy.\n"
+        f"Allowed archetypes: {', '.join(allowed_archetypes)}\n"
         "Use the readable class name as the primary evidence.\n"
-        "If the class is a living creature, choose animal.\n"
-        "If it is a device, furniture, tool, clothing item, place, sign, container, or general artifact, "
-        "choose generic_object unless vehicle / instrument / food is clearly more specific.\n"
+        "Prefer the most specific suitable archetype from the fixed taxonomy.\n"
+        "Fixed taxonomy reference:\n"
+        f"{json.dumps(short_taxonomy, ensure_ascii=False, indent=2)}\n"
         "Return JSON only in this exact structure:\n"
         f"{json.dumps(template, ensure_ascii=False, indent=2)}\n"
         "Rules:\n"
@@ -103,13 +111,13 @@ def load_local_qwen(model_name: str, torch_dtype: str, device_map: str):
     return model, processor
 
 
-def classify_one(model, processor, raw_label: str, readable_name: str) -> tuple[dict, str]:
+def classify_one(model, processor, raw_label: str, readable_name: str, allowed_archetypes: list[str], taxonomy_details: dict[str, dict]) -> tuple[dict, str]:
     messages = [
         {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": build_user_prompt(raw_label, readable_name)},
+                {"type": "text", "text": build_user_prompt(raw_label, readable_name, allowed_archetypes, taxonomy_details)},
             ],
         },
     ]
@@ -118,7 +126,7 @@ def classify_one(model, processor, raw_label: str, readable_name: str) -> tuple[
     inputs = processor(text=[text], padding=True, return_tensors="pt")
     inputs = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in inputs.items()}
 
-    generated_ids = model.generate(**inputs, max_new_tokens=128, do_sample=False)
+    generated_ids = model.generate(**inputs, max_new_tokens=256, do_sample=False)
     generated_ids_trimmed = [
         out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
     ]
@@ -137,6 +145,7 @@ def main() -> None:
     if not isinstance(classes, dict):
         raise ValueError("Input classes file must be a JSON object")
 
+    allowed_archetypes, taxonomy_details = load_taxonomy(args.taxonomy)
     model, processor = load_local_qwen(args.model_name, args.torch_dtype, args.device_map)
 
     output_path = Path(args.output)
@@ -145,16 +154,17 @@ def main() -> None:
     detail_output_path.parent.mkdir(parents=True, exist_ok=True)
     write_jsonl(detail_output_path, [])
 
+    fallback = "household_object" if "household_object" in allowed_archetypes else allowed_archetypes[-1]
     final_mapping: dict[str, str] = {}
     pending_rows: list[dict] = []
 
     items = list(classes.items())
     for index, (raw_label, readable_name) in enumerate(items, start=1):
         try:
-            payload, raw_output = classify_one(model, processor, str(raw_label), str(readable_name))
-            predicted = str(payload.get("archetype", "generic_object")).strip()
-            if predicted not in ALLOWED_ARCHETYPES:
-                predicted = "generic_object"
+            payload, raw_output = classify_one(model, processor, str(raw_label), str(readable_name), allowed_archetypes, taxonomy_details)
+            predicted = str(payload.get("archetype", fallback)).strip()
+            if predicted not in allowed_archetypes:
+                predicted = fallback
             final_mapping[str(raw_label)] = predicted
             pending_rows.append(
                 {
@@ -166,13 +176,13 @@ def main() -> None:
                 }
             )
         except Exception as exc:  # noqa: BLE001
-            final_mapping[str(raw_label)] = "generic_object"
+            final_mapping[str(raw_label)] = fallback
             pending_rows.append(
                 {
                     "raw_label": str(raw_label),
                     "readable_name": str(readable_name),
-                    "archetype": "generic_object",
-                    "status": "failed_fallback_generic_object",
+                    "archetype": fallback,
+                    "status": f"failed_fallback_{fallback}",
                     "error_message": str(exc),
                 }
             )

@@ -6,29 +6,20 @@ set -euo pipefail
 #   bash scripts/server/run_stage1_full_workflow.sh \
 #     <dataset_root> \
 #     <classes_py_or_json> \
+#     <class_archetype_json> \
 #     [class_var_name] \
-#     [archetype_mode=heuristic|vlm] \
 #     [max_new_tokens=256] \
 #     [sample_image_for_single_test]
-#
-# Example:
-#   bash scripts/server/run_stage1_full_workflow.sh \
-#     /data/imagenette2-160/train \
-#     /data/imagenette2-160/classes.py \
-#     IMAGENET2012_CLASSES \
-#     heuristic \
-#     256 \
-#     /data/imagenette2-160/train/n01440764/sample.JPEG
 
-if [[ $# -lt 2 ]]; then
-  echo "Usage: bash scripts/server/run_stage1_full_workflow.sh <dataset_root> <classes_py_or_json> [class_var_name] [archetype_mode=heuristic|vlm] [max_new_tokens=256] [sample_image_for_single_test]"
+if [[ $# -lt 3 ]]; then
+  echo "Usage: bash scripts/server/run_stage1_full_workflow.sh <dataset_root> <classes_py_or_json> <class_archetype_json> [class_var_name] [max_new_tokens=256] [sample_image_for_single_test]"
   exit 1
 fi
 
 DATASET_ROOT="$1"
 CLASSES_SOURCE="$2"
-CLASS_VAR_NAME="${3:-}"
-ARCHETYPE_MODE="${4:-heuristic}"
+ARCHETYPE_SOURCE="$3"
+CLASS_VAR_NAME="${4:-}"
 MAX_NEW_TOKENS="${5:-256}"
 SAMPLE_IMAGE="${6:-}"
 ENV_NAME="cspd-dd"
@@ -53,7 +44,6 @@ TEST_DIR="runs/tests/${DATASET_NAME}/${TIMESTAMP}"
 ATTR_DIR="runs/attributes/${DATASET_NAME}/qwen_local/${TIMESTAMP}"
 CLASSES_JSON="$PREP_DIR/classes.json"
 ARCHETYPE_JSON="$PREP_DIR/class_to_archetype.json"
-ARCHETYPE_DETAIL_JSONL="$PREP_DIR/class_to_archetype_details.jsonl"
 
 mkdir -p "$PREP_DIR" "$TEST_DIR" "$ATTR_DIR"
 
@@ -79,23 +69,8 @@ else
   "${CMD[@]}"
 fi
 
-echo "[STEP 3/7] Prepare class_to_archetype.json using mode=$ARCHETYPE_MODE"
-if [[ "$ARCHETYPE_MODE" == "heuristic" ]]; then
-  python scripts/data/generate_class_to_archetype_map.py \
-    --input "$CLASSES_JSON" \
-    --output "$ARCHETYPE_JSON"
-elif [[ "$ARCHETYPE_MODE" == "vlm" ]]; then
-  python scripts/data/generate_class_to_archetype_map_vlm.py \
-    --input "$CLASSES_JSON" \
-    --output "$ARCHETYPE_JSON" \
-    --detail-output "$ARCHETYPE_DETAIL_JSONL" \
-    --model-name "$MODEL_NAME" \
-    --torch-dtype "$TORCH_DTYPE" \
-    --device-map "$DEVICE_MAP"
-else
-  echo "Unsupported archetype mode: $ARCHETYPE_MODE"
-  exit 1
-fi
+echo "[STEP 3/7] Use fixed class_to_archetype.json"
+cp "$ARCHETYPE_SOURCE" "$ARCHETYPE_JSON"
 
 echo "[STEP 4/7] Qwen load test"
 python scripts/vlm/test_qwen_vl_load.py | tee "$TEST_DIR/qwen_load_test.log"

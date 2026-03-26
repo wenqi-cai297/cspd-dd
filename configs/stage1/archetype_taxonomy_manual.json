@@ -1,0 +1,234 @@
+{
+  "version": "manual-v1",
+  "description": "Manually fixed archetype taxonomy for Stage 1. This replaces VLM-generated taxonomy discovery as the default taxonomy source.",
+  "policy": {
+    "use_vlm_taxonomy_generation": false,
+    "notes": [
+      "Use this fixed taxonomy as the authoritative archetype set for Stage 1.",
+      "VLM may still be used later for class-to-archetype mapping or image-level attribute extraction, but not for discovering the taxonomy itself.",
+      "Prefer more specific archetypes over fallback buckets such as household_object.",
+      "Places, buildings, and large man-made structures should be grouped under structure_or_building.",
+      "Natural landscapes and landforms should be grouped under natural_scene_or_landform."
+    ]
+  },
+  "archetypes": [
+    {
+      "name": "animal",
+      "definition": "Animals, animal-like organisms, and extinct/prehistoric animal-form creatures.",
+      "includes": [
+        "fish, sharks, rays",
+        "birds",
+        "reptiles and amphibians",
+        "insects, arachnids, crustaceans, worms, jellyfish-like invertebrates",
+        "mammals including dogs, cats, bears, primates, ungulates, whales",
+        "prehistoric animals such as triceratops"
+      ],
+      "excludes": [
+        "plants and fungi",
+        "human roles"
+      ]
+    },
+    {
+      "name": "plant_or_fungus",
+      "definition": "Plants, plant parts, crops, seeds, fruits in botanical form, and fungi/mushrooms handled together for Stage 1.",
+      "includes": [
+        "flowers and trees",
+        "crops and seeds such as corn, acorn, rapeseed",
+        "mushrooms and fungi-like natural growths"
+      ],
+      "excludes": [
+        "prepared food"
+      ]
+    },
+    {
+      "name": "food_and_drink",
+      "definition": "Edible or drinkable items, including ingredients, dishes, desserts, and beverages.",
+      "includes": [
+        "prepared foods such as pizza, hotdog, cheeseburger",
+        "fruits and vegetables used as food items",
+        "drinks such as wine, espresso, eggnog"
+      ],
+      "excludes": [
+        "containers such as cups, bowls, bottles"
+      ]
+    },
+    {
+      "name": "vehicle",
+      "definition": "Transportation vehicles intended primarily for moving people or goods.",
+      "includes": [
+        "cars, buses, taxis, trucks, vans",
+        "bicycles, tricycles, scooters, mopeds",
+        "boats, ships, submarines",
+        "aircraft, airliners, airships",
+        "military or emergency vehicles such as tank, ambulance, fire engine"
+      ],
+      "excludes": [
+        "hand tools",
+        "static buildings"
+      ]
+    },
+    {
+      "name": "clothing_and_wearable",
+      "definition": "Wearable garments, footwear, headwear, protective wear, and personal fashion accessories.",
+      "includes": [
+        "shirts, coats, dresses, robes, ponchos",
+        "shoes, boots, sandals",
+        "hats, helmets, ties, bras, bikinis, masks, wigs",
+        "wearable protective gear such as knee pads"
+      ]
+    },
+    {
+      "name": "furniture",
+      "definition": "Large furnishing objects used for seating, sleeping, storage, or support in home/office environments.",
+      "includes": [
+        "chairs, rocking chairs, folding chairs",
+        "tables, desks, dining tables",
+        "beds, cribs, bassinets",
+        "sofas, couches",
+        "bookcases, wardrobes, cabinets, chests"
+      ]
+    },
+    {
+      "name": "container",
+      "definition": "Objects primarily designed to hold, store, carry, or pour other items or substances.",
+      "includes": [
+        "bottles, jugs, barrels, cans",
+        "buckets, baskets, crates, cartons",
+        "bags, backpacks, purses, wallets",
+        "cups, mugs, bowls, vases, pitchers"
+      ],
+      "excludes": [
+        "container ship, which should be vehicle"
+      ]
+    },
+    {
+      "name": "tool",
+      "definition": "Handheld manual tools or implements used to manipulate, cut, strike, grip, measure, or modify objects.",
+      "includes": [
+        "hammer, hatchet, axe, screwdriver, wrench",
+        "saw, pliers, shovel, broom, paintbrush",
+        "ladle, spatula, can opener, corkscrew, plane"
+      ],
+      "excludes": [
+        "electronic or powered appliances",
+        "musical instruments"
+      ]
+    },
+    {
+      "name": "device_or_appliance",
+      "definition": "Mechanical, electrical, or electronic devices and appliances with functional operation beyond simple manual tooling.",
+      "includes": [
+        "computer, keyboard, mouse, monitor, printer",
+        "camera, projector, oscilloscope, radio, television, phone",
+        "microwave, refrigerator, dishwasher, washing machine, vacuum cleaner",
+        "clock, modem, loudspeaker, tape player"
+      ],
+      "excludes": [
+        "simple manual tools"
+      ]
+    },
+    {
+      "name": "instrument",
+      "definition": "Musical instruments only.",
+      "includes": [
+        "guitar, banjo, cello, violin, harp",
+        "flute, oboe, saxophone, trombone, horn",
+        "drum, marimba, harmonica, ocarina"
+      ],
+      "excludes": [
+        "general devices",
+        "general tools"
+      ]
+    },
+    {
+      "name": "weapon",
+      "definition": "Objects primarily designed for combat, attack, defense, or weaponized use.",
+      "includes": [
+        "rifle, revolver, assault rifle",
+        "missile, cannon, projectile",
+        "shield, scabbard, breastplate when treated as combat gear"
+      ],
+      "notes": [
+        "Warplane and tank should remain under vehicle because their visual prototype is closer to a vehicle archetype."
+      ]
+    },
+    {
+      "name": "sports_or_toy",
+      "definition": "Sports equipment, game objects, hobby items, toys, and play/recreation artifacts.",
+      "includes": [
+        "baseball, basketball, soccer ball, tennis ball, volleyball",
+        "racket, croquet ball, punching bag",
+        "teddy bear, jigsaw puzzle, joystick, pinwheel",
+        "board-game-like or play-oriented objects"
+      ]
+    },
+    {
+      "name": "household_object",
+      "definition": "Small everyday household objects that are not better grouped as furniture, container, tool, or appliance.",
+      "includes": [
+        "lamp, wall clock, pillow, towel, doormat",
+        "soap dispenser, salt shaker, toilet seat, toilet tissue",
+        "small domestic objects without a cleaner specialized archetype"
+      ],
+      "notes": [
+        "Use this as a fallback bucket only after excluding more specific archetypes."
+      ]
+    },
+    {
+      "name": "structure_or_building",
+      "definition": "Buildings, architectural structures, built infrastructure, and place-like man-made structures.",
+      "includes": [
+        "church, mosque, monastery, palace, castle, library, restaurant",
+        "barn, greenhouse, bookshop, grocery store, barbershop",
+        "bridge, viaduct, breakwater, dam, lighthouse, beacon",
+        "yurt, dome, boathouse, planetarium"
+      ]
+    },
+    {
+      "name": "natural_scene_or_landform",
+      "definition": "Natural geographic formations, scenic environments, or landforms.",
+      "includes": [
+        "seashore, lakeside, valley, volcano, cliff",
+        "sandbar, coral reef, geyser, alp, promontory"
+      ]
+    },
+    {
+      "name": "human_or_person",
+      "definition": "Human figures, people, or person-role categories.",
+      "includes": [
+        "ballplayer",
+        "groom",
+        "scuba diver"
+      ]
+    },
+    {
+      "name": "text_or_media_object",
+      "definition": "Objects whose primary identity is carrying text, printed information, symbolic signaling, or media content.",
+      "includes": [
+        "web site",
+        "comic book",
+        "crossword puzzle",
+        "menu",
+        "book jacket",
+        "street sign",
+        "traffic light"
+      ],
+      "notes": [
+        "traffic light is treated as a symbolic/signaling object here for taxonomy stability."
+      ]
+    },
+    {
+      "name": "decorative_or_symbolic_object",
+      "definition": "Decorative, ceremonial, memorial, religious, or symbolic display-oriented objects.",
+      "includes": [
+        "altar",
+        "plaque or memorial tablet",
+        "totem pole",
+        "prayer rug",
+        "obelisk",
+        "stupa",
+        "sundial when treated as symbolic/decorative"
+      ]
+    }
+  ]
+}
