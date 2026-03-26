@@ -65,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Write partial JSONL results to disk every N samples.",
     )
+    run_parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Disable resume and overwrite prior JSONL outputs in the output directory.",
+    )
     return parser
 
 

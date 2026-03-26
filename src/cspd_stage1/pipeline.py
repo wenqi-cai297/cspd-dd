@@ -10,6 +10,7 @@ This module ties together:
 - VLM invocation,
 - response validation / normalization,
 - incremental artifact writing,
+- resume support for long-running CLI jobs,
 - progress reporting for long-running CLI jobs.
 """
 
@@ -21,7 +22,7 @@ from typing import Any
 
 from tqdm.auto import tqdm
 
-from cspd_stage1.io_utils import append_jsonl, write_json, write_jsonl
+from cspd_stage1.io_utils import append_jsonl, read_jsonl, write_json, write_jsonl
 from cspd_stage1.prompting import SYSTEM_PROMPT, build_user_prompt
 from cspd_stage1.schema import (
     SampleRecord,
@@ -54,6 +55,7 @@ class Stage1Config:
     class_name_map: str | None = None
     class_archetype_map: str | None = None
     flush_every: int = 10
+    resume: bool = True
 
 
 def run_stage1(config: Stage1Config) -> dict[str, Any]:
@@ -76,16 +78,36 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
     failed_path = output_dir / "failed_samples.jsonl"
     stats_path = output_dir / "stage1_stats.json"
 
-    write_jsonl(success_path, [])
-    write_jsonl(failed_path, [])
-
     dataset_root_resolved = str(Path(config.dataset_root).resolve())
-    success_rows: list[dict[str, Any]] = []
-    failed_rows: list[dict[str, Any]] = []
+
+    if config.resume:
+        success_rows = read_jsonl(success_path) if success_path.exists() else []
+        failed_rows = read_jsonl(failed_path) if failed_path.exists() else []
+    else:
+        success_rows = []
+        failed_rows = []
+        write_jsonl(success_path, [])
+        write_jsonl(failed_path, [])
+
+    if config.resume and not success_path.exists():
+        write_jsonl(success_path, [])
+    if config.resume and not failed_path.exists():
+        write_jsonl(failed_path, [])
+
+    processed_record_ids = {
+        str(row.get("record_id"))
+        for row in [*success_rows, *failed_rows]
+        if isinstance(row, dict) and row.get("record_id") is not None
+    }
+
     pending_success_rows: list[dict[str, Any]] = []
     pending_failed_rows: list[dict[str, Any]] = []
 
-    progress = tqdm(samples, desc="Stage1 attribute extraction", unit="img", dynamic_ncols=True)
+    samples_to_process = [
+        sample for sample in samples if _build_record_id(sample) not in processed_record_ids
+    ]
+
+    progress = tqdm(samples_to_process, desc="Stage1 attribute extraction", unit="img", dynamic_ncols=True)
     for index, sample in enumerate(progress, start=1):
         progress.set_postfix_str(_build_progress_postfix(sample, len(success_rows), len(failed_rows)))
         result = _process_sample(sample=sample, client=client, max_retries=config.max_retries)
@@ -111,7 +133,7 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
             pending_failed_rows.append(row)
 
         progress.set_postfix_str(_build_progress_postfix(sample, len(success_rows), len(failed_rows)))
-        should_flush = index == len(samples) or index % max(config.flush_every, 1) == 0
+        should_flush = index == len(samples_to_process) or index % max(config.flush_every, 1) == 0
         if should_flush:
             _flush_partial_results(
                 success_path=success_path,
@@ -119,17 +141,22 @@ def run_stage1(config: Stage1Config) -> dict[str, Any]:
                 stats_path=stats_path,
                 pending_success_rows=pending_success_rows,
                 pending_failed_rows=pending_failed_rows,
-                stats=_build_stats(config, samples, success_rows, failed_rows),
+                stats=_build_stats(config, samples, success_rows, failed_rows, len(samples_to_process), len(processed_record_ids)),
             )
             progress.write(
-                f"[progress] {index}/{len(samples)} done | success={len(success_rows)} | failed={len(failed_rows)}"
+                f"[progress] {index}/{len(samples_to_process)} new done | success={len(success_rows)} | failed={len(failed_rows)} | resumed={len(processed_record_ids)}"
             )
 
     progress.close()
 
-    final_stats = _build_stats(config, samples, success_rows, failed_rows)
+    final_stats = _build_stats(config, samples, success_rows, failed_rows, len(samples_to_process), len(processed_record_ids))
     write_json(stats_path, final_stats)
     return final_stats
+
+
+def _build_record_id(sample: SampleRecord) -> str:
+    relative_path = sample.sample_id or Path(sample.image_path).name
+    return f"{sample.class_name_raw}::{relative_path}"
 
 
 def _build_sample_metadata(sample: SampleRecord, config: Stage1Config, dataset_root_resolved: str) -> dict[str, Any]:
@@ -137,7 +164,7 @@ def _build_sample_metadata(sample: SampleRecord, config: Stage1Config, dataset_r
     relative_path = sample.sample_id or image_path.name
     split = Path(dataset_root_resolved).name
     extracted_at = datetime.now(timezone.utc).isoformat()
-    record_id = f"{sample.class_name_raw}::{relative_path}"
+    record_id = _build_record_id(sample)
     return {
         "record_id": record_id,
         "dataset_root": dataset_root_resolved,
@@ -180,12 +207,16 @@ def _build_stats(
     samples: list[SampleRecord],
     success_rows: list[dict[str, Any]],
     failed_rows: list[dict[str, Any]],
+    num_new_samples_attempted: int,
+    num_resumed_skipped: int,
 ) -> dict[str, Any]:
     return {
         "dataset_root": str(Path(config.dataset_root).resolve()),
-        "num_samples": len(samples),
-        "num_success": len(success_rows),
-        "num_failed": len(failed_rows),
+        "num_samples_total": len(samples),
+        "num_samples_attempted_this_run": num_new_samples_attempted,
+        "num_samples_skipped_via_resume": num_resumed_skipped,
+        "num_success_total": len(success_rows),
+        "num_failed_total": len(failed_rows),
         "backend": config.backend,
         "max_retries": config.max_retries,
         "model_name": config.model_name,
@@ -196,6 +227,7 @@ def _build_stats(
         "class_archetype_map": config.class_archetype_map,
         "archetypes": sorted({sample.archetype for sample in samples}),
         "flush_every": config.flush_every,
+        "resume_enabled": config.resume,
     }
 
 
@@ -326,4 +358,5 @@ def config_from_args(args) -> Stage1Config:
         class_name_map=args.class_name_map,
         class_archetype_map=args.class_archetype_map,
         flush_every=args.flush_every,
+        resume=not args.no_resume,
     )
