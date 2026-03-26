@@ -8,6 +8,7 @@ This script is designed to reduce single-step pressure on the VLM:
 5. Coverage is tracked programmatically so later rounds are pushed toward uncovered semantic regions.
 6. Repair rounds are triggered when the model keeps proposing already-covered regions.
 7. Example-consistency checks reject archetypes whose example classes obviously contradict the target region.
+8. Uncovered targets are scheduled in small batches so the model focuses on a narrow subset each round.
 """
 
 from __future__ import annotations
@@ -64,24 +65,12 @@ SEMANTIC_OVERLAP_RULES = {
     },
 }
 EXAMPLE_KEYWORD_GUARDS = {
-    "animal": {
-        "required_any": ["dog", "cat", "bird", "fish", "shark", "snake", "frog", "bear", "tiger", "hen"],
-    },
-    "plant": {
-        "required_any": ["tree", "flower", "plant", "leaf", "corn", "acorn", "daisy", "mushroom"],
-    },
-    "food": {
-        "required_any": ["pizza", "salad", "cake", "apple", "banana", "bread", "burger", "hotdog"],
-    },
-    "vehicle": {
-        "required_any": ["car", "bus", "truck", "boat", "ship", "airliner", "train", "bicycle"],
-    },
-    "clothing": {
-        "required_any": ["shirt", "dress", "jacket", "shoe", "hat", "scarf", "sweatshirt", "jean"],
-    },
-    "furniture": {
-        "required_any": ["chair", "table", "bed", "sofa", "desk", "cabinet", "stool"],
-    },
+    "animal": {"required_any": ["dog", "cat", "bird", "fish", "shark", "snake", "frog", "bear", "tiger", "hen"]},
+    "plant": {"required_any": ["tree", "flower", "plant", "leaf", "corn", "acorn", "daisy", "mushroom"]},
+    "food": {"required_any": ["pizza", "salad", "cake", "apple", "banana", "bread", "burger", "hotdog"]},
+    "vehicle": {"required_any": ["car", "bus", "truck", "boat", "ship", "airliner", "train", "bicycle"]},
+    "clothing": {"required_any": ["shirt", "dress", "jacket", "shoe", "hat", "scarf", "sweatshirt", "jean"]},
+    "furniture": {"required_any": ["chair", "table", "bed", "sofa", "desk", "cabinet", "stool"]},
     "tool": {
         "required_any": ["hammer", "wrench", "screwdriver", "pliers", "saw", "chisel", "drill"],
         "forbidden_any": ["shark", "goldfish", "dog", "bird", "flower", "pizza"],
@@ -90,12 +79,8 @@ EXAMPLE_KEYWORD_GUARDS = {
         "required_any": ["microwave", "washer", "computer", "radio", "vacuum", "refrigerator", "printer"],
         "forbidden_any": ["hammer", "wrench", "screwdriver", "pliers"],
     },
-    "container": {
-        "required_any": ["bottle", "bucket", "bag", "basket", "box", "trash can", "vase"],
-    },
-    "instrument": {
-        "required_any": ["guitar", "piano", "violin", "drum", "trumpet", "flute"],
-    },
+    "container": {"required_any": ["bottle", "bucket", "bag", "basket", "box", "trash can", "vase"]},
+    "instrument": {"required_any": ["guitar", "piano", "violin", "drum", "trumpet", "flute"]},
 }
 
 
@@ -109,7 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-new-tokens", type=int, default=2048, help="Generation length cap")
     parser.add_argument("--max-classes-in-prompt", type=int, default=1000, help="Maximum classes included in prompt")
     parser.add_argument("--new-archetypes-per-round", type=int, default=3, help="Requested new archetypes per proposal round")
-    parser.add_argument("--proposal-rounds", type=int, default=5, help="Proposal rounds after the initial summary")
+    parser.add_argument("--proposal-rounds", type=int, default=6, help="Proposal rounds after the initial summary")
+    parser.add_argument("--target-batch-size", type=int, default=3, help="How many uncovered targets to schedule per round")
     return parser
 
 
@@ -129,11 +115,7 @@ def load_local_qwen(model_name: str, torch_dtype: str, device_map: str):
     if normalized not in dtype_map:
         raise ValueError(f"Unsupported torch dtype: {torch_dtype}")
 
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        model_name,
-        torch_dtype=dtype_map[normalized],
-        device_map=device_map,
-    )
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_name, torch_dtype=dtype_map[normalized], device_map=device_map)
     processor = AutoProcessor.from_pretrained(model_name)
     return model, processor
 
@@ -172,6 +154,15 @@ def compute_coverage_state(accepted_archetypes: list[dict[str, Any]]) -> dict[st
     return {"covered_targets": covered, "uncovered_targets": uncovered, "accepted_extra_names": extra}
 
 
+def get_scheduled_targets(coverage_state: dict[str, list[str]], round_index: int, batch_size: int) -> list[str]:
+    uncovered = coverage_state["uncovered_targets"]
+    if not uncovered:
+        return []
+    start = ((round_index - 2) * batch_size) % len(uncovered)
+    ordered = uncovered[start:] + uncovered[:start]
+    return ordered[:batch_size]
+
+
 def build_round1_prompt(classes_payload: list[dict[str, str]]) -> str:
     template = {
         "major_regions": ["animals", "vehicles", "foods", "tools_and_devices", "furniture_and_household_objects"],
@@ -194,31 +185,31 @@ def build_target_definition_block(targets: list[str]) -> list[dict[str, str]]:
     return [{"target": t, "definition": TARGET_DEFINITIONS[t]} for t in targets]
 
 
-def build_proposal_prompt(classes_payload: list[dict[str, str]], latest_summary: dict[str, Any], accepted_archetypes: list[dict[str, Any]], coverage_state: dict[str, list[str]], new_archetypes_per_round: int, round_index: int) -> str:
-    prioritized_targets = coverage_state["uncovered_targets"][: max(new_archetypes_per_round + 2, 5)]
+def build_proposal_prompt(classes_payload: list[dict[str, str]], latest_summary: dict[str, Any], accepted_archetypes: list[dict[str, Any]], coverage_state: dict[str, list[str]], scheduled_targets: list[str], new_archetypes_per_round: int, round_index: int) -> str:
     template = {
         "round_index": round_index,
         "new_archetypes": [
             {
-                "name": "vehicle",
-                "definition": TARGET_DEFINITIONS["vehicle"],
-                "inclusion_guidelines": ["cars, trucks, buses, boats, aircraft"],
-                "example_classes": ["sports car", "school bus", "airliner"],
-                "conflict_risk_with_existing": ["device_or_appliance"],
-                "why_needed": "covers a major uncovered semantic region",
-                "target_coverage_region": "vehicle",
+                "name": scheduled_targets[0] if scheduled_targets else "vehicle",
+                "definition": TARGET_DEFINITIONS.get(scheduled_targets[0], TARGET_DEFINITIONS["vehicle"]) if scheduled_targets else TARGET_DEFINITIONS["vehicle"],
+                "inclusion_guidelines": ["add concise inclusion guidance"],
+                "example_classes": ["add 2-5 example classes"],
+                "conflict_risk_with_existing": [],
+                "why_needed": "covers a scheduled uncovered semantic region",
+                "target_coverage_region": scheduled_targets[0] if scheduled_targets else "vehicle",
             }
         ],
-        "remaining_regions_to_cover": ["food", "plant", "clothing"],
-        "notes": ["prioritize uncovered regions and avoid repeating accepted archetypes"],
+        "remaining_regions_to_cover": coverage_state["uncovered_targets"],
+        "notes": ["propose only scheduled uncovered targets for this round"],
     }
     return (
         f"You are continuing taxonomy design for round {round_index}.\n"
-        "You must propose archetypes ONLY for currently uncovered semantic regions unless a split is absolutely necessary.\n"
+        "This round is batch-scheduled. You may ONLY propose archetypes whose target_coverage_region is in the scheduled target batch below.\n"
         "Hard rules:\n"
         "- Keep archetypes at the same abstraction level\n"
         "- Do not repeat covered targets\n"
-        "- Do not propose synonyms of covered targets\n"
+        "- Do not propose anything outside the scheduled target batch\n"
+        "- If a scheduled target is hard, still stay within the scheduled batch rather than jumping elsewhere\n"
         "- Do not mix tool with device_or_appliance\n"
         "- instrument means musical instrument only\n"
         "- device_or_appliance must exclude simple manual tools\n"
@@ -227,8 +218,8 @@ def build_proposal_prompt(classes_payload: list[dict[str, str]], latest_summary:
         f"{json.dumps(coverage_state['covered_targets'], ensure_ascii=False, indent=2)}\n"
         "Program-maintained uncovered targets:\n"
         f"{json.dumps(coverage_state['uncovered_targets'], ensure_ascii=False, indent=2)}\n"
-        "Prioritized targets for this round:\n"
-        f"{json.dumps(build_target_definition_block(prioritized_targets), ensure_ascii=False, indent=2)}\n"
+        "Scheduled target batch for this round:\n"
+        f"{json.dumps(build_target_definition_block(scheduled_targets), ensure_ascii=False, indent=2)}\n"
         "Current accepted archetypes:\n"
         f"{json.dumps(accepted_archetypes, ensure_ascii=False, indent=2)}\n"
         "Latest summary:\n"
@@ -240,29 +231,28 @@ def build_proposal_prompt(classes_payload: list[dict[str, str]], latest_summary:
     )
 
 
-def build_repair_prompt(classes_payload: list[dict[str, str]], accepted_archetypes: list[dict[str, Any]], coverage_state: dict[str, list[str]], round_index: int) -> str:
-    prioritized_targets = coverage_state["uncovered_targets"][:5]
+def build_repair_prompt(classes_payload: list[dict[str, str]], accepted_archetypes: list[dict[str, Any]], scheduled_targets: list[str], round_index: int) -> str:
     template = {
         "round_index": round_index,
         "repair_new_archetypes": [
             {
-                "name": "plant",
-                "definition": TARGET_DEFINITIONS["plant"],
-                "inclusion_guidelines": ["trees, flowers, leaves, mushrooms if treated as plant-like visual classes"],
-                "example_classes": ["daisy", "corn", "acorn"],
-                "target_coverage_region": "plant",
-                "why_needed": "repair round focuses on uncovered targets only",
+                "name": scheduled_targets[0] if scheduled_targets else "plant",
+                "definition": TARGET_DEFINITIONS.get(scheduled_targets[0], TARGET_DEFINITIONS["plant"]) if scheduled_targets else TARGET_DEFINITIONS["plant"],
+                "inclusion_guidelines": ["add concise inclusion guidance"],
+                "example_classes": ["add 2-5 example classes"],
+                "target_coverage_region": scheduled_targets[0] if scheduled_targets else "plant",
+                "why_needed": "repair round focuses strictly on scheduled uncovered targets",
             }
         ],
-        "notes": ["repair round: propose only uncovered targets"],
+        "notes": ["repair round: propose only scheduled uncovered targets"],
     }
     return (
         f"This is a repair round for round {round_index}.\n"
         "Recent proposal rounds repeated covered targets or failed to expand coverage.\n"
-        "You are now restricted to proposing archetypes ONLY from the uncovered targets below.\n"
-        "If you propose a covered target, the proposal will be rejected.\n"
-        "Uncovered targets with definitions:\n"
-        f"{json.dumps(build_target_definition_block(prioritized_targets), ensure_ascii=False, indent=2)}\n"
+        "You are now restricted to proposing archetypes ONLY from the scheduled uncovered targets below.\n"
+        "If you propose any target outside this scheduled batch, it will be rejected.\n"
+        "Scheduled uncovered targets with definitions:\n"
+        f"{json.dumps(build_target_definition_block(scheduled_targets), ensure_ascii=False, indent=2)}\n"
         "Accepted archetypes:\n"
         f"{json.dumps(accepted_archetypes, ensure_ascii=False, indent=2)}\n"
         "Dataset classes:\n"
@@ -277,7 +267,7 @@ def build_review_prompt(classes_payload: list[dict[str, str]], accepted_archetyp
         "coverage_assessment": {
             "animal_regions_covered": True,
             "non_animal_regions_covered": True,
-            "major_missing_regions": ["food", "plant"],
+            "major_missing_regions": coverage_state["uncovered_targets"][:5],
         },
         "overlap_risks": ["possible overlap between tool and device_or_appliance"],
         "final_notes": ["taxonomy is usable as a candidate for manual review after checking missing regions"],
@@ -314,7 +304,7 @@ def run_text_round(model, processor, user_prompt: str, max_new_tokens: int) -> t
     return payload, output_text
 
 
-def coverage_gate(candidate: dict[str, Any], coverage_state: dict[str, list[str]]) -> dict[str, Any]:
+def coverage_gate(candidate: dict[str, Any], coverage_state: dict[str, list[str]], scheduled_targets: list[str]) -> dict[str, Any]:
     target_region = normalize_archetype_name(str(candidate.get("target_coverage_region", "")))
     if not target_region:
         return {"accepted": False, "reason": "missing_target_coverage_region"}
@@ -322,6 +312,8 @@ def coverage_gate(candidate: dict[str, Any], coverage_state: dict[str, list[str]
         return {"accepted": False, "reason": f"target_already_covered:{target_region}"}
     if target_region not in coverage_state["uncovered_targets"]:
         return {"accepted": False, "reason": f"target_not_in_uncovered_set:{target_region}"}
+    if scheduled_targets and target_region not in scheduled_targets:
+        return {"accepted": False, "reason": f"target_not_in_scheduled_batch:{target_region}"}
     return {"accepted": True, "reason": "ok"}
 
 
@@ -426,6 +418,7 @@ def main() -> None:
             "summary": round1_payload,
             "accepted_archetype_count": len(accepted_archetypes),
             "coverage_state": compute_coverage_state(accepted_archetypes),
+            "scheduled_targets": [],
             "raw_response": round1_raw,
         }
         write_json(task_dir / "round_001_summary.json", latest_summary)
@@ -434,14 +427,15 @@ def main() -> None:
     consecutive_zero_accept_rounds = 0
     for _ in range(args.proposal_rounds):
         coverage_state = compute_coverage_state(accepted_archetypes)
-        use_repair = consecutive_zero_accept_rounds >= 1 and len(coverage_state["uncovered_targets"]) > 0
+        scheduled_targets = get_scheduled_targets(coverage_state, round_index, args.target_batch_size)
+        use_repair = consecutive_zero_accept_rounds >= 1 and len(scheduled_targets) > 0
         if use_repair:
-            prompt = build_repair_prompt(classes_payload, accepted_archetypes, coverage_state, round_index)
+            prompt = build_repair_prompt(classes_payload, accepted_archetypes, scheduled_targets, round_index)
             proposal_payload, proposal_raw = run_text_round(model, processor, prompt, args.max_new_tokens)
             proposed_archetypes = proposal_payload.get("repair_new_archetypes", [])
             round_mode = "repair"
         else:
-            prompt = build_proposal_prompt(classes_payload, latest_summary, accepted_archetypes, coverage_state, args.new_archetypes_per_round, round_index)
+            prompt = build_proposal_prompt(classes_payload, latest_summary, accepted_archetypes, coverage_state, scheduled_targets, args.new_archetypes_per_round, round_index)
             proposal_payload, proposal_raw = run_text_round(model, processor, prompt, args.max_new_tokens)
             proposed_archetypes = proposal_payload.get("new_archetypes", [])
             round_mode = "proposal"
@@ -453,7 +447,7 @@ def main() -> None:
         for candidate in proposed_archetypes:
             if not isinstance(candidate, dict):
                 continue
-            gate = coverage_gate(candidate, coverage_state)
+            gate = coverage_gate(candidate, coverage_state, scheduled_targets)
             name_check = conflict_check(candidate, accepted_archetypes)
             overlap_check = semantic_overlap_guard(candidate, accepted_archetypes)
             example_check = example_consistency_check(candidate)
@@ -461,6 +455,7 @@ def main() -> None:
             row = {
                 "round_index": round_index,
                 "round_mode": round_mode,
+                "scheduled_targets": scheduled_targets,
                 "candidate": candidate,
                 "coverage_gate": gate,
                 "name_conflict_check": name_check,
@@ -487,6 +482,7 @@ def main() -> None:
             "accepted_new_archetypes": accepted_this_round,
             "accepted_archetype_count": len(accepted_archetypes),
             "coverage_state": compute_coverage_state(accepted_archetypes),
+            "scheduled_targets": scheduled_targets,
             "model_reported_remaining_regions": proposal_payload.get("remaining_regions_to_cover", []),
             "notes": proposal_payload.get("notes", []),
             "consecutive_zero_accept_rounds": consecutive_zero_accept_rounds,
