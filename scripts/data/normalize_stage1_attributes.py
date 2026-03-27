@@ -41,6 +41,12 @@ class Normalizer:
         self.person_markers = tuple(review_substrings.get("part_or_state_person_mentions", []))
         self.narrative_markers = tuple(review_substrings.get("mixed_or_narrative_markers", []))
         self.background_color_markers = tuple(review_substrings.get("slot_contamination_color_background", []))
+        refinement_rules = rules.get("v2_refinement", {})
+        self.person_to_unknown_slots = set(refinement_rules.get("person_to_unknown_slots", []))
+        self.person_unknown_phrases = tuple(self._clean_key(v) for v in refinement_rules.get("person_unknown_phrases", []))
+        self.mixed_state_primary_values = {
+            self._clean_key(v) for v in refinement_rules.get("mixed_state_primary_values", [])
+        }
 
     @staticmethod
     def _clean_key(value: Any) -> str:
@@ -70,6 +76,10 @@ class Normalizer:
         if cleaned != normalized:
             status = "canonicalized"
 
+        normalized, status, applied_rules = self.normalize_low_value_contamination(slot, normalized, status, applied_rules)
+        if status == "mapped_to_unknown":
+            return self._result(original, cleaned, normalized, status, applied_rules, review_reasons)
+
         slot_map = self.class_slot_maps.get(class_name_raw, {}).get(slot, {})
         key = self._clean_key(normalized)
 
@@ -95,6 +105,7 @@ class Normalizer:
             )
 
         if slot in self.state_slots:
+            normalized, status, applied_rules = self.normalize_mixed_state(normalized, status, applied_rules)
             normalized, status, applied_rules = self.normalize_state_pattern(normalized, status, applied_rules)
 
         if slot in self.material_slots:
@@ -152,6 +163,18 @@ class Normalizer:
     def is_unknown_like(self, value: str) -> bool:
         return self._clean_key(value) in self.unknown_like
 
+    def normalize_low_value_contamination(
+        self, slot: str, value: str, status: str, applied_rules: list[str]
+    ) -> tuple[str, str, list[str]]:
+        key = self._clean_key(value)
+        if slot in self.background_slots and key in self.background_color_markers:
+            applied_rules.append("slot.background.low_value_to_unknown")
+            return "unknown", "mapped_to_unknown", applied_rules
+        if slot in self.person_to_unknown_slots and (key in self.person_unknown_phrases or any(marker in key for marker in self.person_markers)):
+            applied_rules.append("slot.person_contamination_to_unknown")
+            return "unknown", "mapped_to_unknown", applied_rules
+        return value, status, applied_rules
+
     def apply_simple_map(
         self,
         value: str,
@@ -178,15 +201,30 @@ class Normalizer:
             return singular_map[key], "canonicalized", applied_rules
         return value, status, applied_rules
 
+    def normalize_mixed_state(self, value: str, status: str, applied_rules: list[str]) -> tuple[str, str, list[str]]:
+        key = self._clean_key(value)
+        if "," not in key:
+            return value, status, applied_rules
+
+        parts = [part.strip() for part in key.split(",") if part.strip()]
+        if len(parts) != 2:
+            return value, status, applied_rules
+
+        primary, secondary = parts
+        if primary in self.mixed_state_primary_values and len(secondary) <= 32 and not re.search(r"\d", secondary):
+            applied_rules.append("slot.state.primary_clause")
+            return primary, "canonicalized", applied_rules
+        return value, status, applied_rules
+
     def normalize_state_pattern(self, value: str, status: str, applied_rules: list[str]) -> tuple[str, str, list[str]]:
         key = self._clean_key(value)
         if key.startswith("held") or key.startswith("being held"):
             applied_rules.append("slot.state.held_family")
             return "being held", "canonicalized", applied_rules
-        if key.startswith("powered on"):
+        if key.startswith("powered on") or key == "active":
             applied_rules.append("slot.state.on_family")
             return "on", "canonicalized", applied_rules
-        if key.startswith("powered off"):
+        if key.startswith("powered off") or key == "inactive":
             applied_rules.append("slot.state.off_family")
             return "off", "canonicalized", applied_rules
         return value, status, applied_rules

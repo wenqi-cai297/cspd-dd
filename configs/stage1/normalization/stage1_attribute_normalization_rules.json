@@ -209,5 +209,52 @@
     "part_or_state_person_mentions": ["person", "man", "woman", "child", "people", "human"],
     "mixed_or_narrative_markers": ["possibly", "near ", " with ", ", displaying", ", old"],
     "slot_contamination_color_background": ["white", "black", "dark"]
+  },
+  "v2_refinement": {
+    "person_to_unknown_slots": [
+      "salient_part_or_focus",
+      "salient_part_or_accessory"
+    ],
+    "person_unknown_phrases": [
+      "person",
+      "people",
+      "children",
+      "person attached",
+      "people attached",
+      "person holding",
+      "people holding",
+      "person suspended",
+      "silhouette of person",
+      "person silhouetted",
+      "man holding fish",
+      "man's hands",
+      "man's hands holding fish"
+    ],
+    "mixed_state_primary_values": [
+      "standing",
+      "sitting",
+      "resting",
+      "lying down",
+      "lying",
+      "floating",
+      "deployed",
+      "inflated",
+      "active",
+      "inactive",
+      "playing",
+      "panting",
+      "alert",
+      "attentive",
+      "relaxed",
+      "calm",
+      "in motion",
+      "tilted",
+      "dead",
+      "immobile",
+      "static",
+      "walking",
+      "running",
+      "jumping"
+    ]
   }
 }

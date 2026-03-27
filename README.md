@@ -148,7 +148,7 @@ The script preserves the original row and writes these artifacts:
 - `normalization_summary.json`: aggregate counts by status / slot / class / rule
 - `normalization_rules_snapshot.json`: exact rule snapshot used for the run
 
-v1 is intentionally conservative: it handles whitespace/casing cleanup, placeholder normalization, common viewpoint/state/material/color cleanup, and selected class-aware canonicalization for the current ImageNette-like classes while leaving ambiguous long-tail values in place and surfacing them for review.
+The current ruleset is still conservative, but now includes a v2 refinement pass for a few high-volume low-value failure modes: pure color/lighting contamination in background slots is mapped to `unknown`, obvious person-mention leakage in focus/accessory slots is mapped to `unknown`, and simple two-clause mixed state phrases (for example `deployed, descending` or `standing, panting`) collapse to their primary clause when the head state is safe enough to keep.
 
 ## Server shell scripts
 
