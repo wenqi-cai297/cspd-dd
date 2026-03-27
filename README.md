@@ -111,6 +111,20 @@ python scripts/data/generate_class_to_archetype_map_vlm.py \
   --taxonomy configs/stage1/archetype_taxonomy_manual.json
 ```
 
+## Attribute analysis helper
+
+To inspect slot/value distributions before writing normalization rules:
+
+```bash
+python scripts/data/analyze_attribute_values.py \
+  --input /path/to/attributes.jsonl \
+  --top-k 20 \
+  --print-top-k 10
+```
+
+This writes a JSON summary report next to the input file and prints per-archetype,
+per-slot top values to stdout.
+
 ## Server shell scripts
 
 To avoid repeatedly typing the same CLI commands on the server, helper shell scripts are included under `scripts/server/`:
