@@ -34,7 +34,11 @@ def parse_json_object(raw_text: str) -> dict[str, Any]:
     the first dictionary item as the payload. This makes Stage 1 tolerant to
     outputs like `[ { ... } ]` or `[ { ... }, { ... } ]`.
 
-    If strict parsing fails, apply a conservative fallback parser for the
+    If strict parsing fails, try to salvage the first complete JSON object from
+    a truncated response such as `[ { ... }, { ...` where the model already
+    emitted one valid candidate before being cut off.
+
+    If that also fails, apply a conservative fallback parser for the
     pseudo-JSON pattern we have observed from the VLM.
     """
     cleaned_text = clean_json_text(raw_text)
@@ -42,7 +46,12 @@ def parse_json_object(raw_text: str) -> dict[str, Any]:
         parsed = json.loads(cleaned_text)
         parsed = _coerce_top_level_list_to_object(parsed)
     except json.JSONDecodeError:
-        parsed = _parse_bullet_style_attributes(cleaned_text)
+        salvaged_object_text = _extract_first_complete_json_object(cleaned_text)
+        if salvaged_object_text is not None:
+            parsed = json.loads(salvaged_object_text)
+            parsed = _coerce_top_level_list_to_object(parsed)
+        else:
+            parsed = _parse_bullet_style_attributes(cleaned_text)
     if not isinstance(parsed, dict):
         raise ValueError(f"Expected a JSON object, got {type(parsed).__name__}")
     return parsed
@@ -57,6 +66,45 @@ def _coerce_top_level_list_to_object(parsed: Any) -> Any:
                 return item
         raise ValueError("Expected a JSON object or a list containing at least one object")
     return parsed
+
+
+def _extract_first_complete_json_object(text: str) -> str | None:
+    """Extract the first complete top-level JSON object from noisy/truncated text.
+
+    This is used for cases where the model emits a valid first object and then
+    keeps generating additional candidates before getting truncated, e.g.:
+    `[ { ... }, { ...`.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for index in range(start, len(text)):
+        char = text[index]
+
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+
+    return None
 
 
 def _parse_bullet_style_attributes(text: str) -> dict[str, Any]:
