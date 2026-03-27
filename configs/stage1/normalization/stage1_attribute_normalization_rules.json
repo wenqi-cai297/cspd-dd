@@ -1,0 +1,213 @@
+{
+  "unknown_like_values": [
+    "",
+    "unknown",
+    "unk",
+    "none",
+    "null",
+    "n/a",
+    "na",
+    "not applicable",
+    "not_applicable",
+    "not visible",
+    "not clearly visible",
+    "not discernible",
+    "indistinct"
+  ],
+  "slot_alias_groups": {
+    "viewpoint": ["viewpoint"],
+    "type_slots": [
+      "species_or_category",
+      "device_or_appliance_type",
+      "instrument_type",
+      "sports_or_toy_type",
+      "structure_or_building_type",
+      "tool_type",
+      "vehicle_type"
+    ],
+    "material_slots": ["material", "material_or_finish", "material_or_surface"],
+    "color_slots": ["color", "color_or_pattern"],
+    "state_slots": [
+      "pose_or_state",
+      "operating_state_or_display_state",
+      "playing_state_or_pose",
+      "activity_or_usage_state",
+      "usage_state",
+      "state_or_action"
+    ],
+    "shape_slots": ["shape_or_structure", "architectural_style_or_form"],
+    "part_slots": [
+      "salient_part_or_focus",
+      "salient_structural_part",
+      "salient_part_or_accessory"
+    ],
+    "background_slots": [
+      "background_or_habitat",
+      "background_or_context",
+      "surrounding_environment",
+      "environment"
+    ]
+  },
+  "viewpoint_map": {
+    "front": "frontal",
+    "front view": "frontal",
+    "frontal view": "frontal",
+    "side": "side view",
+    "side angle": "side view",
+    "from above": "top-down",
+    "overhead": "top-down",
+    "ground-level": "ground level",
+    "ground": "ground level",
+    "from below": "low angle"
+  },
+  "state_map": {
+    "held": "being held",
+    "held in hand": "being held",
+    "held by hand": "being held",
+    "held by person": "being held",
+    "held by man": "being held",
+    "held upright": "being held",
+    "being played": "in use",
+    "powered off": "off",
+    "inactive": "off",
+    "powered on": "on",
+    "active": "on",
+    "operational": "in use",
+    "in operation": "in use",
+    "ready to use": "in use",
+    "resting on ground": "resting",
+    "resting on surface": "resting",
+    "resting on floor": "resting",
+    "resting on grass": "resting"
+  },
+  "shape_map": {
+    "sphere": "spherical",
+    "round": "spherical",
+    "smooth spherical": "spherical",
+    "curved tube": "curved tubing",
+    "curved tubes": "curved tubing",
+    "curved": "curved tubing",
+    "large, boxy": "large boxy"
+  },
+  "part_map": {
+    "faces": "face",
+    "towers": "tower",
+    "crosses": "cross",
+    "dump mechanism": "dumping mechanism"
+  },
+  "background_map": {
+    "outdoors": "outdoor",
+    "outdoor setting": "outdoor",
+    "indoor setting": "indoor"
+  },
+  "class_slot_maps": {
+    "n01440764": {
+      "species_or_category": {
+        "tench, tinca tinca": "tench",
+        "tench": "tench",
+        "tinca tinca": "tench",
+        "tinch": "tench",
+        "fish": "tench"
+      }
+    },
+    "n02102040": {
+      "species_or_category": {
+        "english springer": "english springer spaniel",
+        "english springer spaniel": "english springer spaniel",
+        "english springer, english springer spaniel": "english springer spaniel",
+        "springer spaniel": "english springer spaniel",
+        "dog": "english springer spaniel"
+      }
+    },
+    "n02979186": {
+      "device_or_appliance_type": {
+        "cassette player": "cassette player",
+        "cassette": "cassette player",
+        "tape player": "cassette player"
+      }
+    },
+    "n03000684": {
+      "tool_type": {
+        "chainsaw": "chainsaw",
+        "chain saw": "chainsaw",
+        "chain saw, chainsaw": "chainsaw"
+      }
+    },
+    "n03028079": {
+      "structure_or_building_type": {
+        "church": "church"
+      }
+    },
+    "n03394916": {
+      "instrument_type": {
+        "french horn": "french horn",
+        "french horn, horn": "french horn",
+        "horn": "french horn"
+      },
+      "material": {
+        "metallic": "metal",
+        "brass": "metal"
+      },
+      "color": {
+        "golden": "gold"
+      },
+      "shape_or_structure": {
+        "curved tube": "curved tubing",
+        "curved tubes": "curved tubing",
+        "curved": "curved tubing"
+      }
+    },
+    "n03417042": {
+      "vehicle_type": {
+        "garbage truck": "garbage truck",
+        "dump truck": "garbage truck",
+        "refuse truck": "garbage truck",
+        "trash truck": "garbage truck"
+      }
+    },
+    "n03425413": {
+      "device_or_appliance_type": {
+        "gas pump": "gas pump",
+        "gasoline pump": "gas pump",
+        "petrol pump": "gas pump",
+        "fuel pump": "gas pump",
+        "island dispenser": "gas pump"
+      }
+    },
+    "n03445777": {
+      "sports_or_toy_type": {
+        "golf ball": "golf ball",
+        "golf": "golf ball",
+        "golf balls": "golf ball"
+      },
+      "shape_or_structure": {
+        "sphere": "spherical",
+        "round": "spherical",
+        "smooth spherical": "spherical"
+      }
+    },
+    "n03888257": {
+      "vehicle_type": {
+        "parachute": "parachute",
+        "paraglider": "parachute"
+      }
+    }
+  },
+  "review_value_sets": {
+    "n01440764": {
+      "species_or_category": ["pike", "catfish", "trout"]
+    },
+    "n03000684": {
+      "tool_type": ["generator", "multi-tool grinder"],
+      "viewpoint": ["45 cc high performance, 2-stroke engine"]
+    },
+    "n03888257": {
+      "vehicle_type": ["airplane"]
+    }
+  },
+  "review_substrings": {
+    "part_or_state_person_mentions": ["person", "man", "woman", "child", "people", "human"],
+    "mixed_or_narrative_markers": ["possibly", "near ", " with ", ", displaying", ", old"],
+    "slot_contamination_color_background": ["white", "black", "dark"]
+  }
+}

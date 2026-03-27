@@ -125,6 +125,31 @@ python scripts/data/analyze_attribute_values.py \
 This writes a JSON summary report next to the input file and prints per-archetype,
 per-slot top values to stdout.
 
+## Stage 1 attribute normalization helper
+
+A conservative post-processing script is included for Stage 1 `attributes.jsonl` outputs:
+
+```bash
+python scripts/data/normalize_stage1_attributes.py \
+  --input /path/to/attributes.jsonl \
+  --output-dir /path/to/normalized_artifacts
+```
+
+Default rules live in:
+
+```text
+configs/stage1/normalization/stage1_attribute_normalization_rules.json
+```
+
+The script preserves the original row and writes these artifacts:
+- `attributes_normalized.jsonl`: original row plus `normalized_attributes` and per-slot normalization metadata
+- `normalization_audit.jsonl`: changed or review-flagged fields with rule ids/status
+- `normalization_review_queue.jsonl`: only suspicious / review-required items
+- `normalization_summary.json`: aggregate counts by status / slot / class / rule
+- `normalization_rules_snapshot.json`: exact rule snapshot used for the run
+
+v1 is intentionally conservative: it handles whitespace/casing cleanup, placeholder normalization, common viewpoint/state/material/color cleanup, and selected class-aware canonicalization for the current ImageNette-like classes while leaving ambiguous long-tail values in place and surfacing them for review.
+
 ## Server shell scripts
 
 To avoid repeatedly typing the same CLI commands on the server, helper shell scripts are included under `scripts/server/`:
