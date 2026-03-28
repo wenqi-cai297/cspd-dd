@@ -81,7 +81,7 @@ Example usage on the Linux GPU server:
 ```bash
 cspd-stage1 run \
   --dataset-root /path/to/imagefolder_dataset \
-  --output-dir runs/attributes/my_dataset/qwen_local/2026-03-25_170000 \
+  --output-dir runs/stage1/attributes/my_dataset/qwen_local/2026-03-25_170000 \
   --backend qwen_local \
   --model-name Qwen/Qwen2.5-VL-7B-Instruct \
   --torch-dtype float16 \

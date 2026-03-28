@@ -48,9 +48,9 @@ else
 fi
 
 TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
-PREP_DIR="runs/prep/${DATASET_NAME}/${TIMESTAMP}"
-TEST_DIR="runs/tests/${DATASET_NAME}/${TIMESTAMP}"
-ATTR_DIR="runs/attributes/${DATASET_NAME}/qwen_local/${TIMESTAMP}"
+PREP_DIR="runs/stage1/prep/${DATASET_NAME}/${TIMESTAMP}"
+TEST_DIR="runs/stage1/tests/${DATASET_NAME}/${TIMESTAMP}"
+ATTR_DIR="runs/stage1/attributes/${DATASET_NAME}/qwen_local/${TIMESTAMP}"
 CLASSES_JSON="$PREP_DIR/classes.json"
 ARCHETYPE_JSON="$PREP_DIR/class_to_archetype.json"
 SMOKE_DATASET_DIR="$TEST_DIR/mock_subset"

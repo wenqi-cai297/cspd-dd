@@ -9,7 +9,7 @@ set -euo pipefail
 #   bash scripts/server/run_stage1_qwen_local.sh /data/imagenette 256 /data/imagenette/classes.json 10 /data/imagenette/class_to_archetype.json
 #
 # The output directory is generated automatically as:
-#   runs/attributes/<dataset_name>/qwen_local/<timestamp>
+#   runs/stage1/attributes/<dataset_name>/qwen_local/<timestamp>
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: bash scripts/server/run_stage1_qwen_local.sh <dataset_root> [max_new_tokens] [class_name_map] [flush_every] [class_archetype_map]"

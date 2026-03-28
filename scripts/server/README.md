@@ -108,7 +108,7 @@ bash scripts/server/run_stage1_qwen_local.sh /data/imagenette/train 256 /data/im
 The output directory is generated automatically as:
 
 ```text
-runs/attributes/<dataset_name>/qwen_local/<timestamp>
+runs/stage1/attributes/<dataset_name>/qwen_local/<timestamp>
 ```
 
 ### Run Stage 1 with the mock backend
