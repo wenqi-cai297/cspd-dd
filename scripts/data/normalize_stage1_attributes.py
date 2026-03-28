@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,14 @@ class Normalizer:
         self.mixed_state_primary_values = {
             self._clean_key(v) for v in refinement_rules.get("mixed_state_primary_values", [])
         }
+        v3_rules = rules.get("v3_refinement", {})
+        self.low_value_background_phrases = {self._clean_key(v) for v in v3_rules.get("low_value_background_phrases", [])}
+        self.low_value_state_phrases = {self._clean_key(v) for v in v3_rules.get("low_value_state_phrases", [])}
+        self.low_value_shape_phrases = {self._clean_key(v) for v in v3_rules.get("low_value_shape_phrases", [])}
+        self.low_value_part_phrases = {self._clean_key(v) for v in v3_rules.get("low_value_part_phrases", [])}
+        self.non_ascii_to_unknown_slots = set(v3_rules.get("non_ascii_to_unknown_slots", []))
+        self.background_phrase_map = self._clean_mapping(v3_rules.get("background_phrase_map", {}))
+        self.state_phrase_map = self._clean_mapping(v3_rules.get("state_phrase_map", {}))
 
     @staticmethod
     def _clean_key(value: Any) -> str:
@@ -77,6 +86,10 @@ class Normalizer:
             status = "canonicalized"
 
         normalized, status, applied_rules = self.normalize_low_value_contamination(slot, normalized, status, applied_rules)
+        if status == "mapped_to_unknown":
+            return self._result(original, cleaned, normalized, status, applied_rules, review_reasons)
+
+        normalized, status, applied_rules = self.normalize_v3_render_awareness(slot, normalized, status, applied_rules)
         if status == "mapped_to_unknown":
             return self._result(original, cleaned, normalized, status, applied_rules, review_reasons)
 
@@ -173,6 +186,51 @@ class Normalizer:
         if slot in self.person_to_unknown_slots and (key in self.person_unknown_phrases or any(marker in key for marker in self.person_markers)):
             applied_rules.append("slot.person_contamination_to_unknown")
             return "unknown", "mapped_to_unknown", applied_rules
+        return value, status, applied_rules
+
+    def normalize_v3_render_awareness(
+        self, slot: str, value: str, status: str, applied_rules: list[str]
+    ) -> tuple[str, str, list[str]]:
+        key = self._clean_key(value)
+
+        if slot in self.non_ascii_to_unknown_slots and any(ord(ch) > 127 for ch in value):
+            applied_rules.append(f"slot.{slot}.non_ascii_to_unknown")
+            return "unknown", "mapped_to_unknown", applied_rules
+
+        if slot in self.background_slots:
+            if key in self.background_phrase_map:
+                mapped = self.background_phrase_map[key]
+                if mapped == "unknown":
+                    applied_rules.append("slot.background.low_value_to_unknown")
+                    return "unknown", "mapped_to_unknown", applied_rules
+                if mapped != value:
+                    applied_rules.append("slot.background.canonicalize")
+                    return mapped, "canonicalized", applied_rules
+            if key in self.low_value_background_phrases:
+                applied_rules.append("slot.background.low_value_to_unknown")
+                return "unknown", "mapped_to_unknown", applied_rules
+
+        if slot in self.state_slots:
+            if key in self.state_phrase_map:
+                mapped = self.state_phrase_map[key]
+                if mapped == "unknown":
+                    applied_rules.append("slot.state.low_value_to_unknown")
+                    return "unknown", "mapped_to_unknown", applied_rules
+                if mapped != value:
+                    applied_rules.append("slot.state.canonicalize")
+                    return mapped, "canonicalized", applied_rules
+            if key in self.low_value_state_phrases:
+                applied_rules.append("slot.state.low_value_to_unknown")
+                return "unknown", "mapped_to_unknown", applied_rules
+
+        if slot in self.shape_slots and key in self.low_value_shape_phrases:
+            applied_rules.append("slot.shape.low_value_to_unknown")
+            return "unknown", "mapped_to_unknown", applied_rules
+
+        if slot in self.part_slots and key in self.low_value_part_phrases:
+            applied_rules.append("slot.part.low_value_to_unknown")
+            return "unknown", "mapped_to_unknown", applied_rules
+
         return value, status, applied_rules
 
     def apply_simple_map(
@@ -315,7 +373,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         default=None,
-        help="Directory for normalized artifacts. Defaults to sibling directory named <input_stem>_normalized.",
+        help="Directory for normalized artifacts. Defaults to <input_dir>/normalization/<timestamp>.",
     )
     parser.add_argument(
         "--rules",
@@ -453,7 +511,11 @@ def main() -> None:
     if not rules_path.exists():
         raise SystemExit(f"Rules file does not exist: {rules_path}")
 
-    output_dir = Path(args.output_dir) if args.output_dir else input_path.with_name(f"{input_path.stem}_normalized")
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        output_dir = input_path.parent / "normalization" / timestamp
     summary = normalize_file(input_path=input_path, output_dir=output_dir, rules_path=rules_path)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

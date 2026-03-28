@@ -175,6 +175,7 @@ To avoid repeatedly typing the same CLI commands on the server, helper shell scr
 - `setup_cspd_stage1.sh`: activate `cspd-dd`, install the repo with `pip install -e .`, and check the CLI
 - `run_stage1_mock.sh`: quick mock-backend plumbing run
 - `run_stage1_qwen_local.sh`: run Stage 1 on an ImageFolder dataset with the real local Qwen backend
+- `run_stage1_normalization.sh`: run Stage 1 normalization under the same attribute-run directory
 - `run_stage1_full_workflow.sh`: complete Stage 1 shell workflow from env checks to final attribute extraction
 
 See `scripts/server/README.md` for the recommended order and detailed examples.

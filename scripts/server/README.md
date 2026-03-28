@@ -117,6 +117,24 @@ runs/stage1/attributes/<dataset_name>/qwen_local/<timestamp>
 bash scripts/server/run_stage1_mock.sh /path/to/dataset /path/to/output_dir
 ```
 
+### Run Stage 1 normalization
+
+```bash
+bash scripts/server/run_stage1_normalization.sh /path/to/attribute_run_dir
+```
+
+You can also pass the `attributes.jsonl` path directly:
+
+```bash
+bash scripts/server/run_stage1_normalization.sh /path/to/attribute_run_dir/attributes.jsonl
+```
+
+The output directory is generated automatically as:
+
+```text
+<attribute_run_dir>/normalization/<timestamp>
+```
+
 ### Run Stage 2 canonical rendering
 
 ```bash

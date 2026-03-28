@@ -256,5 +256,66 @@
       "running",
       "jumping"
     ]
+  },
+  "v3_refinement": {
+    "non_ascii_to_unknown_slots": [
+      "shape_or_structure",
+      "background_or_context",
+      "environment",
+      "salient_part_or_accessory"
+    ],
+    "low_value_background_phrases": [
+      "solid blue",
+      "cloth",
+      "neutral",
+      "wall",
+      "living room",
+      "indoor",
+      "outdoor",
+      "outdoor area",
+      "grassy area"
+    ],
+    "low_value_state_phrases": [
+      "being held",
+      "resting",
+      "at rest",
+      "stationary",
+      "off"
+    ],
+    "low_value_shape_phrases": [
+      "curved tubing",
+      "spherical",
+      "cylindrical",
+      "rectangular",
+      "blade"
+    ],
+    "low_value_part_phrases": [
+      "atlas disposal logo",
+      "numbered",
+      "tether lines",
+      "dumpster",
+      "large green trash bin"
+    ],
+    "background_phrase_map": {
+      "nighttime outdoor setting": "outdoor at night",
+      "forest at night": "forest at night",
+      "grass field": "grass",
+      "urban area": "urban",
+      "urban parking lot": "urban",
+      "retro-style display": "display area",
+      "outdoor, grassy area": "outdoor",
+      "solid blue": "unknown",
+      "cloth": "unknown",
+      "neutral": "unknown",
+      "wall": "unknown",
+      "living room": "unknown"
+    },
+    "state_phrase_map": {
+      "at rest": "unknown",
+      "stationary": "unknown",
+      "off": "unknown",
+      "being held": "unknown",
+      "resting": "unknown"
+    }
   }
 }
