@@ -3,19 +3,20 @@ set -euo pipefail
 
 # Run Stage 2 canonical semantic rendering from normalized Stage 1 artifacts.
 # Usage:
-#   bash scripts/server/run_stage2_render.sh /path/to/attributes_normalized.jsonl [output_dir] [renderer_version]
+#   bash scripts/server/run_stage2_render.sh /path/to/attributes_normalized.jsonl [renderer_version]
 # Example:
-#   bash scripts/server/run_stage2_render.sh runs/stage1/mock_normalized/attributes_normalized.jsonl
-#   bash scripts/server/run_stage2_render.sh /data/cspd/runs/stage1/imagenet_train_normalized/attributes_normalized.jsonl runs/stage2/imagenet_train_render
+#   bash scripts/server/run_stage2_render.sh runs/stage1/attributes/ImageNette/qwen_local/2026-03-26_183111/normalized_v2/attributes_normalized.jsonl
+#
+# The output directory is generated automatically as:
+#   runs/stage2/<dataset_name>/<backend>/<timestamp>
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: bash scripts/server/run_stage2_render.sh <normalized_attributes_jsonl> [output_dir] [renderer_version]"
+  echo "Usage: bash scripts/server/run_stage2_render.sh <normalized_attributes_jsonl> [renderer_version]"
   exit 1
 fi
 
 INPUT_PATH="$1"
-OUTPUT_DIR="${2:-}"
-RENDERER_VERSION="${3:-v1}"
+RENDERER_VERSION="${2:-v1}"
 ENV_NAME="cspd-dd"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,11 +27,21 @@ if [[ ! -f "$INPUT_PATH" ]]; then
   exit 1
 fi
 
-if [[ -z "$OUTPUT_DIR" ]]; then
-  INPUT_PARENT="$(basename "$(dirname "$INPUT_PATH")")"
-  TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
-  OUTPUT_DIR="runs/stage2/${INPUT_PARENT}/${TIMESTAMP}"
+INPUT_DIR="$(dirname "$INPUT_PATH")"
+INPUT_PARENT="$(basename "$INPUT_DIR")"
+BACKEND_CANDIDATE="$(basename "$(dirname "$(dirname "$INPUT_DIR")")")"
+DATASET_CANDIDATE="$(basename "$(dirname "$(dirname "$(dirname "$INPUT_DIR")")")")"
+TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
+
+if [[ "$INPUT_PARENT" == normalized* && "$BACKEND_CANDIDATE" != runs && -n "$DATASET_CANDIDATE" ]]; then
+  DATASET_NAME="$DATASET_CANDIDATE"
+  BACKEND_NAME="$BACKEND_CANDIDATE"
+else
+  DATASET_NAME="$INPUT_PARENT"
+  BACKEND_NAME="stage2_render"
 fi
+
+OUTPUT_DIR="runs/stage2/${DATASET_NAME}/${BACKEND_NAME}/${TIMESTAMP}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
@@ -44,14 +55,14 @@ echo "[INFO] backend_name:       $BACKEND_NAME"
 echo "[INFO] stage2_output_dir:  $OUTPUT_DIR"
 echo "[INFO] renderer_version:   $RENDERER_VERSION"
 
-a=(
+CMD=(
   cspd-stage2 render
   --input "$INPUT_PATH"
   --output-dir "$OUTPUT_DIR"
   --renderer-version "$RENDERER_VERSION"
 )
 
-"${a[@]}"
+"${CMD[@]}"
 
 echo "[INFO] Stage 2 render complete."
 echo "[INFO] records:  $OUTPUT_DIR/records.jsonl"
