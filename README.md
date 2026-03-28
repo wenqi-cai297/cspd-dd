@@ -1,8 +1,10 @@
 # CSPD-DD
 
-Minimal executable scaffold for **Stage 1: Attribute Extraction** in the CSPD-DD pipeline.
+Minimal executable scaffold for **Stage 1: Attribute Extraction** and an initial **Stage 2: Canonical Semantic Rendering** skeleton in the CSPD-DD pipeline.
 
-## Current Stage 1 scope
+## Current repo scope
+
+### Stage 1
 
 - Unified attribute schema
 - Direct input from an **ImageFolder-style dataset root**
@@ -19,6 +21,16 @@ Minimal executable scaffold for **Stage 1: Attribute Extraction** in the CSPD-DD
   - `attributes.jsonl`
   - `failed_samples.jsonl`
   - `stage1_stats.json`
+
+### Stage 2
+- Deterministic canonical semantic rendering from normalized Stage 1 records
+- Archetype-specific fixed template schemas stored in `src/cspd_stage2/templates.py`
+- CLI entrypoint:
+  - `cspd-stage2 render --input ... --output-dir ...`
+- Outputs:
+  - `records.jsonl`
+  - `failures.jsonl`
+  - `render_summary.json`
 
 ## Expected dataset layout
 
