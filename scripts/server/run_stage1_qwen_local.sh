@@ -38,7 +38,7 @@ else
 fi
 
 TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
-OUTPUT_DIR="runs/attributes/${DATASET_NAME}/qwen_local/${TIMESTAMP}"
+OUTPUT_DIR="runs/stage1/attributes/${DATASET_NAME}/qwen_local/${TIMESTAMP}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
