@@ -127,6 +127,19 @@ python scripts/data/generate_class_to_archetype_map_vlm.py \
   --taxonomy configs/stage1/archetype_taxonomy_manual.json
 ```
 
+## ImageFolder subset helper
+
+To create a small ImageFolder-style debugging subset with at most 20 images per class:
+
+```bash
+python scripts/data/make_imagefolder_subset.py \
+  --input /path/to/full_dataset \
+  --output /path/to/subset_dataset \
+  --max-per-class 20
+```
+
+This writes a normal ImageFolder-compatible subset plus `subset_summary.json` under the output root.
+
 ## Attribute analysis helper
 
 To inspect slot/value distributions before writing normalization rules:
