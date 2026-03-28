@@ -39,6 +39,8 @@ cd "$REPO_ROOT"
 mkdir -p "$OUTPUT_DIR"
 
 echo "[INFO] stage2_input:       $INPUT_PATH"
+echo "[INFO] dataset_name:       $DATASET_NAME"
+echo "[INFO] backend_name:       $BACKEND_NAME"
 echo "[INFO] stage2_output_dir:  $OUTPUT_DIR"
 echo "[INFO] renderer_version:   $RENDERER_VERSION"
 

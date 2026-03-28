@@ -120,19 +120,31 @@ bash scripts/server/run_stage1_mock.sh /path/to/dataset /path/to/output_dir
 ### Run Stage 2 canonical rendering
 
 ```bash
-bash scripts/server/run_stage2_render.sh /path/to/attributes_normalized.jsonl [output_dir] [renderer_version]
+bash scripts/server/run_stage2_render.sh /path/to/attributes_normalized.jsonl [renderer_version]
 ```
 
 Example:
 
 ```bash
-bash scripts/server/run_stage2_render.sh runs/stage1/example_normalized/attributes_normalized.jsonl
+bash scripts/server/run_stage2_render.sh runs/stage1/attributes/ImageNette/qwen_local/2026-03-26_183111/normalized_v2/attributes_normalized.jsonl
 ```
 
-If `output_dir` is omitted, the script now writes under:
+The output directory is now generated automatically as:
 
 ```text
-runs/stage2/<normalized_parent_dir>/<timestamp>
+runs/stage2/<dataset_name>/<backend>/<timestamp>
+```
+
+For a standard Stage 1 path such as:
+
+```text
+runs/stage1/attributes/ImageNette/qwen_local/2026-03-26_183111/normalized_v2/attributes_normalized.jsonl
+```
+
+Stage 2 will write to something like:
+
+```text
+runs/stage2/ImageNette/qwen_local/2026-03-28_173000
 ```
 
 ## Dataset assumption

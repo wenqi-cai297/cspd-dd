@@ -28,9 +28,9 @@ Minimal executable scaffold for **Stage 1: Attribute Extraction** and an initial
 - CLI entrypoint:
   - `cspd-stage2 render --input ... --output-dir ...`
 - Server helper:
-  - `bash scripts/server/run_stage2_render.sh /path/to/attributes_normalized.jsonl [output_dir] [renderer_version]`
+  - `bash scripts/server/run_stage2_render.sh /path/to/attributes_normalized.jsonl [renderer_version]`
 - Default server-side output root:
-  - `runs/stage2/`
+  - `runs/stage2/<dataset_name>/<backend>/<timestamp>`
 - Outputs:
   - `records.jsonl`
   - `failures.jsonl`
