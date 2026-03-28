@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage:
 #   bash scripts/server/run_stage2_render.sh /path/to/attributes_normalized.jsonl [renderer_version]
 # Example:
-#   bash scripts/server/run_stage2_render.sh runs/stage1/attributes/ImageNette/qwen_local/2026-03-26_183111/normalized_v2/attributes_normalized.jsonl
+#   bash scripts/server/run_stage2_render.sh runs/stage1/attributes/ImageNette/qwen_local/2026-03-26_183111/normalization/2026-03-28_180021/attributes_normalized.jsonl
 #
 # The output directory is generated automatically as:
 #   runs/stage2/<dataset_name>/<backend>/<timestamp>
@@ -28,16 +28,21 @@ if [[ ! -f "$INPUT_PATH" ]]; then
 fi
 
 INPUT_DIR="$(dirname "$INPUT_PATH")"
-INPUT_PARENT="$(basename "$INPUT_DIR")"
-BACKEND_CANDIDATE="$(basename "$(dirname "$(dirname "$INPUT_DIR")")")"
-DATASET_CANDIDATE="$(basename "$(dirname "$(dirname "$(dirname "$INPUT_DIR")")")")"
+PARENT_DIR="$(basename "$INPUT_DIR")"
 TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
 
-if [[ "$INPUT_PARENT" == normalized* && "$BACKEND_CANDIDATE" != runs && -n "$DATASET_CANDIDATE" ]]; then
-  DATASET_NAME="$DATASET_CANDIDATE"
-  BACKEND_NAME="$BACKEND_CANDIDATE"
+# Supported inputs:
+# 1) runs/stage1/attributes/<dataset>/<backend>/<run_ts>/normalization/<norm_ts>/attributes_normalized.jsonl
+# 2) fallback generic path handling
+if [[ "$PARENT_DIR" =~ ^20[0-9]{2}-[0-9]{2}-[0-9]{2}_[0-9]{6}$ ]] && [[ "$(basename "$(dirname "$INPUT_DIR")")" == "normalization" ]]; then
+  ATTRIBUTE_RUN_DIR="$(dirname "$(dirname "$INPUT_DIR")")"
+  BACKEND_NAME="$(basename "$(dirname "$ATTRIBUTE_RUN_DIR")")"
+  DATASET_NAME="$(basename "$(dirname "$(dirname "$ATTRIBUTE_RUN_DIR")")")"
+elif [[ "$PARENT_DIR" == normalized* ]]; then
+  BACKEND_NAME="$(basename "$(dirname "$(dirname "$INPUT_DIR")")")"
+  DATASET_NAME="$(basename "$(dirname "$(dirname "$(dirname "$INPUT_DIR")")")")"
 else
-  DATASET_NAME="$INPUT_PARENT"
+  DATASET_NAME="$PARENT_DIR"
   BACKEND_NAME="stage2_render"
 fi
 
