@@ -1,12 +1,20 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from cspd_stage1.io_utils import append_jsonl, read_jsonl, write_json, write_jsonl
-from cspd_stage2.render_utils import cleanup_caption, is_unknown_like, stringify_slot_value, with_article
+from cspd_stage2.render_utils import (
+    class_name_to_anchor,
+    clean_pre_anchor_value,
+    cleanup_caption,
+    format_post_slot,
+    is_unknown_like,
+    should_drop_slot,
+    stringify_slot_value,
+    with_article,
+)
 from cspd_stage2.templates import TemplateSpec, get_template_spec
 
 
@@ -49,7 +57,7 @@ def run_stage2(config: Stage2Config) -> dict[str, Any]:
     pending_success: list[dict[str, Any]] = []
     pending_failed: list[dict[str, Any]] = []
 
-    rows_to_process = [row for row in rows if str(row.get("record_id")) not in processed_ids]
+    rows_to_process = [row for row in rows if str(row.get("record_id") or row.get("sample_id")) not in processed_ids]
 
     for index, row in enumerate(rows_to_process, start=1):
         result = render_row(row, config)
@@ -124,7 +132,11 @@ def _render_with_template(
 
     anchor_value = _select_value(normalized_attributes.get(template.anchor_slot))
     if anchor_value is None:
-        if config.fallback_anchor_token:
+        class_anchor = class_name_to_anchor(base.get("class_name"))
+        if class_anchor:
+            anchor_value = class_anchor
+            warnings.append("class_name_anchor_used")
+        elif config.fallback_anchor_token:
             anchor_value = config.fallback_anchor_token
             warnings.append("fallback_anchor_used")
         elif config.fail_on_missing_anchor:
@@ -153,7 +165,18 @@ def _render_with_template(
             dropped_slots.append(slot)
             drop_reasons[slot] = "unknown_or_empty"
             continue
-        pre_parts.append(value)
+        review_required = _slot_is_review_required(raw_row, slot)
+        should_drop, reason = should_drop_slot(template.archetype, slot, value, review_required=review_required)
+        if should_drop:
+            dropped_slots.append(slot)
+            drop_reasons[slot] = reason or "dropped_by_rule"
+            continue
+        cleaned_value = clean_pre_anchor_value(slot, value)
+        if not cleaned_value:
+            dropped_slots.append(slot)
+            drop_reasons[slot] = "empty_after_cleaning"
+            continue
+        pre_parts.append(cleaned_value)
         verbalized_slots.append(slot)
 
     noun_phrase = " ".join(part for part in [*pre_parts, anchor_value] if part)
@@ -166,8 +189,17 @@ def _render_with_template(
             dropped_slots.append(slot)
             drop_reasons[slot] = "unknown_or_empty"
             continue
-        prefix = template.slot_prefixes.get(slot, "")
-        phrase = f"{prefix} {value}".strip()
+        review_required = _slot_is_review_required(raw_row, slot)
+        should_drop, reason = should_drop_slot(template.archetype, slot, value, review_required=review_required)
+        if should_drop:
+            dropped_slots.append(slot)
+            drop_reasons[slot] = reason or "dropped_by_rule"
+            continue
+        phrase = format_post_slot(slot, value)
+        if not phrase:
+            dropped_slots.append(slot)
+            drop_reasons[slot] = "empty_after_formatting"
+            continue
         caption_parts.append(phrase)
         verbalized_slots.append(slot)
 
@@ -205,6 +237,18 @@ def _select_value(value: Any) -> str | None:
     if text is None or is_unknown_like(text):
         return None
     return text
+
+
+def _slot_is_review_required(row: dict[str, Any], slot: str) -> bool:
+    meta = row.get("attribute_normalization")
+    if not isinstance(meta, dict):
+        return False
+    slot_meta = meta.get(slot)
+    if not isinstance(slot_meta, dict):
+        return False
+    status = slot_meta.get("status")
+    review_reasons = slot_meta.get("review_reasons")
+    return status == "review_required" or bool(review_reasons)
 
 
 def build_summary(
