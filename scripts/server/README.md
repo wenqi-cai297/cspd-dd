@@ -117,6 +117,24 @@ runs/attributes/<dataset_name>/qwen_local/<timestamp>
 bash scripts/server/run_stage1_mock.sh /path/to/dataset /path/to/output_dir
 ```
 
+### Run Stage 2 canonical rendering
+
+```bash
+bash scripts/server/run_stage2_render.sh /path/to/attributes_normalized.jsonl [output_dir] [renderer_version]
+```
+
+Example:
+
+```bash
+bash scripts/server/run_stage2_render.sh runs/stage1/example_normalized/attributes_normalized.jsonl
+```
+
+If `output_dir` is omitted, the script now writes under:
+
+```text
+runs/stage2/<normalized_parent_dir>/<timestamp>
+```
+
 ## Dataset assumption
 
 All Stage 1 run scripts assume an ImageFolder-style dataset layout:
