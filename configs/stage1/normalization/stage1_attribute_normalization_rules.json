@@ -191,55 +191,6 @@
         "parachute": "parachute",
         "paraglider": "parachute"
       }
-    },
-    "n04263257": {
-      "food_or_drink_type": {
-        "soup": "soup bowl",
-        "broth": "soup bowl",
-        "stew": "soup bowl"
-      }
-    },
-    "n07716906": {
-      "food_or_drink_type": {
-        "spaghetti squash curry": "spaghetti squash",
-        "squash curry": "spaghetti squash",
-        "curry": "spaghetti squash"
-      }
-    },
-    "n07836838": {
-      "food_or_drink_type": {
-        "dessert": "chocolate sauce",
-        "chocolate dessert": "chocolate sauce",
-        "cake": "chocolate sauce"
-      }
-    },
-    "n04141327": {
-      "weapon_type": {
-        "knife": "scabbard",
-        "dagger": "scabbard",
-        "sword": "scabbard"
-      }
-    },
-    "n03933933": {
-      "structure_or_building_type": {
-        "bridge": "pier",
-        "suspension bridge": "pier",
-        "dock": "pier"
-      }
-    },
-    "n04296562": {
-      "structure_or_building_type": {
-        "concert hall": "stage",
-        "concert venue": "stage",
-        "indoor": "stage",
-        "venue": "stage"
-      }
-    },
-    "n09229709": {
-      "sports_or_toy_type": {
-        "bubble blower": "bubble",
-        "bubble wand": "bubble"
-      }
     }
   },
   "review_value_sets": {
@@ -252,27 +203,32 @@
     },
     "n03888257": {
       "vehicle_type": ["airplane"]
+    }
+  },
+  "archetype_review_value_sets": {
+    "food_and_drink": {
+      "food_or_drink_type": ["dessert", "cake", "baked goods", "curry"],
+      "shape_or_structure": ["mug", "spoon", "slice", "plate"]
     },
-    "n04263257": {
-      "food_or_drink_type": ["soup", "broth", "stew"]
+    "structure_or_building": {
+      "structure_or_building_type": ["concert hall", "concert venue", "venue"],
+      "architectural_style_or_form": ["suspension bridge"]
     },
-    "n07716906": {
-      "food_or_drink_type": ["curry", "spaghetti squash curry", "squash curry"]
+    "sports_or_toy": {
+      "sports_or_toy_type": ["bubble wand", "bubble blower"]
+    }
+  },
+  "archetype_unknown_value_sets": {
+    "food_and_drink": {
+      "shape_or_structure": ["mug", "spoon", "slice"],
+      "container_or_context": ["plate", "white plate", "table setting", "refrigerator shelf"]
     },
-    "n07836838": {
-      "food_or_drink_type": ["dessert", "chocolate dessert", "cake"]
+    "human_or_person": {
+      "held_object_or_equipment": ["scuba tank", "bouquet of flowers", "wine bottle"],
+      "background_or_activity_context": ["wedding setting", "wedding reception", "outdoor garden setting", "underwater shipwreck"]
     },
-    "n04141327": {
-      "weapon_type": ["knife", "dagger", "sword"]
-    },
-    "n03933933": {
-      "structure_or_building_type": ["bridge", "suspension bridge"]
-    },
-    "n04296562": {
-      "structure_or_building_type": ["concert hall", "concert venue", "venue", "indoor"]
-    },
-    "n09229709": {
-      "sports_or_toy_type": ["bubble blower", "bubble wand"]
+    "natural_scene_or_landform": {
+      "salient_geographic_feature": ["mountain", "mountains", "sea", "geothermal area"]
     }
   },
   "review_substrings": {

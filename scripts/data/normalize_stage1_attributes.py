@@ -38,6 +38,14 @@ class Normalizer:
             class_name: {slot: {self._clean_key(v) for v in values} for slot, values in slot_maps.items()}
             for class_name, slot_maps in rules.get("review_value_sets", {}).items()
         }
+        self.archetype_review_value_sets = {
+            archetype: {slot: {self._clean_key(v) for v in values} for slot, values in slot_maps.items()}
+            for archetype, slot_maps in rules.get("archetype_review_value_sets", {}).items()
+        }
+        self.archetype_unknown_value_sets = {
+            archetype: {slot: {self._clean_key(v) for v in values} for slot, values in slot_maps.items()}
+            for archetype, slot_maps in rules.get("archetype_unknown_value_sets", {}).items()
+        }
         review_substrings = rules.get("review_substrings", {})
         self.person_markers = tuple(review_substrings.get("part_or_state_person_mentions", []))
         self.narrative_markers = tuple(review_substrings.get("mixed_or_narrative_markers", []))
@@ -68,7 +76,7 @@ class Normalizer:
     def _clean_mapping(self, mapping: dict[str, str]) -> dict[str, str]:
         return {self._clean_key(k): v for k, v in mapping.items()}
 
-    def normalize_field(self, class_name_raw: str, slot: str, raw_value: Any) -> dict[str, Any]:
+    def normalize_field(self, class_name_raw: str, archetype: str, slot: str, raw_value: Any) -> dict[str, Any]:
         original = raw_value
         cleaned = self.clean_value(raw_value)
         status = "unchanged"
@@ -90,6 +98,10 @@ class Normalizer:
             return self._result(original, cleaned, normalized, status, applied_rules, review_reasons)
 
         normalized, status, applied_rules = self.normalize_v3_render_awareness(slot, normalized, status, applied_rules)
+        if status == "mapped_to_unknown":
+            return self._result(original, cleaned, normalized, status, applied_rules, review_reasons)
+
+        normalized, status, applied_rules = self.normalize_archetype_awareness(archetype, slot, normalized, status, applied_rules)
         if status == "mapped_to_unknown":
             return self._result(original, cleaned, normalized, status, applied_rules, review_reasons)
 
@@ -136,7 +148,7 @@ class Normalizer:
                 status = "class_inferred"
                 applied_rules.append(f"class.{class_name_raw}.{slot}")
 
-        review_reasons.extend(self.detect_review_reasons(class_name_raw, slot, normalized))
+        review_reasons.extend(self.detect_review_reasons(class_name_raw, archetype, slot, normalized))
         if review_reasons:
             status = "review_required"
             applied_rules.extend(sorted(set(review_reasons)))
@@ -231,6 +243,16 @@ class Normalizer:
             applied_rules.append("slot.part.low_value_to_unknown")
             return "unknown", "mapped_to_unknown", applied_rules
 
+        return value, status, applied_rules
+
+    def normalize_archetype_awareness(
+        self, archetype: str, slot: str, value: str, status: str, applied_rules: list[str]
+    ) -> tuple[str, str, list[str]]:
+        key = self._clean_key(value)
+        unknown_values = self.archetype_unknown_value_sets.get(archetype, {}).get(slot, set())
+        if key in unknown_values:
+            applied_rules.append(f"archetype.{archetype}.{slot}.to_unknown")
+            return "unknown", "mapped_to_unknown", applied_rules
         return value, status, applied_rules
 
     def apply_simple_map(
@@ -330,12 +352,16 @@ class Normalizer:
         tmp = tmp.replace("/", ",")
         return [piece.strip() for piece in tmp.split(",") if piece.strip()]
 
-    def detect_review_reasons(self, class_name_raw: str, slot: str, value: str) -> list[str]:
+    def detect_review_reasons(self, class_name_raw: str, archetype: str, slot: str, value: str) -> list[str]:
         reasons: list[str] = []
         key = self._clean_key(value)
         class_review_values = self.review_value_sets.get(class_name_raw, {}).get(slot, set())
         if key in class_review_values:
             reasons.append("review.wrong_object_candidate")
+
+        archetype_review_values = self.archetype_review_value_sets.get(archetype, {}).get(slot, set())
+        if key in archetype_review_values:
+            reasons.append("review.archetype_anchor_mismatch")
 
         if slot in self.part_slots | self.state_slots and any(marker in key for marker in self.person_markers):
             reasons.append("review.person_mention")
@@ -417,6 +443,7 @@ def normalize_file(input_path: Path, output_dir: Path, rules_path: Path) -> dict
                 summary["num_success_rows"] += 1
 
             class_name_raw = str(row.get("class_name_raw") or "")
+            archetype = str(row.get("archetype") or "")
             raw_attributes = row.get("attributes", {})
             if not isinstance(raw_attributes, dict):
                 raw_attributes = {}
@@ -426,7 +453,7 @@ def normalize_file(input_path: Path, output_dir: Path, rules_path: Path) -> dict
             row_has_review = False
 
             for slot, raw_value in raw_attributes.items():
-                result = normalizer.normalize_field(class_name_raw, slot, raw_value)
+                result = normalizer.normalize_field(class_name_raw, archetype, slot, raw_value)
                 normalized_attributes[slot] = result["normalized_value"]
                 normalization_meta[slot] = {
                     "raw_value": result["raw_value"],
