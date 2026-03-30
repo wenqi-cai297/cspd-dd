@@ -39,6 +39,17 @@ LOW_VALUE_BACKGROUND_VALUES = {
     "farm",
     "dog bed",
     "snow",
+    "advertising",
+    "art gallery",
+    "dark",
+    "blue",
+    "red",
+    "white",
+    "unknown",
+    "indistinct",
+    "sidewalk",
+    "storefront",
+    "restaurant",
 }
 LOW_VALUE_POSE_VALUES = {
     "being held",
@@ -55,6 +66,13 @@ LOW_VALUE_POSE_VALUES = {
     "in use",
     "emptying",
     "deployed",
+    "displayed",
+    "closed",
+    "open",
+    "empty",
+    "full",
+    "unplayed",
+    "inactive",
 }
 LOW_VALUE_TRAIT_VALUES = {
     "fish",
@@ -74,18 +92,28 @@ LOW_VALUE_TRAIT_VALUES = {
 }
 VIEWPOINT_MAP = {
     "frontal": "front view",
+    "front": "front view",
+    "front view": "front view",
     "side": "side view",
     "side view": "side view",
     "top-down": "top-down view",
+    "top": "top-down view",
+    "top-down view": "top-down view",
     "rear": "rear view",
     "rear view": "rear view",
     "close-up": "close-up view",
+    "close-up view": "close-up view",
     "ground level": "ground-level view",
     "ground level view": "ground-level view",
     "interior": "interior view",
 }
 NON_ASCII_PATTERN = re.compile(r"[^\x00-\x7F]")
 NOISY_TOKEN_PATTERN = re.compile(r"(?:\bperson\b|\bman\b|\bwoman\b|\bchild\b|\bchildren\b)", re.IGNORECASE)
+NARRATIVE_PATTERN = re.compile(
+    r"(?:\bfrom\b|\bperspective\b|\breflected\b|\bshowing\b|\bset for\b|\bwith logo\b|\bwith text\b|\btagged\b|\bbeachgoers\b)",
+    re.IGNORECASE,
+)
+COLOR_LIKE_PATTERN = re.compile(r"^[a-z]+(?:\s+(?:and|with)\s+[a-z]+)*$", re.IGNORECASE)
 
 
 def normalize_text(value: Any) -> str | None:
@@ -186,23 +214,45 @@ def should_drop_slot(archetype: str, slot: str, value: str, review_required: boo
     if slot in {"salient_part_or_focus", "salient_part_or_accessory", "salient_structural_part"} and lowered in LOW_VALUE_FOCUS_VALUES:
         return True, "low_value_focus"
 
-    if slot == "viewpoint" and lowered in {"frontal", "front", "front view", "side", "side view", "ground level", "ground level view", "interior", "interior view"}:
-        return True, "default_viewpoint"
+    if slot == "viewpoint":
+        if archetype in {"animal", "natural_scene_or_landform", "structure_or_building", "human_or_person"}:
+            return True, "viewpoint_suppressed"
+        if lowered in {"frontal", "front", "front view", "side", "side view", "ground level", "ground level view", "interior", "interior view", "top", "top-down", "top-down view", "close-up", "close-up view"}:
+            return True, "default_viewpoint"
+        if NARRATIVE_PATTERN.search(text):
+            return True, "narrative_viewpoint"
 
-    if slot in {"background_or_habitat", "background_or_context", "environment", "surrounding_environment", "background_or_room_context"} and lowered in LOW_VALUE_BACKGROUND_VALUES:
-        return True, "low_value_background"
+    if slot in {"background_or_habitat", "background_or_context", "environment", "surrounding_environment", "background_or_room_context", "background_or_activity_context", "container_or_context", "display_or_usage_context", "vegetation_or_natural_context"}:
+        if lowered in LOW_VALUE_BACKGROUND_VALUES:
+            return True, "low_value_background"
+        if NARRATIVE_PATTERN.search(text):
+            return True, "narrative_background"
+        if COLOR_LIKE_PATTERN.fullmatch(text) and len(text.split()) <= 3:
+            return True, "color_like_background"
 
-    if archetype == "animal" and slot == "background_or_habitat" and ("," in lowered or "with" in lowered or lowered.endswith("side")):
+    if archetype == "animal" and slot == "background_or_habitat" and ("," in lowered or "with" in lowered or lowered.endswith("side") or lowered.endswith("setting")):
         return True, "complex_background"
 
     if archetype == "animal" and slot == "pose_or_state":
         return True, "animal_pose_suppressed"
 
-    if archetype in {"instrument", "sports_or_toy", "tool", "device_or_appliance", "vehicle"} and slot in {"playing_state_or_pose", "activity_or_usage_state", "usage_state", "operating_state_or_display_state", "state_or_action"} and lowered in LOW_VALUE_POSE_VALUES:
+    if archetype in {"instrument", "sports_or_toy", "tool", "device_or_appliance", "vehicle", "container", "household_object", "furniture", "weapon"} and slot in {"playing_state_or_pose", "activity_or_usage_state", "usage_state", "operating_state_or_display_state", "state_or_action", "usage_or_display_state", "fill_state_or_contents_visibility", "wearing_state_or_pose"} and lowered in LOW_VALUE_POSE_VALUES:
         return True, "low_value_state"
 
-    if slot in {"body_trait", "shape_or_structure"} and lowered in LOW_VALUE_TRAIT_VALUES:
+    if archetype == "food_and_drink":
+        if slot == "preparation_or_serving_style" and (NARRATIVE_PATTERN.search(text) or lowered in {"ready-to-drink", "individual bowls", "served on plate", "curried", "topped with chocolate", "hot"}):
+            return True, "food_style_suppressed"
+        if slot == "container_or_context" and lowered in {"table", "plate", "white plate", "refrigerator shelf", "table setting", "wooden surface"}:
+            return True, "food_context_suppressed"
+
+    if archetype == "natural_scene_or_landform" and slot in {"vegetation_or_natural_context", "salient_geographic_feature"} and NARRATIVE_PATTERN.search(text):
+        return True, "narrative_scene_slot"
+
+    if slot in {"body_trait", "shape_or_structure", "architectural_style_or_form"} and lowered in LOW_VALUE_TRAIT_VALUES:
         return True, "low_value_trait"
+
+    if slot in {"shape_or_structure", "architectural_style_or_form"} and NARRATIVE_PATTERN.search(text):
+        return True, "narrative_shape"
 
     return False, None
 
@@ -228,4 +278,6 @@ def format_post_slot(slot: str, value: str) -> str:
         return f"showing {text}"
     if slot in {"weather_or_water_state"}:
         return f"with {text}"
+    if slot == "preparation_or_serving_style" and lowered == "raw":
+        return "raw"
     return text
