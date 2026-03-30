@@ -136,6 +136,26 @@ The output directory is generated automatically as:
 <attribute_run_dir>/normalization/<timestamp>
 ```
 
+### Run optional Stage 1 normalization-review VLM fallback
+
+This path is only for ambiguous cases already flagged by deterministic normalization (`status=review_required` or non-empty `review_reasons`). It does not replace the main deterministic normalization/render path.
+
+```bash
+bash scripts/server/run_stage1_normalization_review_vlm.sh /path/to/attributes_normalized.jsonl [backend] [max_new_tokens]
+```
+
+Example:
+
+```bash
+bash scripts/server/run_stage1_normalization_review_vlm.sh runs/stage1/attributes/ImageNette/qwen_local/2026-03-26_183111/normalization/2026-03-28_180021/attributes_normalized.jsonl qwen_local 256
+```
+
+The output directory is generated automatically as:
+
+```text
+<normalization_dir>/review_vlm/<timestamp>
+```
+
 ### Run Stage 1 canonical rendering
 
 ```bash

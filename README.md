@@ -191,6 +191,30 @@ The script preserves the original row and writes these artifacts:
 - `normalization_summary.json`: aggregate counts by status / slot / class / rule
 - `normalization_rules_snapshot.json`: exact rule snapshot used for the run
 
+### Optional VLM review fallback for ambiguous normalization cases
+
+The main normalization + render path remains deterministic. For rows that were already flagged by deterministic normalization, you can run a separate constrained VLM review pass:
+
+```bash
+python scripts/data/review_normalization_with_vlm.py \
+  --input /path/to/attributes_normalized.jsonl \
+  --output-dir /path/to/review_vlm_artifacts \
+  --backend qwen_local
+```
+
+This helper only sends slots whose normalization metadata has `status=review_required` or non-empty `review_reasons`.
+It does **not** overwrite `attributes_normalized.jsonl`; instead it writes sidecar review artifacts:
+- `normalization_review_vlm.jsonl`: one structured VLM decision per ambiguous slot
+- `normalization_review_vlm_summary.json`: aggregate counts and contract metadata
+
+Each VLM review decision is constrained to a fixed action set:
+- `keep_normalized`
+- `replace_normalized`
+- `set_unknown`
+- `defer`
+
+The review schema also keeps the original `record_id`, `archetype`, and `slot`, and the parser forces fallback to `defer` if the model tries to change the archetype or slot.
+
 ## Server shell scripts
 
 See `scripts/server/README.md` for the recommended order and detailed examples.
