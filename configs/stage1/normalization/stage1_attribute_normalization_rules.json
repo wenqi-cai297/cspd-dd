@@ -191,6 +191,55 @@
         "parachute": "parachute",
         "paraglider": "parachute"
       }
+    },
+    "n04263257": {
+      "food_or_drink_type": {
+        "soup": "soup bowl",
+        "broth": "soup bowl",
+        "stew": "soup bowl"
+      }
+    },
+    "n07716906": {
+      "food_or_drink_type": {
+        "spaghetti squash curry": "spaghetti squash",
+        "squash curry": "spaghetti squash",
+        "curry": "spaghetti squash"
+      }
+    },
+    "n07836838": {
+      "food_or_drink_type": {
+        "dessert": "chocolate sauce",
+        "chocolate dessert": "chocolate sauce",
+        "cake": "chocolate sauce"
+      }
+    },
+    "n04141327": {
+      "weapon_type": {
+        "knife": "scabbard",
+        "dagger": "scabbard",
+        "sword": "scabbard"
+      }
+    },
+    "n03933933": {
+      "structure_or_building_type": {
+        "bridge": "pier",
+        "suspension bridge": "pier",
+        "dock": "pier"
+      }
+    },
+    "n04296562": {
+      "structure_or_building_type": {
+        "concert hall": "stage",
+        "concert venue": "stage",
+        "indoor": "stage",
+        "venue": "stage"
+      }
+    },
+    "n09229709": {
+      "sports_or_toy_type": {
+        "bubble blower": "bubble",
+        "bubble wand": "bubble"
+      }
     }
   },
   "review_value_sets": {
@@ -203,6 +252,27 @@
     },
     "n03888257": {
       "vehicle_type": ["airplane"]
+    },
+    "n04263257": {
+      "food_or_drink_type": ["soup", "broth", "stew"]
+    },
+    "n07716906": {
+      "food_or_drink_type": ["curry", "spaghetti squash curry", "squash curry"]
+    },
+    "n07836838": {
+      "food_or_drink_type": ["dessert", "chocolate dessert", "cake"]
+    },
+    "n04141327": {
+      "weapon_type": ["knife", "dagger", "sword"]
+    },
+    "n03933933": {
+      "structure_or_building_type": ["bridge", "suspension bridge"]
+    },
+    "n04296562": {
+      "structure_or_building_type": ["concert hall", "concert venue", "venue", "indoor"]
+    },
+    "n09229709": {
+      "sports_or_toy_type": ["bubble blower", "bubble wand"]
     }
   },
   "review_substrings": {
