@@ -247,6 +247,27 @@ def normalize_attributes(payload: dict[str, Any], expected_fields: list[str]) ->
     return normalized
 
 
+def complete_missing_attributes(payload: dict[str, Any], expected_fields: list[str]) -> dict[str, Any]:
+    """Return a payload where missing expected attribute fields are filled with ``unknown``.
+
+    Real VLM outputs are often almost correct but omit one or two requested slots.
+    Since the prompt explicitly instructs the model to use ``unknown`` when a slot
+    is unclear, an omitted field is usually better interpreted as an implicit
+    ``unknown`` than treated as a hard extraction failure.
+    """
+    attribute_payload = payload.get("attributes", payload)
+    if not isinstance(attribute_payload, dict):
+        return payload
+
+    completed_attributes = dict(attribute_payload)
+    for field in expected_fields:
+        completed_attributes.setdefault(field, "unknown")
+
+    completed_payload = dict(payload)
+    completed_payload["attributes"] = completed_attributes
+    return completed_payload
+
+
 def validate_attribute_payload(payload: dict[str, Any], expected_fields: list[str]) -> tuple[bool, list[str]]:
     """Validate a VLM response against the current sample's slot schema."""
     errors: list[str] = []

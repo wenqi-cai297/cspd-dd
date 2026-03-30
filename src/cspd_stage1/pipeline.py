@@ -26,6 +26,7 @@ from cspd_stage1.io_utils import append_jsonl, read_jsonl, write_json, write_jso
 from cspd_stage1.prompting import SYSTEM_PROMPT, build_user_prompt
 from cspd_stage1.schema import (
     SampleRecord,
+    complete_missing_attributes,
     extract_attribute_mapping,
     get_slot_schema,
     infer_archetype,
@@ -332,11 +333,12 @@ def _process_sample(sample: SampleRecord, client: BaseVLMClient, max_retries: in
         try:
             response = client.extract_attributes(sample, user_prompt=user_prompt, system_prompt=system_prompt)
             last_raw = response.raw_text
-            valid, errors = validate_attribute_payload(response.payload, sample.slot_schema)
+            completed_payload = complete_missing_attributes(response.payload, sample.slot_schema)
+            valid, errors = validate_attribute_payload(completed_payload, sample.slot_schema)
             if not valid:
                 last_error = "; ".join(errors)
                 continue
-            attribute_mapping = extract_attribute_mapping(response.payload)
+            attribute_mapping = extract_attribute_mapping(completed_payload)
             attributes = normalize_attributes(attribute_mapping, sample.slot_schema)
             return {
                 "status": "success",
