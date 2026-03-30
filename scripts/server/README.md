@@ -50,10 +50,10 @@ python scripts/data/generate_class_to_archetype_map_vlm.py \
   --images-per-class 5
 ```
 
-Or use the helper script:
+Or use the helper script (it uses the repo-bundled `classes.json` by default):
 
 ```bash
-bash scripts/server/generate_class_to_archetype_vlm.sh /path/to/imagefolder_dataset /path/to/classes.json 5
+bash scripts/server/generate_class_to_archetype_vlm.sh /path/to/imagefolder_dataset 5
 ```
 
 The manually fixed taxonomy definition now lives in:
@@ -103,14 +103,16 @@ This script:
 ### Run Stage 1 with the real local Qwen backend
 
 ```bash
-bash scripts/server/run_stage1_qwen_local.sh /path/to/dataset [max_new_tokens] [class_name_map] [flush_every] [class_archetype_map]
+bash scripts/server/run_stage1_qwen_local.sh /path/to/dataset [max_new_tokens] [class_name_map|DEFAULT] [flush_every] [class_archetype_map]
 ```
+
+If `class_name_map` is omitted or passed as `DEFAULT`, the script uses the repo-bundled `classes.json` automatically.
 
 Example:
 
 ```bash
 bash scripts/server/run_stage1_qwen_local.sh /data/cifar10_small 256
-bash scripts/server/run_stage1_qwen_local.sh /data/imagenette/train 256 /data/imagenette/classes.json 10 /data/imagenette/class_to_archetype.json
+bash scripts/server/run_stage1_qwen_local.sh /data/imagenette/train 256 DEFAULT 10 /data/imagenette/class_to_archetype.json
 ```
 
 The output directory is generated automatically as:

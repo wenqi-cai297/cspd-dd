@@ -3,10 +3,13 @@ set -euo pipefail
 
 # Run Stage 1 attribute extraction on an ImageFolder-style dataset.
 # Usage:
-#   bash scripts/server/run_stage1_qwen_local.sh /path/to/dataset [max_new_tokens] [class_name_map] [flush_every] [class_archetype_map]
+#   bash scripts/server/run_stage1_qwen_local.sh /path/to/dataset [max_new_tokens] [class_name_map|DEFAULT] [flush_every] [class_archetype_map]
 # Example:
 #   bash scripts/server/run_stage1_qwen_local.sh /data/cifar10_small 256
-#   bash scripts/server/run_stage1_qwen_local.sh /data/imagenette 256 /data/imagenette/classes.json 10 /data/imagenette/class_to_archetype.json
+#   bash scripts/server/run_stage1_qwen_local.sh /data/imagenette 256 DEFAULT 10 /data/imagenette/class_to_archetype.json
+#
+# If class_name_map is omitted or passed as DEFAULT, the script uses the repo-bundled
+# classes.json at the repo root.
 #
 # The output directory is generated automatically as:
 #   runs/stage1/attributes/<dataset_name>/qwen_local/<timestamp>
@@ -18,7 +21,7 @@ fi
 
 DATASET_ROOT="$1"
 MAX_NEW_TOKENS="${2:-256}"
-CLASS_NAME_MAP="${3:-}"
+CLASS_NAME_MAP="${3:-DEFAULT}"
 FLUSH_EVERY="${4:-10}"
 CLASS_ARCHETYPE_MAP="${5:-}"
 ENV_NAME="cspd-dd"
@@ -28,6 +31,9 @@ DEVICE_MAP="auto"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+if [[ -z "$CLASS_NAME_MAP" || "$CLASS_NAME_MAP" == "DEFAULT" ]]; then
+  CLASS_NAME_MAP="$REPO_ROOT/classes.json"
+fi
 
 DATASET_BASENAME="$(basename "$DATASET_ROOT")"
 DATASET_PARENT_BASENAME="$(basename "$(dirname "$DATASET_ROOT")")"

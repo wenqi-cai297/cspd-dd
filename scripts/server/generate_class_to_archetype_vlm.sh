@@ -4,21 +4,23 @@ set -euo pipefail
 # Generate class_to_archetype.json with multimodal class evidence:
 # class text + sampled class images.
 # Usage:
-#   bash scripts/server/generate_class_to_archetype_vlm.sh <dataset_root> <classes_json> [images_per_class] [taxonomy_json]
+#   bash scripts/server/generate_class_to_archetype_vlm.sh <dataset_root> [images_per_class] [taxonomy_json]
+#
+# By default this script uses the repo-bundled classes.json at the repo root.
 
-if [[ $# -lt 2 ]]; then
-  echo "Usage: bash scripts/server/generate_class_to_archetype_vlm.sh <dataset_root> <classes_json> [images_per_class] [taxonomy_json]"
+if [[ $# -lt 1 ]]; then
+  echo "Usage: bash scripts/server/generate_class_to_archetype_vlm.sh <dataset_root> [images_per_class] [taxonomy_json]"
   exit 1
 fi
 
 DATASET_ROOT="$1"
-CLASSES_JSON="$2"
-IMAGES_PER_CLASS="${3:-5}"
-TAXONOMY_JSON="${4:-configs/stage1/archetype_taxonomy_manual.json}"
+IMAGES_PER_CLASS="${2:-5}"
+TAXONOMY_JSON="${3:-configs/stage1/archetype_taxonomy_manual.json}"
 ENV_NAME="cspd-dd"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CLASSES_JSON="$REPO_ROOT/classes.json"
 TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
 PREP_DIR="runs/prep/multimodal/${TIMESTAMP}"
 OUTPUT_JSON="$PREP_DIR/class_to_archetype.json"

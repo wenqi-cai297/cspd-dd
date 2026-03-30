@@ -129,10 +129,10 @@ python scripts/data/generate_class_to_archetype_map_vlm.py \
   --images-per-class 5
 ```
 
-Server helper:
+Server helper (uses the repo-bundled `classes.json` by default):
 
 ```bash
-bash scripts/server/generate_class_to_archetype_vlm.sh /path/to/imagefolder_dataset /path/to/classes.json 5
+bash scripts/server/generate_class_to_archetype_vlm.sh /path/to/imagefolder_dataset 5
 ```
 
 ## ImageFolder subset helper
