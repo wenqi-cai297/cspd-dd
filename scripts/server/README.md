@@ -38,14 +38,22 @@ This script:
 - copies a fixed `class_to_archetype.json` into the run prep directory
 - does not run VLM-based taxonomy discovery
 
-If you still want VLM to produce `class_to_archetype.json`, use the fixed manual taxonomy as the allowed label set:
+If you want VLM to produce `class_to_archetype.json`, the recommended path is now the **multimodal class-level mapper**: it uses fixed taxonomy labels plus both class text and sampled class images.
 
 ```bash
 python scripts/data/generate_class_to_archetype_map_vlm.py \
   --input /path/to/classes.json \
+  --dataset-root /path/to/imagefolder_dataset \
   --output /path/to/class_to_archetype.json \
   --detail-output /path/to/class_to_archetype_details.jsonl \
-  --taxonomy configs/stage1/archetype_taxonomy_manual.json
+  --taxonomy configs/stage1/archetype_taxonomy_manual.json \
+  --images-per-class 5
+```
+
+Or use the helper script:
+
+```bash
+bash scripts/server/generate_class_to_archetype_vlm.sh /path/to/imagefolder_dataset /path/to/classes.json 5
 ```
 
 The manually fixed taxonomy definition now lives in:
