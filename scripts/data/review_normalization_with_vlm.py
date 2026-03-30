@@ -15,7 +15,11 @@ DEFAULT_ALLOWED_ACTIONS = ("keep_normalized", "replace_normalized", "set_unknown
 REVIEW_SYSTEM_PROMPT = (
     "You are a strict normalization review assistant for image attributes. "
     "Return JSON only. Never change the provided archetype or slot. "
-    "Be conservative: if the image is unclear, choose defer or keep_normalized instead of inventing detail."
+    "The deterministic normalized value is a candidate, not ground truth. "
+    "Only keep it when the image clearly supports it. "
+    "If the slot is ambiguous, weakly visible, or not verifiable from the image, prefer set_unknown instead of silently keeping a plausible guess. "
+    "Use replace_normalized only when a different short slot-compatible value is clearly supported. "
+    "Reserve defer for true contract problems, unreadable images, or cases that genuinely need manual follow-up."
 )
 
 
@@ -46,6 +50,8 @@ def build_review_prompt(row: dict[str, Any], slot: str, slot_meta: dict[str, Any
     normalized_attributes = row.get("normalized_attributes") or {}
     if not isinstance(normalized_attributes, dict):
         normalized_attributes = {}
+    current_value = slot_meta.get("normalized_value", normalized_attributes.get(slot, "unknown"))
+    context_attributes = {k: normalized_attributes.get(k, "unknown") for k in (row.get("slot_schema") or []) if k != slot}
 
     return (
         "Review exactly one ambiguous normalized attribute.\n"
@@ -57,13 +63,19 @@ def build_review_prompt(row: dict[str, Any], slot: str, slot_meta: dict[str, Any
         f"slot_schema: {json.dumps(row.get('slot_schema') or [], ensure_ascii=False)}\n"
         f"review_reasons: {json.dumps(slot_meta.get('review_reasons') or [], ensure_ascii=False)}\n"
         f"raw_slot_value: {json.dumps(raw_attributes.get(slot), ensure_ascii=False)}\n"
-        f"normalized_slot_value: {json.dumps(slot_meta.get('normalized_value', normalized_attributes.get(slot, 'unknown')), ensure_ascii=False)}\n"
-        "Task:\n"
-        "- Look at the image and decide whether to keep the deterministic normalized value, replace it with a better short value for this same slot, map it to unknown, or defer.\n"
+        f"normalized_slot_value: {json.dumps(current_value, ensure_ascii=False)}\n"
+        f"other_normalized_slots: {json.dumps(context_attributes, ensure_ascii=False)}\n"
+        "Decision policy:\n"
+        "- keep_normalized: use only if the image clearly supports the current normalized value for this exact slot.\n"
+        "- replace_normalized: use only if another short value is more clearly supported by the image. Do not elaborate or rewrite beyond this slot.\n"
+        "- set_unknown: use when the slot is ambiguous, not visible enough, conflicting, too fine-grained to verify, or likely contaminated by the wrong object/background. This is preferred over keep_normalized for ordinary uncertainty.\n"
+        "- defer: use only for exceptional manual-review situations such as unreadable/corrupted image, slot/archetype contract confusion, or impossible judgment even after applying the rules above. Do not use defer for normal ambiguity.\n"
+        "Constraints:\n"
+        "- The current normalized value is only a candidate. It may be wrong precisely because this item was routed for review.\n"
         "- Do NOT change archetype.\n"
         "- Do NOT answer for any other slot.\n"
         "- Keep output short, slot-compatible, and render-friendly.\n"
-        "- If evidence is weak or ambiguous, prefer defer.\n"
+        "- Do NOT invent hidden details. If you cannot verify the slot visually, choose set_unknown.\n"
         f"Return JSON with this exact schema:\n{json.dumps(payload_hint, ensure_ascii=False, indent=2)}"
     )
 
