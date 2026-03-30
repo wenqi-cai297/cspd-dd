@@ -15,6 +15,31 @@ from cspd_stage1.vlm.factory import create_vlm_client
 DEFAULT_RULES_PATH = Path("configs/stage1/normalization/stage1_attribute_normalization_rules.json")
 STATUS_CHANGED = {"canonicalized", "class_inferred", "mapped_to_unknown", "review_required"}
 
+REVIEW_REASON_PRIORITIES = {
+    "review.food_anchor_context_drift": 120,
+    "review.structure_type_style_conflict": 115,
+    "review.weapon_anchor_related_object": 115,
+    "review.cross_slot_value_conflict": 100,
+    "review.wrong_object_candidate": 95,
+    "review.archetype_anchor_mismatch": 90,
+    "review.person_mention": 60,
+    "review.slot_contamination": 55,
+    "review.misplaced_spec_text": 45,
+    "review.narrative_value": 40,
+    "review.mixed_state": 35,
+}
+
+REVIEW_SLOT_PRIORITIES = {
+    "food_or_drink_type": 60,
+    "structure_or_building_type": 60,
+    "weapon_type": 60,
+    "architectural_style_or_form": 55,
+    "shape_or_structure": 45,
+    "container_or_context": 40,
+    "background_or_context": 30,
+    "surrounding_environment": 25,
+}
+
 
 class Normalizer:
     def __init__(self, rules: dict[str, Any]) -> None:
@@ -385,6 +410,88 @@ class Normalizer:
         return reasons
 
 
+def _append_review_reason(slot_meta: dict[str, Any], reason: str) -> None:
+    reasons = [str(item) for item in slot_meta.get("review_reasons") or []]
+    if reason not in reasons:
+        reasons.append(reason)
+    slot_meta["review_reasons"] = reasons
+    slot_meta["status"] = "review_required"
+    applied_rules = [str(item) for item in slot_meta.get("applied_rules") or []]
+    if reason not in applied_rules:
+        applied_rules.append(reason)
+    slot_meta["applied_rules"] = applied_rules
+
+
+def _tokenize_review_value(value: Any) -> set[str]:
+    text = "" if value is None else str(value).casefold()
+    return {token for token in re.findall(r"[a-z]+", text) if len(token) >= 3}
+
+
+def apply_consistency_review_pass(archetype: str, normalized_attributes: dict[str, str], normalization_meta: dict[str, Any]) -> None:
+    if not isinstance(normalized_attributes, dict) or not isinstance(normalization_meta, dict):
+        return
+
+    def slot_value(slot: str) -> str:
+        return str(normalized_attributes.get(slot) or "").strip()
+
+    def clean(slot: str) -> str:
+        return Normalizer._clean_key(slot_value(slot))
+
+    def add(slot: str, reason: str) -> None:
+        slot_meta = normalization_meta.get(slot)
+        if isinstance(slot_meta, dict):
+            _append_review_reason(slot_meta, reason)
+
+    if archetype == "food_and_drink":
+        anchor_slot = "food_or_drink_type"
+        anchor_value = clean(anchor_slot)
+        food_shape = clean("shape_or_structure")
+        food_context = clean("container_or_context")
+        vessel_tokens = {"plate", "bowl", "tray", "cup", "mug", "glass", "spoon", "fork", "knife", "skewer"}
+        if anchor_value and anchor_value != "unknown":
+            if _tokenize_review_value(anchor_value) & vessel_tokens:
+                add(anchor_slot, "review.food_anchor_context_drift")
+            if anchor_value in {food_shape, food_context} and anchor_value not in {"", "unknown"}:
+                add(anchor_slot, "review.cross_slot_value_conflict")
+                if anchor_value == food_context:
+                    add("container_or_context", "review.food_anchor_context_drift")
+
+    if archetype == "structure_or_building":
+        type_slot = "structure_or_building_type"
+        style_slot = "architectural_style_or_form"
+        type_value = clean(type_slot)
+        style_value = clean(style_slot)
+        structure_type_tokens = {"bridge", "tower", "church", "mosque", "temple", "castle", "palace", "stadium", "barn", "house", "building", "skyscraper", "lighthouse", "warehouse", "dome"}
+        style_tokens = {"gothic", "baroque", "victorian", "modern", "modernist", "roman", "romanesque", "classical", "suspension", "arched"}
+        if style_value and style_value != "unknown" and (_tokenize_review_value(style_value) & structure_type_tokens):
+            add(style_slot, "review.structure_type_style_conflict")
+        if type_value and type_value != "unknown" and (_tokenize_review_value(type_value) & style_tokens):
+            add(type_slot, "review.structure_type_style_conflict")
+        if type_value and style_value and type_value == style_value and type_value != "unknown":
+            add(type_slot, "review.cross_slot_value_conflict")
+            add(style_slot, "review.cross_slot_value_conflict")
+
+    if archetype == "weapon":
+        anchor_slot = "weapon_type"
+        anchor_value = clean(anchor_slot)
+        context_value = clean("background_or_context")
+        related_object_tokens = {"holster", "scabbard", "sheath", "ammo", "ammunition", "bullet", "target", "case"}
+        if anchor_value and anchor_value != "unknown":
+            if _tokenize_review_value(anchor_value) & related_object_tokens:
+                add(anchor_slot, "review.weapon_anchor_related_object")
+            if anchor_value == context_value and anchor_value not in {"", "unknown"}:
+                add(anchor_slot, "review.cross_slot_value_conflict")
+                add("background_or_context", "review.weapon_anchor_related_object")
+
+
+def compute_review_priority(slot: str, slot_meta: dict[str, Any]) -> int:
+    reasons = [str(item) for item in slot_meta.get("review_reasons") or []]
+    base = REVIEW_SLOT_PRIORITIES.get(slot, 0)
+    if not reasons and str(slot_meta.get("status") or "") == "review_required":
+        base += 10
+    return base + sum(REVIEW_REASON_PRIORITIES.get(reason, 20) for reason in reasons)
+
+
 def iter_jsonl(path: Path):
     with path.open("r", encoding="utf-8-sig") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -531,7 +638,10 @@ def select_review_items(row: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]
         if not isinstance(slot_meta, dict):
             continue
         if str(slot_meta.get("status") or "") == "review_required" or bool(slot_meta.get("review_reasons") or []):
+            slot_meta = dict(slot_meta)
+            slot_meta["review_priority"] = compute_review_priority(str(slot), slot_meta)
             items.append((str(slot), slot_meta))
+    items.sort(key=lambda item: (-int(item[1].get("review_priority") or 0), item[0]))
     return items
 
 
@@ -574,6 +684,7 @@ def run_inline_vlm_review(rows: list[dict[str, Any]], review_backend: str, revie
                 "slot": slot,
                 "slot_schema": row.get("slot_schema") or [],
                 "review_reasons": review_reasons,
+                "review_priority": int(slot_meta.get("review_priority") or compute_review_priority(slot, slot_meta)),
                 "raw_value": slot_meta.get("raw_value"),
                 "normalized_value": slot_meta.get("normalized_value"),
                 "review_status": "ok",
@@ -679,23 +790,34 @@ def normalize_file(input_path: Path, output_dir: Path, rules_path: Path, *, enab
             raw_attributes = {}
         normalized_attributes: dict[str, str] = {}
         normalization_meta: dict[str, Any] = {}
-        row_has_review = False
+        per_slot_results: dict[str, dict[str, Any]] = {}
         for slot, raw_value in raw_attributes.items():
             result = normalizer.normalize_field(class_name_raw, archetype, slot, raw_value)
             normalized_attributes[slot] = result["normalized_value"]
             normalization_meta[slot] = {"raw_value": result["raw_value"], "normalized_value": result["normalized_value"], "status": result["status"], "applied_rules": result["applied_rules"], "review_reasons": result["review_reasons"]}
-            summary["status_counts"][result["status"]] += 1
-            summary["slot_status_counts"][slot][result["status"]] += 1
-            summary["class_status_counts"][class_name_raw][result["status"]] += 1
-            for rule in result["applied_rules"]:
+            per_slot_results[slot] = result
+
+        apply_consistency_review_pass(archetype, normalized_attributes, normalization_meta)
+
+        row_has_review = False
+        for slot, slot_meta in normalization_meta.items():
+            result = per_slot_results[slot]
+            status = str(slot_meta.get("status") or result["status"])
+            reasons = [str(item) for item in slot_meta.get("review_reasons") or []]
+            applied_rules = [str(item) for item in slot_meta.get("applied_rules") or []]
+            summary["status_counts"][status] += 1
+            summary["slot_status_counts"][slot][status] += 1
+            summary["class_status_counts"][class_name_raw][status] += 1
+            for rule in applied_rules:
                 summary["rule_counts"][rule] += 1
-            for reason in result["review_reasons"]:
+            for reason in reasons:
                 summary["review_reason_counts"][reason] += 1
-            if result["changed"] or result["review_reasons"]:
-                audit_records.append({"line_number": line_number, "record_id": row.get("record_id"), "class_name_raw": class_name_raw, "slot": slot, "raw_value": result["raw_value"], "normalized_value": result["normalized_value"], "status": result["status"], "applied_rules": result["applied_rules"], "review_reasons": result["review_reasons"]})
-            if result["status"] == "review_required":
+            changed = status in STATUS_CHANGED or str(slot_meta.get("normalized_value") or "") != str(result["cleaned_value"])
+            if changed or reasons:
+                audit_records.append({"line_number": line_number, "record_id": row.get("record_id"), "class_name_raw": class_name_raw, "slot": slot, "raw_value": slot_meta.get("raw_value"), "normalized_value": slot_meta.get("normalized_value"), "status": status, "applied_rules": applied_rules, "review_reasons": reasons, "review_priority": compute_review_priority(slot, slot_meta) if reasons or status == "review_required" else 0})
+            if status == "review_required" or reasons:
                 row_has_review = True
-                review_records.append({"line_number": line_number, "record_id": row.get("record_id"), "class_name_raw": class_name_raw, "slot": slot, "raw_value": result["raw_value"], "normalized_value": result["normalized_value"], "review_reasons": result["review_reasons"]})
+                review_records.append({"line_number": line_number, "record_id": row.get("record_id"), "class_name_raw": class_name_raw, "slot": slot, "raw_value": slot_meta.get("raw_value"), "normalized_value": slot_meta.get("normalized_value"), "review_reasons": reasons, "review_priority": compute_review_priority(slot, slot_meta)})
         normalized_row = dict(row)
         normalized_row["normalized_attributes"] = normalized_attributes
         normalized_row["attribute_normalization"] = normalization_meta

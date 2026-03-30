@@ -9,6 +9,7 @@ from typing import Any
 from cspd_stage1.schema import SampleRecord
 from cspd_stage1.vlm.base import BaseVLMClient, VLMOutputParseError
 from cspd_stage1.vlm.factory import create_vlm_client
+from scripts.data.normalize_stage1_attributes import compute_review_priority
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
 DEFAULT_ALLOWED_ACTIONS = ("keep_normalized", "replace_normalized", "set_unknown", "defer")
@@ -166,7 +167,10 @@ def select_review_items(row: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]
         status = str(slot_meta.get("status") or "")
         review_reasons = slot_meta.get("review_reasons") or []
         if status == "review_required" or bool(review_reasons):
+            slot_meta = dict(slot_meta)
+            slot_meta["review_priority"] = int(slot_meta.get("review_priority") or compute_review_priority(str(slot), slot_meta))
             items.append((str(slot), slot_meta))
+    items.sort(key=lambda item: (-int(item[1].get("review_priority") or 0), item[0]))
     return items
 
 
@@ -222,6 +226,7 @@ def review_file(
                     "slot": slot,
                     "slot_schema": row.get("slot_schema") or [],
                     "review_reasons": review_reasons,
+                    "review_priority": int(slot_meta.get("review_priority") or compute_review_priority(slot, slot_meta)),
                     "raw_value": slot_meta.get("raw_value"),
                     "normalized_value": slot_meta.get("normalized_value"),
                     "review_status": "ok",
