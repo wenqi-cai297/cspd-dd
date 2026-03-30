@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Full Stage 1 shell workflow from environment checks to final attribute extraction.
+# Full Prep + Stage 1 shell workflow from environment checks to final canonical render.
 # Usage:
 #   bash scripts/server/run_stage1_full_workflow.sh \
 #     [--skip-smoke] \
@@ -48,29 +48,31 @@ else
 fi
 
 TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
-PREP_DIR="runs/stage1/prep/${DATASET_NAME}/${TIMESTAMP}"
+PREP_DIR="runs/prep/${DATASET_NAME}/${TIMESTAMP}"
 TEST_DIR="runs/stage1/tests/${DATASET_NAME}/${TIMESTAMP}"
 ATTR_DIR="runs/stage1/attributes/${DATASET_NAME}/qwen_local/${TIMESTAMP}"
+NORM_DIR="$ATTR_DIR/normalization/$TIMESTAMP"
+RENDER_DIR="runs/stage1/render/${DATASET_NAME}/qwen_local/${TIMESTAMP}"
 CLASSES_JSON="$PREP_DIR/classes.json"
 ARCHETYPE_JSON="$PREP_DIR/class_to_archetype.json"
 SMOKE_DATASET_DIR="$TEST_DIR/mock_subset"
 SMOKE_CLASSES_JSON="$TEST_DIR/mock_subset_classes.json"
 SMOKE_ARCHETYPE_JSON="$TEST_DIR/mock_subset_class_to_archetype.json"
 
-mkdir -p "$PREP_DIR" "$TEST_DIR" "$ATTR_DIR"
+mkdir -p "$PREP_DIR" "$TEST_DIR" "$ATTR_DIR" "$NORM_DIR" "$RENDER_DIR"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 cd "$REPO_ROOT"
 
-echo "[STEP 1/7] Environment checks"
+echo "[STEP 1/9] Environment checks"
 python --version
 python -c "import torch; print('torch', torch.__version__); print('cuda_available', torch.cuda.is_available()); print('cuda_device_count', torch.cuda.device_count())"
 python -c "import transformers; print('transformers', transformers.__version__)"
 python -c "from PIL import Image; print('PIL ok')"
 pip install -e .
 
-echo "[STEP 2/7] Prepare classes.json"
+echo "[STEP 2/9] Prep: classes.json generation"
 if [[ "$CLASSES_SOURCE" == *.json ]]; then
   cp "$CLASSES_SOURCE" "$CLASSES_JSON"
 else
@@ -81,13 +83,13 @@ else
   "${CMD[@]}"
 fi
 
-echo "[STEP 3/7] Use fixed class_to_archetype.json"
+echo "[STEP 3/9] Prep: class_to_archetype mapping"
 cp "$ARCHETYPE_SOURCE" "$ARCHETYPE_JSON"
 
-echo "[STEP 4/7] Qwen load test"
+echo "[STEP 4/9] Qwen load test"
 python scripts/vlm/test_qwen_vl_load.py | tee "$TEST_DIR/qwen_load_test.log"
 
-echo "[STEP 5/7] Single-image inference test"
+echo "[STEP 5/9] Single-image inference test"
 if [[ -z "$SAMPLE_IMAGE" ]]; then
   SAMPLE_IMAGE="$(find "$DATASET_ROOT" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.bmp' -o -iname '*.webp' \) -print -quit)"
 fi
@@ -101,7 +103,7 @@ python scripts/vlm/test_single_image_infer.py \
   --class-id -1 \
   --max-new-tokens "$MAX_NEW_TOKENS" | tee "$TEST_DIR/single_image_test.log"
 
-echo "[STEP 6/7] Mock smoke run"
+echo "[STEP 6/9] Mock smoke run"
 if [[ "$SKIP_SMOKE" == "1" ]]; then
   echo "[INFO] --skip-smoke enabled; skipping mock smoke run"
 else
@@ -154,7 +156,7 @@ PY
     --flush-every 1 | tee "$TEST_DIR/mock_smoke_run.log"
 fi
 
-echo "[STEP 7/7] Qwen local attribute extraction run"
+echo "[STEP 7/9] Stage 1 attribute extraction"
 cspd-stage1 run \
   --dataset-root "$DATASET_ROOT" \
   --output-dir "$ATTR_DIR" \
@@ -167,10 +169,22 @@ cspd-stage1 run \
   --class-archetype-map "$ARCHETYPE_JSON" \
   --flush-every "$FLUSH_EVERY"
 
+echo "[STEP 8/9] Stage 1 normalization"
+python scripts/data/normalize_stage1_attributes.py \
+  --input "$ATTR_DIR/attributes.jsonl" \
+  --output-dir "$NORM_DIR"
+
+echo "[STEP 9/9] Stage 1 canonical render"
+cspd-stage1 render \
+  --input "$NORM_DIR/attributes_normalized.jsonl" \
+  --output-dir "$RENDER_DIR"
+
 echo
 
-echo "[OK] Full Stage 1 workflow finished."
-echo "[INFO] classes_json:          $CLASSES_JSON"
-echo "[INFO] class_archetype_json:  $ARCHETYPE_JSON"
-echo "[INFO] test_dir:              $TEST_DIR"
-echo "[INFO] final_attribute_dir:   $ATTR_DIR"
+echo "[OK] Full Prep + Stage 1 workflow finished."
+echo "[INFO] classes_json:            $CLASSES_JSON"
+echo "[INFO] class_archetype_json:    $ARCHETYPE_JSON"
+echo "[INFO] test_dir:                $TEST_DIR"
+echo "[INFO] attribute_dir:           $ATTR_DIR"
+echo "[INFO] normalization_dir:       $NORM_DIR"
+echo "[INFO] render_dir:              $RENDER_DIR"

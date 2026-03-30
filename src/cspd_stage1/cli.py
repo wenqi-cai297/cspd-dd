@@ -6,11 +6,12 @@ import argparse
 import json
 
 from cspd_stage1.pipeline import config_from_args, run_stage1
+from cspd_stage2.pipeline import config_from_args as render_config_from_args, run_stage2
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser."""
-    parser = argparse.ArgumentParser(description="CSPD Stage 1 attribute extraction")
+    parser = argparse.ArgumentParser(description="CSPD workflow CLI for Prep + Stage 1")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run Stage 1 attribute extraction")
@@ -70,6 +71,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable resume and overwrite prior JSONL outputs in the output directory.",
     )
+
+    render_parser = subparsers.add_parser("render", help="Run Stage 1 canonical rendering from normalized attributes")
+    render_parser.add_argument("--input", required=True, help="Path to attributes_normalized.jsonl")
+    render_parser.add_argument("--output-dir", required=True, help="Directory for Stage 1 render artifacts")
+    render_parser.add_argument("--renderer-version", default="v1", help="Renderer version label")
+    render_parser.add_argument("--flush-every", type=int, default=100, help="Flush partial render outputs every N rows")
+    render_parser.add_argument("--fallback-anchor-token", default=None, help="Fallback anchor token used when anchor slot is missing")
+    render_parser.add_argument("--fallback-to-raw", action="store_true", help="Use raw attributes when normalized_attributes is missing")
+    render_parser.add_argument("--fail-on-missing-anchor", action="store_true", help="Fail rows whose anchor slot cannot be rendered")
+    render_parser.add_argument("--no-resume", action="store_true", help="Disable resume and overwrite prior render outputs")
     return parser
 
 
@@ -81,6 +92,11 @@ def main() -> None:
     if args.command == "run":
         stats = run_stage1(config_from_args(args))
         print(json.dumps(stats, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "render":
+        summary = run_stage2(render_config_from_args(args))
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
 
     raise SystemExit(f"Unknown command: {args.command}")

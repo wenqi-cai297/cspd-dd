@@ -2,9 +2,12 @@
 
 These scripts are meant to reduce repeated manual CLI typing on the Linux GPU server.
 
-## Recommended Stage 1 order
+## Recommended Prep + Stage 1 order
 
-If you want the full workflow from environment checking to final attribute extraction, use these steps in order:
+Prep now means `classes.json` generation plus `class -> archetype` mapping.
+Stage 1 now means attribute extraction, normalization, and canonical render.
+
+If you want the full workflow from environment checking to final canonical render, use these steps in order:
 
 ### 1. Check the server environment and install missing runtime dependencies
 
@@ -19,7 +22,7 @@ This script:
 - runs `pip install -e .`
 - verifies that `transformers` and `PIL` import correctly
 
-### 2. Prepare `classes.json` and use a fixed `class_to_archetype.json`
+### 2. Prep: materialize `classes.json` and `class_to_archetype.json`
 
 If you start from a Python class mapping file, prepare metadata like this:
 
@@ -35,10 +38,10 @@ bash scripts/server/prepare_stage1_metadata.sh /path/to/classes.json /path/to/cl
 
 This script:
 - converts `classes.py` into `classes.json` when needed
-- copies a fixed `class_to_archetype.json` into the run prep directory
+- copies a fixed `class_to_archetype.json` into the prep run directory
 - does not run VLM-based taxonomy discovery
 
-If you want VLM to produce `class_to_archetype.json`, the recommended path is now the **multimodal class-level mapper**: it uses fixed taxonomy labels plus both class text and sampled class images.
+If you want VLM to produce `class_to_archetype.json`, the recommended path is the multimodal class-level mapper:
 
 ```bash
 python scripts/data/generate_class_to_archetype_map_vlm.py \
@@ -56,13 +59,7 @@ Or use the helper script (it uses the repo-bundled `classes.json` by default):
 bash scripts/server/generate_class_to_archetype_vlm.sh /path/to/imagefolder_dataset 5
 ```
 
-The manually fixed taxonomy definition now lives in:
-
-```text
-configs/stage1/archetype_taxonomy_manual.json
-```
-
-### 3. Run the full Stage 1 workflow end-to-end
+### 3. Run the full Prep + Stage 1 workflow end-to-end
 
 ```bash
 bash scripts/server/run_stage1_full_workflow.sh \
@@ -76,14 +73,14 @@ bash scripts/server/run_stage1_full_workflow.sh \
 
 This script performs the full chain:
 1. environment checks
-2. `classes.py -> classes.json`
-3. copy fixed `class_to_archetype.json`
+2. Prep: `classes.py -> classes.json`
+3. Prep: copy fixed `class_to_archetype.json`
 4. Qwen load test
 5. single-image inference test
 6. small mock smoke run on the first 3 classes with the first 10 images per class
-7. final `qwen_local` attribute extraction run
-
-The underlying `cspd-stage1 run` command now supports resume by default: if you rerun with the same output directory, it will read existing `attributes.jsonl` / `failed_samples.jsonl`, skip previously successful records, retry records listed in `failed_samples.jsonl`, and continue appending new results. Use `--no-resume` only if you intentionally want to restart from scratch.
+7. Stage 1 attribute extraction
+8. Stage 1 normalization
+9. Stage 1 canonical render
 
 If you omit the final sample-image argument, the script auto-picks the first image under the dataset root.
 
@@ -121,12 +118,6 @@ The output directory is generated automatically as:
 runs/stage1/attributes/<dataset_name>/qwen_local/<timestamp>
 ```
 
-### Run Stage 1 with the mock backend
-
-```bash
-bash scripts/server/run_stage1_mock.sh /path/to/dataset /path/to/output_dir
-```
-
 ### Run Stage 1 normalization
 
 ```bash
@@ -145,50 +136,27 @@ The output directory is generated automatically as:
 <attribute_run_dir>/normalization/<timestamp>
 ```
 
-### Run Stage 2 canonical rendering
+### Run Stage 1 canonical rendering
 
 ```bash
-bash scripts/server/run_stage2_render.sh /path/to/attributes_normalized.jsonl [renderer_version]
+bash scripts/server/run_stage1_render.sh /path/to/attributes_normalized.jsonl [renderer_version]
 ```
 
 Example:
 
 ```bash
-bash scripts/server/run_stage2_render.sh runs/stage1/attributes/ImageNette/qwen_local/2026-03-26_183111/normalized_v2/attributes_normalized.jsonl
+bash scripts/server/run_stage1_render.sh runs/stage1/attributes/ImageNette/qwen_local/2026-03-26_183111/normalization/2026-03-28_180021/attributes_normalized.jsonl
 ```
 
-The output directory is now generated automatically as:
+The output directory is generated automatically as:
 
 ```text
-runs/stage2/<dataset_name>/<backend>/<timestamp>
+runs/stage1/render/<dataset_name>/<backend>/<timestamp>
 ```
 
-For a standard Stage 1 path such as:
-
-```text
-runs/stage1/attributes/ImageNette/qwen_local/2026-03-26_183111/normalized_v2/attributes_normalized.jsonl
-```
-
-Stage 2 will write to something like:
-
-```text
-runs/stage2/ImageNette/qwen_local/2026-03-28_173000
-```
-
-## Dataset assumption
-
-All Stage 1 run scripts assume an ImageFolder-style dataset layout:
-
-```text
-dataset_root/
-  class_a/
-    1.jpg
-    2.jpg
-  class_b/
-    3.jpg
-```
-th/to/dataset /path/to/output_dir
-```
+Legacy compatibility note:
+- `bash scripts/server/run_stage2_render.sh ...` still works, but now forwards to `run_stage1_render.sh`.
+- `cspd-stage2 render ...` still works, but `cspd-stage1 render ...` is the preferred entrypoint.
 
 ## Dataset assumption
 

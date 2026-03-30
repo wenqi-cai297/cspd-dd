@@ -1,8 +1,18 @@
 # CSPD-DD
 
-Minimal executable scaffold for **Stage 1: Attribute Extraction** and an initial **Stage 2: Canonical Semantic Rendering** skeleton in the CSPD-DD pipeline.
+Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipeline.
+
+- **Prep** = `classes.json` generation + `class -> archetype` mapping
+- **Stage 1** = attribute extraction + normalization + canonical semantic rendering
 
 ## Current repo scope
+
+### Prep
+
+- `classes.json` generation from Python or JSON class maps
+- Fixed or VLM-assisted `class -> archetype` mapping
+- Manually curated archetype taxonomy config under `configs/stage1/`
+- Server helpers that materialize prep artifacts under `runs/prep/...`
 
 ### Stage 1
 
@@ -17,28 +27,33 @@ Minimal executable scaffold for **Stage 1: Attribute Extraction** and an initial
 - Retry + validation + failure logging
 - CLI progress bar with success / failure counters and current sample summary
 - Incremental JSONL flushing so partial results are visible on disk during long runs
-- Outputs:
-  - `attributes.jsonl`
-  - `failed_samples.jsonl`
-  - `stage1_stats.json`
-
-### Stage 2
+- Conservative normalization helper for `attributes.jsonl` outputs
 - Deterministic canonical semantic rendering from normalized Stage 1 records
-- Archetype-specific fixed template schemas stored in `src/cspd_stage2/templates.py`
-- CLI entrypoint:
-  - `cspd-stage2 render --input ... --output-dir ...`
-- Server helper:
-  - `bash scripts/server/run_stage2_render.sh /path/to/attributes_normalized.jsonl [renderer_version]`
-- Default server-side output root:
-  - `runs/stage2/<dataset_name>/<backend>/<timestamp>`
-- Outputs:
-  - `records.jsonl`
-  - `failures.jsonl`
-  - `render_summary.json`
+
+### Main CLI entrypoints
+
+- `cspd-stage1 run --dataset-root ... --output-dir ...`
+- `cspd-stage1 render --input ... --output-dir ...`
+- `cspd-stage2 render ...` still exists as a compatibility alias
+
+### Main server helper scripts
+
+- `bash scripts/server/prepare_stage1_metadata.sh ...`
+- `bash scripts/server/run_stage1_qwen_local.sh ...`
+- `bash scripts/server/run_stage1_normalization.sh ...`
+- `bash scripts/server/run_stage1_render.sh ...`
+- `bash scripts/server/run_stage1_full_workflow.sh ...`
+- `bash scripts/server/run_stage2_render.sh ...` still exists as a compatibility wrapper
+
+### Default server-side output roots
+
+- Prep metadata: `runs/prep/...`
+- Stage 1 attributes: `runs/stage1/attributes/<dataset_name>/<backend>/<timestamp>`
+- Stage 1 render: `runs/stage1/render/<dataset_name>/<backend>/<timestamp>`
 
 ## Expected dataset layout
 
-Stage 1 currently assumes a simple ImageFolder layout:
+Stage 1 assumes a simple ImageFolder layout:
 
 ```text
 dataset_root/
@@ -51,10 +66,10 @@ dataset_root/
 ```
 
 Notes:
-- each immediate subdirectory under `dataset_root` is treated as one class,
-- class ids are assigned by sorting class directory names alphabetically,
-- images are discovered recursively inside each class folder,
-- supported extensions: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.webp`.
+- each immediate subdirectory under `dataset_root` is treated as one class
+- class ids are assigned by sorting class directory names alphabetically
+- images are discovered recursively inside each class folder
+- supported extensions: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.webp`
 
 ## Local development quick start
 
@@ -72,11 +87,11 @@ cspd-stage1 run --dataset-root path/to/dataset --output-dir runs/stage1_mock --b
 
 ## Real local VLM backend
 
-The repository now includes a real local backend:
+The repository includes a real local backend:
 - backend name: `qwen_local`
 - default model: `Qwen/Qwen2.5-VL-7B-Instruct`
 
-Example usage on the Linux GPU server:
+Example attribute extraction run on the Linux GPU server:
 
 ```bash
 cspd-stage1 run \
@@ -89,25 +104,30 @@ cspd-stage1 run \
   --max-new-tokens 256
 ```
 
-If you use the provided shell helpers, the workflow can now be driven end-to-end from environment setup through final attribute extraction. The full workflow script uses only a small mock smoke subset by default (first 3 classes, first 10 images per class), and also supports `--skip-smoke`.
+Then normalize + render:
 
-Useful options:
+```bash
+python scripts/data/normalize_stage1_attributes.py \
+  --input runs/stage1/attributes/my_dataset/qwen_local/2026-03-25_170000/attributes.jsonl \
+  --output-dir runs/stage1/attributes/my_dataset/qwen_local/2026-03-25_170000/normalization/2026-03-25_180000
+
+cspd-stage1 render \
+  --input runs/stage1/attributes/my_dataset/qwen_local/2026-03-25_170000/normalization/2026-03-25_180000/attributes_normalized.jsonl \
+  --output-dir runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500
+```
+
+If you use the provided shell helpers, the workflow can be driven end-to-end from prep through final Stage 1 canonical render. The full workflow script uses only a small mock smoke subset by default (first 3 classes, first 10 images per class), and also supports `--skip-smoke`.
+
+Useful extraction options:
 - `--disable-fast-processor`: use the slower processor path if the fast processor behaves oddly
 - `--no-raw-response`: skip saving raw model text in success rows
 - `--class-name-map /path/to/classes.json`: map raw folder labels such as `n01440764` to readable class names
 - `--class-archetype-map /path/to/class_to_archetype.json`: freeze raw folder labels to explicit archetypes before slot schema selection
 - resume is enabled by default when reusing an output directory; previously successful samples are skipped, while samples recorded in `failed_samples.jsonl` are retried. Use `--no-resume` to force overwrite/restart
 
-## VLM smoke-test scripts
+## Prep taxonomy configuration
 
-Two helper scripts are included under `scripts/vlm/`:
-
-- `test_qwen_vl_load.py`: verify the local Qwen model loads on the server
-- `test_single_image_infer.py`: run one image through the local VLM and inspect JSON output
-
-## Fixed taxonomy configuration
-
-Stage 1 now prefers a manually fixed taxonomy configuration instead of VLM-generated taxonomy discovery.
+Prep now prefers a manually fixed taxonomy configuration instead of VLM-generated taxonomy discovery.
 
 Primary taxonomy file:
 
@@ -115,9 +135,9 @@ Primary taxonomy file:
 configs/stage1/archetype_taxonomy_manual.json
 ```
 
-This file defines the manually curated archetype set used to guide Stage 1 schema decisions. In the current workflow, archetype discovery should be treated as fixed/curated rather than generated by Qwen during server runs.
+This file defines the manually curated archetype set used during Prep and Stage 1 schema decisions.
 
-If you want Qwen to generate `class -> archetype` mappings, the current recommended path is the **multimodal class-level mapper**: it uses the fixed manual taxonomy, the class text, and a small sample of images from each class.
+If you want Qwen to generate `class -> archetype` mappings, the recommended path is the multimodal class-level mapper:
 
 ```bash
 python scripts/data/generate_class_to_archetype_map_vlm.py \
@@ -135,19 +155,6 @@ Server helper (uses the repo-bundled `classes.json` by default):
 bash scripts/server/generate_class_to_archetype_vlm.sh /path/to/imagefolder_dataset 5
 ```
 
-## ImageFolder subset helper
-
-To create a small ImageFolder-style debugging subset with at most 20 images per class:
-
-```bash
-python scripts/data/make_imagefolder_subset.py \
-  --input /path/to/full_dataset \
-  --output /path/to/subset_dataset \
-  --max-per-class 20
-```
-
-This writes a normal ImageFolder-compatible subset plus `subset_summary.json` under the output root.
-
 ## Attribute analysis helper
 
 To inspect slot/value distributions before writing normalization rules:
@@ -159,10 +166,9 @@ python scripts/data/analyze_attribute_values.py \
   --print-top-k 10
 ```
 
-This writes a JSON summary report next to the input file and prints per-archetype,
-per-slot top values to stdout.
+This writes a JSON summary report next to the input file and prints per-archetype, per-slot top values to stdout.
 
-## Stage 1 attribute normalization helper
+## Stage 1 normalization helper
 
 A conservative post-processing script is included for Stage 1 `attributes.jsonl` outputs:
 
@@ -185,19 +191,7 @@ The script preserves the original row and writes these artifacts:
 - `normalization_summary.json`: aggregate counts by status / slot / class / rule
 - `normalization_rules_snapshot.json`: exact rule snapshot used for the run
 
-The current ruleset is still conservative, but now includes a v2 refinement pass for a few high-volume low-value failure modes: pure color/lighting contamination in background slots is mapped to `unknown`, obvious person-mention leakage in focus/accessory slots is mapped to `unknown`, and simple two-clause mixed state phrases (for example `deployed, descending` or `standing, panting`) collapse to their primary clause when the head state is safe enough to keep.
-
 ## Server shell scripts
-
-To avoid repeatedly typing the same CLI commands on the server, helper shell scripts are included under `scripts/server/`:
-
-- `check_stage1_env.sh`: check Python / torch / CUDA, install missing runtime dependencies, and verify imports
-- `prepare_stage1_metadata.sh`: prepare `classes.json` and `class_to_archetype.json`
-- `setup_cspd_stage1.sh`: activate `cspd-dd`, install the repo with `pip install -e .`, and check the CLI
-- `run_stage1_mock.sh`: quick mock-backend plumbing run
-- `run_stage1_qwen_local.sh`: run Stage 1 on an ImageFolder dataset with the real local Qwen backend
-- `run_stage1_normalization.sh`: run Stage 1 normalization under the same attribute-run directory
-- `run_stage1_full_workflow.sh`: complete Stage 1 shell workflow from env checks to final attribute extraction
 
 See `scripts/server/README.md` for the recommended order and detailed examples.
 
