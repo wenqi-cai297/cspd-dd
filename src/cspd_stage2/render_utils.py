@@ -179,10 +179,16 @@ def clean_pre_anchor_value(slot: str, value: str) -> str | None:
         return None
 
     lowered = text.casefold()
+    if slot in {"visible_body_trait", "clothing_or_gear"}:
+        if "," in text:
+            text = text.split(",", 1)[0].strip()
+        if lowered in {"face", "arms", "wet hair", "formal attire", "underwater"}:
+            return None
+        return text
     if slot in {"body_trait", "shape_or_structure", "shape_or_growth_form", "architectural_style_or_form"}:
         if lowered in LOW_VALUE_TRAIT_VALUES:
             return None
-        if lowered in {"with rounded edges", "with curved top", "with curved nozzle", "long handle with blade", "rectangular with handle"}:
+        if lowered in {"with rounded edges", "with curved top", "with curved nozzle", "long handle with blade", "rectangular with handle", "mug", "spoon", "slice"}:
             return None
         text = text.replace(",", " and")
         text = re.sub(r"\s+and\s+", " and ", text)
@@ -192,6 +198,7 @@ def clean_pre_anchor_value(slot: str, value: str) -> str | None:
         return text
     if slot in {"color", "color_or_pattern"}:
         text = text.replace("+", " and ")
+        text = text.replace("yellowish", "yellow")
         text = " ".join(text.split())
         return text
     return text
@@ -240,13 +247,27 @@ def should_drop_slot(archetype: str, slot: str, value: str, review_required: boo
         return True, "low_value_state"
 
     if archetype == "food_and_drink":
+        if slot == "shape_or_structure" and lowered in {"mug", "spoon", "slice", "bowl", "plate"}:
+            return True, "food_shape_suppressed"
         if slot == "preparation_or_serving_style" and (NARRATIVE_PATTERN.search(text) or lowered in {"ready-to-drink", "individual bowls", "served on plate", "curried", "topped with chocolate", "hot"}):
             return True, "food_style_suppressed"
         if slot == "container_or_context" and lowered in {"table", "plate", "white plate", "refrigerator shelf", "table setting", "wooden surface"}:
             return True, "food_context_suppressed"
 
-    if archetype == "natural_scene_or_landform" and slot in {"vegetation_or_natural_context", "salient_geographic_feature"} and NARRATIVE_PATTERN.search(text):
-        return True, "narrative_scene_slot"
+    if archetype == "human_or_person":
+        if slot == "background_or_activity_context" and lowered in {"coral reef", "ocean water", "underwater shipwreck", "wedding setting", "wedding reception", "outdoor garden setting"}:
+            return True, "human_context_suppressed"
+        if slot == "held_object_or_equipment" and lowered in {"scuba tank", "bouquet of flowers", "wine bottle"}:
+            return True, "human_equipment_suppressed"
+
+    if archetype == "natural_scene_or_landform":
+        if slot in {"vegetation_or_natural_context", "salient_geographic_feature"} and NARRATIVE_PATTERN.search(text):
+            return True, "narrative_scene_slot"
+        if slot == "salient_geographic_feature" and lowered in {"mountain", "mountains", "geothermal area", "sea"}:
+            return True, "scene_feature_suppressed"
+
+    if archetype == "container" and slot == "fill_state_or_contents_visibility" and lowered in {"partially filled with white powder", "green smoke", "closed jar", "empty"}:
+        return True, "container_fill_suppressed"
 
     if slot in {"body_trait", "shape_or_structure", "architectural_style_or_form"} and lowered in LOW_VALUE_TRAIT_VALUES:
         return True, "low_value_trait"
