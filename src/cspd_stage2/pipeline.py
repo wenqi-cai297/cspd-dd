@@ -87,13 +87,16 @@ def render_row(row: dict[str, Any], config: Stage2Config) -> dict[str, Any]:
     archetype = row.get("archetype")
     class_name = row.get("class_name")
 
+    effective_normalized_attributes = row.get("effective_normalized_attributes")
     base = {
         "record_id": record_id,
         "sample_id": row.get("sample_id"),
         "class_name": class_name,
         "archetype": archetype,
         "used_normalized_attributes": True,
+        "used_effective_normalized_attributes": isinstance(effective_normalized_attributes, dict),
         "normalization_review_required": bool(row.get("normalization_review_required", False)),
+        "vlm_review": row.get("vlm_review"),
     }
 
     if not record_id:
@@ -106,12 +109,15 @@ def render_row(row: dict[str, Any], config: Stage2Config) -> dict[str, Any]:
     except KeyError as exc:
         return {**base, "render_status": "failed", "error_message": str(exc), "render_warnings": []}
 
-    normalized_attributes = row.get("normalized_attributes")
+    normalized_attributes = row.get("effective_normalized_attributes")
+    if not isinstance(normalized_attributes, dict):
+        normalized_attributes = row.get("normalized_attributes")
     raw_attributes = row.get("attributes")
     if not isinstance(normalized_attributes, dict):
         if config.fallback_to_raw and isinstance(raw_attributes, dict):
             normalized_attributes = raw_attributes
             base["used_normalized_attributes"] = False
+            base["used_effective_normalized_attributes"] = False
         else:
             return {**base, "render_status": "failed", "error_message": "missing normalized_attributes", "render_warnings": []}
 

@@ -170,12 +170,21 @@ This writes a JSON summary report next to the input file and prints per-archetyp
 
 ## Stage 1 normalization helper
 
-A conservative post-processing script is included for Stage 1 `attributes.jsonl` outputs:
+A conservative post-processing script is included for Stage 1 `attributes.jsonl` outputs. By default it now runs deterministic normalization first, then an inline constrained VLM review pass for only the ambiguous / review-required slots:
 
 ```bash
 python scripts/data/normalize_stage1_attributes.py \
   --input /path/to/attributes.jsonl \
   --output-dir /path/to/normalized_artifacts
+```
+
+Disable the inline VLM review if you want a purely deterministic run:
+
+```bash
+python scripts/data/normalize_stage1_attributes.py \
+  --input /path/to/attributes.jsonl \
+  --output-dir /path/to/normalized_artifacts \
+  --disable-vlm-review
 ```
 
 Default rules live in:
@@ -185,15 +194,19 @@ configs/stage1/normalization/stage1_attribute_normalization_rules.json
 ```
 
 The script preserves the original row and writes these artifacts:
-- `attributes_normalized.jsonl`: original row plus `normalized_attributes` and per-slot normalization metadata
-- `normalization_audit.jsonl`: changed or review-flagged fields with rule ids/status
-- `normalization_review_queue.jsonl`: only suspicious / review-required items
-- `normalization_summary.json`: aggregate counts by status / slot / class / rule
+- `attributes_normalized.jsonl`: original row plus deterministic `normalized_attributes`, deterministic `attribute_normalization`, `effective_normalized_attributes` used by downstream render, and inline `vlm_review` metadata when enabled
+- `normalization_audit.jsonl`: changed or review-flagged fields with rule ids/status from the deterministic pass
+- `normalization_review_queue.jsonl`: only suspicious / review-required items from the deterministic pass
+- `normalization_review_vlm.jsonl`: one structured constrained VLM decision per reviewed ambiguous slot
+- `normalization_review_vlm_summary.json`: aggregate counts and contract metadata for the inline review pass
+- `normalization_summary.json`: aggregate counts by status / slot / class / rule plus inline VLM review summary
 - `normalization_rules_snapshot.json`: exact rule snapshot used for the run
 
-### Optional VLM review fallback for ambiguous normalization cases
+`normalized_attributes` stays as the deterministic output for auditability. `effective_normalized_attributes` applies only the constrained inline VLM decisions (`replace_normalized` / `set_unknown`) and is what Stage 1 render uses by default when present.
 
-The main normalization + render path remains deterministic. For rows that were already flagged by deterministic normalization, you can run a separate constrained VLM review pass:
+### Optional standalone VLM review helper for ambiguous normalization cases
+
+For rows that were already flagged by deterministic normalization, you can still run the separate constrained VLM review helper:
 
 ```bash
 python scripts/data/review_normalization_with_vlm.py \
@@ -203,7 +216,7 @@ python scripts/data/review_normalization_with_vlm.py \
 ```
 
 This helper only sends slots whose normalization metadata has `status=review_required` or non-empty `review_reasons`.
-It does **not** overwrite `attributes_normalized.jsonl`; instead it writes sidecar review artifacts:
+It still does **not** overwrite `attributes_normalized.jsonl`; instead it writes sidecar review artifacts:
 - `normalization_review_vlm.jsonl`: one structured VLM decision per ambiguous slot
 - `normalization_review_vlm_summary.json`: aggregate counts and contract metadata
 

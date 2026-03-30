@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 from cspd_stage1.pipeline import config_from_args, run_stage1
 from cspd_stage2.pipeline import config_from_args as render_config_from_args, run_stage2
@@ -72,6 +75,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable resume and overwrite prior JSONL outputs in the output directory.",
     )
 
+    normalize_parser = subparsers.add_parser("normalize", help="Run deterministic normalization with inline constrained VLM review by default")
+    normalize_parser.add_argument("--input", required=True, help="Path to Stage 1 attributes.jsonl")
+    normalize_parser.add_argument("--output-dir", required=True, help="Directory for normalization artifacts")
+    normalize_parser.add_argument("--rules", default="configs/stage1/normalization/stage1_attribute_normalization_rules.json", help="Path to normalization rules JSON")
+    normalize_parser.add_argument("--disable-vlm-review", action="store_true", help="Disable inline VLM review and keep outputs purely deterministic")
+    normalize_parser.add_argument("--review-backend", default="qwen_local", help="Inline review backend; use mock for plumbing-only tests")
+    normalize_parser.add_argument("--review-model-name", default="Qwen/Qwen2.5-VL-7B-Instruct", help="Model name for inline review")
+    normalize_parser.add_argument("--review-torch-dtype", default="float16", help="Torch dtype for inline review")
+    normalize_parser.add_argument("--review-device-map", default="auto", help="Device map for inline review")
+    normalize_parser.add_argument("--disable-review-fast-processor", action="store_true", help="Use the slow processor for inline review")
+    normalize_parser.add_argument("--review-max-new-tokens", type=int, default=256, help="Generation cap for inline review")
+    normalize_parser.add_argument("--review-limit", type=int, default=None, help="Optional maximum number of ambiguous slots to review")
+
     render_parser = subparsers.add_parser("render", help="Run Stage 1 canonical rendering from normalized attributes")
     render_parser.add_argument("--input", required=True, help="Path to attributes_normalized.jsonl")
     render_parser.add_argument("--output-dir", required=True, help="Directory for Stage 1 render artifacts")
@@ -92,6 +108,38 @@ def main() -> None:
     if args.command == "run":
         stats = run_stage1(config_from_args(args))
         print(json.dumps(stats, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "normalize":
+        script_path = Path(__file__).resolve().parents[2] / "scripts" / "data" / "normalize_stage1_attributes.py"
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--input",
+            args.input,
+            "--output-dir",
+            args.output_dir,
+            "--rules",
+            args.rules,
+            "--review-backend",
+            args.review_backend,
+            "--review-model-name",
+            args.review_model_name,
+            "--review-torch-dtype",
+            args.review_torch_dtype,
+            "--review-device-map",
+            args.review_device_map,
+            "--review-max-new-tokens",
+            str(args.review_max_new_tokens),
+        ]
+        if args.disable_vlm_review:
+            cmd.append("--disable-vlm-review")
+        if args.disable_review_fast_processor:
+            cmd.append("--disable-review-fast-processor")
+        if args.review_limit is not None:
+            cmd.extend(["--review-limit", str(args.review_limit)])
+        result = subprocess.run(cmd, check=True, text=True, capture_output=True)
+        print(result.stdout.strip())
         return
 
     if args.command == "render":

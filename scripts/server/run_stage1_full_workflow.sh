@@ -169,7 +169,7 @@ cspd-stage1 run \
   --class-archetype-map "$ARCHETYPE_JSON" \
   --flush-every "$FLUSH_EVERY"
 
-echo "[STEP 8/9] Stage 1 normalization"
+echo "[STEP 8/9] Stage 1 normalization (deterministic + inline constrained VLM review by default)"
 python scripts/data/normalize_stage1_attributes.py \
   --input "$ATTR_DIR/attributes.jsonl" \
   --output-dir "$NORM_DIR"

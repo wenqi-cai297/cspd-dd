@@ -120,6 +120,8 @@ runs/stage1/attributes/<dataset_name>/qwen_local/<timestamp>
 
 ### Run Stage 1 normalization
 
+This now runs deterministic normalization first, then inline constrained VLM review for ambiguous slots by default.
+
 ```bash
 bash scripts/server/run_stage1_normalization.sh /path/to/attribute_run_dir
 ```
@@ -135,6 +137,20 @@ The output directory is generated automatically as:
 ```text
 <attribute_run_dir>/normalization/<timestamp>
 ```
+
+To disable inline review manually:
+
+```bash
+bash scripts/server/run_stage1_normalization.sh /path/to/attribute_run_dir --disable-vlm-review
+```
+
+To override the inline review backend explicitly:
+
+```bash
+bash scripts/server/run_stage1_normalization.sh /path/to/attribute_run_dir qwen_local
+```
+
+The main normalized JSONL now keeps both deterministic `normalized_attributes` and `effective_normalized_attributes` plus per-slot `vlm_review` metadata; Stage 1 render prefers the effective attributes when present.
 
 ### Run optional Stage 1 normalization-review VLM fallback
 
