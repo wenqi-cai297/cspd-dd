@@ -190,10 +190,10 @@ The output directory is generated automatically as:
 runs/stage1/render/<dataset_name>/<backend>/<timestamp>
 ```
 
-Legacy compatibility note:
+Migration note:
 - Canonical render code now lives under `src/cspd_stage1/`.
-- `bash scripts/server/run_stage2_render.sh ...` still works, but now forwards to `run_stage1_render.sh`.
-- `cspd-stage2 render ...` still works, but `cspd-stage1 render ...` is the preferred entrypoint.
+- Use `bash scripts/server/run_stage1_render.sh ...` or `cspd-stage1 render ...`.
+- The old Stage 2 render compatibility entrypoints were removed because future Stage 2 will be different code.
 
 ## Dataset assumption
 

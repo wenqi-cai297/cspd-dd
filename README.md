@@ -35,7 +35,6 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 - `cspd-stage1 run --dataset-root ... --output-dir ...`
 - `cspd-stage1 render --input ... --output-dir ...`
 - Canonical Stage 1 render implementation now lives under `src/cspd_stage1/`
-- `cspd-stage2 render ...` still exists as a compatibility alias
 
 ### Main server helper scripts
 
@@ -44,7 +43,6 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 - `bash scripts/server/run_stage1_normalization.sh ...`
 - `bash scripts/server/run_stage1_render.sh ...`
 - `bash scripts/server/run_stage1_full_workflow.sh ...`
-- `bash scripts/server/run_stage2_render.sh ...` still exists as a compatibility wrapper
 
 ### Default server-side output roots
 

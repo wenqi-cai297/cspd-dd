@@ -14,7 +14,6 @@ dependencies = [
 
 [project.scripts]
 cspd-stage1 = "cspd_stage1.cli:main"
-cspd-stage2 = "cspd_stage2.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

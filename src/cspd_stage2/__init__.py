@@ -1,7 +1,9 @@
-"""Legacy Stage 2 package name for canonical rendering, now classified under Stage 1."""
+"""Reserved Stage 2 package scaffold.
 
-__all__ = [
-    "__version__",
-]
+Stage 2 render compatibility entrypoints were intentionally removed.
+Future Stage 2 code should land here without inheriting old render semantics.
+"""
+
+__all__ = ["__version__"]
 
 __version__ = "0.1.0"
