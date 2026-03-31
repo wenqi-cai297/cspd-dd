@@ -254,19 +254,16 @@ class Normalizer:
         if slot in self.state_slots:
             if key in self.state_phrase_map:
                 mapped = self.state_phrase_map[key]
-                if mapped == "unknown":
-                    applied_rules.append("slot.state.low_value_to_unknown")
-                    return "unknown", "mapped_to_unknown", applied_rules
                 if mapped != value:
                     applied_rules.append("slot.state.canonicalize")
                     return mapped, "canonicalized", applied_rules
             if key in self.low_value_state_phrases:
-                applied_rules.append("slot.state.low_value_to_unknown")
-                return "unknown", "mapped_to_unknown", applied_rules
+                applied_rules.append("slot.state.low_value_preserved")
+                return value, status, applied_rules
 
         if slot in self.shape_slots and key in self.low_value_shape_phrases:
-            applied_rules.append("slot.shape.low_value_to_unknown")
-            return "unknown", "mapped_to_unknown", applied_rules
+            applied_rules.append("slot.shape.low_value_preserved")
+            return value, status, applied_rules
 
         if slot in self.part_slots and key in self.low_value_part_phrases:
             applied_rules.append("slot.part.low_value_to_unknown")
@@ -507,12 +504,13 @@ def iter_jsonl(path: Path):
 DEFAULT_REVIEW_MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
 DEFAULT_ALLOWED_ACTIONS = ("keep_normalized", "replace_normalized", "set_unknown", "defer")
 REVIEW_SYSTEM_PROMPT = (
-    "You are a strict normalization review assistant for image attributes. "
+    "You are a careful normalization review assistant for image attributes. "
     "Return JSON only. Never change the provided archetype or slot. "
     "The deterministic normalized value is a candidate, not ground truth. "
-    "Only keep it when the image clearly supports it. "
-    "If the slot is ambiguous, weakly visible, or not verifiable from the image, prefer set_unknown instead of silently keeping a plausible guess. "
-    "Use replace_normalized only when a different short slot-compatible value is clearly supported. "
+    "Prefer preserving a coarse, slot-compatible semantic value when it is reasonably supported by the image, even if fine detail is uncertain. "
+    "Use keep_normalized when the current value is broadly supported. "
+    "Use replace_normalized when another short slot-compatible value is more clearly supported. "
+    "Use set_unknown only when the slot is truly unverifiable, contradicted, contaminated by the wrong object/background, or too unclear to support even a coarse semantic label. "
     "Reserve defer for true contract problems, unreadable images, or cases that genuinely need manual follow-up."
 )
 
@@ -549,16 +547,18 @@ def build_review_prompt(row: dict[str, Any], slot: str, slot_meta: dict[str, Any
         f"normalized_slot_value: {json.dumps(current_value, ensure_ascii=False)}\n"
         f"other_normalized_slots: {json.dumps(context_attributes, ensure_ascii=False)}\n"
         "Decision policy:\n"
-        "- keep_normalized: use only if the image clearly supports the current normalized value for this exact slot.\n"
-        "- replace_normalized: use only if another short value is more clearly supported by the image. Do not elaborate or rewrite beyond this slot.\n"
-        "- set_unknown: use when the slot is ambiguous, not visible enough, conflicting, too fine-grained to verify, or likely contaminated by the wrong object/background. This is preferred over keep_normalized for ordinary uncertainty.\n"
+        "- keep_normalized: use when the current normalized value is broadly supported for this exact slot, even if some fine detail remains uncertain.\n"
+        "- replace_normalized: use when another short value is more clearly supported by the image. Do not elaborate or rewrite beyond this slot.\n"
+        "- set_unknown: use only when the slot is truly not verifiable, clearly conflicting, heavily contaminated by the wrong object/background, or too unclear to support even a coarse slot-compatible label.\n"
         "- defer: use only for exceptional manual-review situations such as unreadable/corrupted image, slot/archetype contract confusion, or impossible judgment even after applying the rules above. Do not use defer for normal ambiguity.\n"
         "Constraints:\n"
         "- The current normalized value is only a candidate. It may be wrong precisely because this item was routed for review.\n"
+        "- Prefer preserving coarse semantics over collapsing to unknown when the image reasonably supports them.\n"
+        "- This especially applies to high-level state/action/context/viewpoint labels.\n"
         "- Do NOT change archetype.\n"
         "- Do NOT answer for any other slot.\n"
         "- Keep output short, slot-compatible, and render-friendly.\n"
-        "- Do NOT invent hidden details. If you cannot verify the slot visually, choose set_unknown.\n"
+        "- Do NOT invent hidden details. If you truly cannot verify the slot visually, choose set_unknown.\n"
         f"Return JSON with this exact schema:\n{json.dumps(payload_hint, ensure_ascii=False, indent=2)}"
     )
 
@@ -580,18 +580,37 @@ def build_sample(row: dict[str, Any]) -> SampleRecord:
 
 def run_mock_review(row: dict[str, Any], slot: str, slot_meta: dict[str, Any]) -> dict[str, Any]:
     normalized_value = str(slot_meta.get("normalized_value") or "unknown")
-    review_reasons = [str(item) for item in slot_meta.get("review_reasons") or []]
-    action = "defer" if review_reasons else "keep_normalized"
     return {
         "record_id": str(row.get("record_id") or ""),
         "archetype": str(row.get("archetype") or ""),
         "slot": slot,
-        "action": action,
+        "action": "keep_normalized",
         "reviewed_value": normalized_value,
-        "confidence": "low" if action == "defer" else "medium",
-        "needs_manual_followup": action == "defer",
-        "reason": "mock backend emits structured placeholder review decisions only",
+        "confidence": "medium",
+        "needs_manual_followup": False,
+        "reason": "mock backend preserves deterministic candidate for plumbing-only review tests",
     }
+
+
+def should_apply_review_decision(slot: str, slot_meta: dict[str, Any], parsed: dict[str, Any]) -> tuple[bool, str]:
+    action = str(parsed.get("action") or "defer")
+    confidence = str(parsed.get("confidence") or "low").strip().lower()
+    review_reasons = {str(item) for item in slot_meta.get("review_reasons") or []}
+    severity_unknown_ok = {
+        "review.wrong_object_candidate",
+        "review.archetype_anchor_mismatch",
+        "review.food_anchor_context_drift",
+        "review.weapon_anchor_related_object",
+        "review.cross_slot_value_conflict",
+        "review.person_mention",
+        "review.slot_contamination",
+    }
+    if action == "replace_normalized":
+        return confidence in {"high", "medium"}, "accepted_replace" if confidence in {"high", "medium"} else "rejected_low_confidence_replace"
+    if action == "set_unknown":
+        allow = confidence == "high" or bool(review_reasons & severity_unknown_ok)
+        return allow, "accepted_set_unknown" if allow else "rejected_low_confidence_set_unknown"
+    return False, "not_applicable"
 
 
 def parse_review_payload(payload: dict[str, Any], row: dict[str, Any], slot: str, slot_meta: dict[str, Any]) -> dict[str, Any]:
@@ -715,7 +734,10 @@ def run_inline_vlm_review(rows: list[dict[str, Any]], review_backend: str, revie
                 record["review_status"] = "failed"
                 record["error_message"] = str(exc)
             action_counts[parsed["action"]] += 1
-            if parsed["action"] in {"replace_normalized", "set_unknown"}:
+            apply_decision, application_reason = should_apply_review_decision(slot, slot_meta, parsed)
+            parsed["applied_to_effective_normalized_attributes"] = apply_decision
+            parsed["application_reason"] = application_reason
+            if apply_decision:
                 effective_attributes[slot] = parsed["reviewed_value"]
             reviewed_slots[slot] = parsed
             record["vlm_review"] = parsed

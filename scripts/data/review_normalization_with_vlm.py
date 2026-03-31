@@ -73,10 +73,12 @@ def build_review_prompt(row: dict[str, Any], slot: str, slot_meta: dict[str, Any
         "- defer: use only for exceptional manual-review situations such as unreadable/corrupted image, slot/archetype contract confusion, or impossible judgment even after applying the rules above. Do not use defer for normal ambiguity.\n"
         "Constraints:\n"
         "- The current normalized value is only a candidate. It may be wrong precisely because this item was routed for review.\n"
+        "- Prefer preserving coarse semantics over collapsing to unknown when the image reasonably supports them.\n"
+        "- This especially applies to high-level state/action/context/viewpoint labels.\n"
         "- Do NOT change archetype.\n"
         "- Do NOT answer for any other slot.\n"
         "- Keep output short, slot-compatible, and render-friendly.\n"
-        "- Do NOT invent hidden details. If you cannot verify the slot visually, choose set_unknown.\n"
+        "- Do NOT invent hidden details. If you truly cannot verify the slot visually, choose set_unknown.\n"
         f"Return JSON with this exact schema:\n{json.dumps(payload_hint, ensure_ascii=False, indent=2)}"
     )
 

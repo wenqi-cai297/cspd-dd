@@ -215,16 +215,14 @@ def should_drop_slot(archetype: str, slot: str, value: str, review_required: boo
     if NOISY_TOKEN_PATTERN.search(text):
         return True, "person_or_narrative_noise"
 
-    if review_required and slot != "species_or_category" and not slot.endswith("_type"):
-        return True, "review_required"
+    if review_required and slot in {"salient_part_or_focus", "salient_part_or_accessory", "salient_structural_part"} and lowered in LOW_VALUE_FOCUS_VALUES:
+        return True, "review_required_low_value_focus"
 
     if slot in {"salient_part_or_focus", "salient_part_or_accessory", "salient_structural_part"} and lowered in LOW_VALUE_FOCUS_VALUES:
         return True, "low_value_focus"
 
     if slot == "viewpoint":
-        if archetype in {"animal", "natural_scene_or_landform", "structure_or_building", "human_or_person"}:
-            return True, "viewpoint_suppressed"
-        if lowered in {"frontal", "front", "front view", "side", "side view", "ground level", "ground level view", "interior", "interior view", "top", "top-down", "top-down view", "close-up", "close-up view"}:
+        if lowered in {"frontal", "front", "front view", "side", "side view"}:
             return True, "default_viewpoint"
         if NARRATIVE_PATTERN.search(text):
             return True, "narrative_viewpoint"
@@ -240,18 +238,18 @@ def should_drop_slot(archetype: str, slot: str, value: str, review_required: boo
     if archetype == "animal" and slot == "background_or_habitat" and ("," in lowered or "with" in lowered or lowered.endswith("side") or lowered.endswith("setting")):
         return True, "complex_background"
 
-    if archetype == "animal" and slot == "pose_or_state":
+    if archetype == "animal" and slot == "pose_or_state" and lowered in {"stationary"}:
         return True, "animal_pose_suppressed"
 
-    if archetype in {"instrument", "sports_or_toy", "tool", "device_or_appliance", "vehicle", "container", "household_object", "furniture", "weapon"} and slot in {"playing_state_or_pose", "activity_or_usage_state", "usage_state", "operating_state_or_display_state", "state_or_action", "usage_or_display_state", "fill_state_or_contents_visibility", "wearing_state_or_pose"} and lowered in LOW_VALUE_POSE_VALUES:
+    if archetype in {"instrument", "sports_or_toy", "tool", "device_or_appliance", "vehicle", "container", "household_object", "furniture", "weapon"} and slot in {"playing_state_or_pose", "activity_or_usage_state", "usage_state", "operating_state_or_display_state", "state_or_action", "usage_or_display_state", "fill_state_or_contents_visibility", "wearing_state_or_pose"} and lowered in {"inactive"}:
         return True, "low_value_state"
 
     if archetype == "food_and_drink":
-        if slot == "shape_or_structure" and lowered in {"mug", "spoon", "slice", "bowl", "plate"}:
+        if slot == "shape_or_structure" and lowered in {"mug", "spoon", "bowl", "plate"}:
             return True, "food_shape_suppressed"
-        if slot == "preparation_or_serving_style" and (NARRATIVE_PATTERN.search(text) or lowered in {"ready-to-drink", "individual bowls", "served on plate", "curried", "topped with chocolate", "hot"}):
+        if slot == "preparation_or_serving_style" and (NARRATIVE_PATTERN.search(text) or lowered in {"individual bowls", "served on plate"}):
             return True, "food_style_suppressed"
-        if slot == "container_or_context" and lowered in {"table", "plate", "white plate", "refrigerator shelf", "table setting", "wooden surface"}:
+        if slot == "container_or_context" and lowered in {"table", "white plate", "refrigerator shelf", "table setting", "wooden surface"}:
             return True, "food_context_suppressed"
 
     if archetype == "human_or_person":

@@ -305,8 +305,7 @@
       "being held",
       "resting",
       "at rest",
-      "stationary",
-      "off"
+      "stationary"
     ],
     "low_value_shape_phrases": [
       "curved tubing",
@@ -337,11 +336,11 @@
       "living room": "unknown"
     },
     "state_phrase_map": {
-      "at rest": "unknown",
-      "stationary": "unknown",
-      "off": "unknown",
-      "being held": "unknown",
-      "resting": "unknown"
+      "at rest": "resting",
+      "stationary": "stationary",
+      "off": "off",
+      "being held": "being held",
+      "resting": "resting"
     }
   }
 }
