@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from cspd_stage1.pipeline import config_from_args, run_stage1
-from cspd_stage2.pipeline import config_from_args as render_config_from_args, run_stage2
+from cspd_stage1.render_pipeline import config_from_args as render_config_from_args, run_stage1_render
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -143,7 +143,7 @@ def main() -> None:
         return
 
     if args.command == "render":
-        summary = run_stage2(render_config_from_args(args))
+        summary = run_stage1_render(render_config_from_args(args))
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
 
