@@ -9,7 +9,7 @@ Stage 1 now means attribute extraction, normalization, and canonical render.
 
 If you want the full workflow from environment checking to final canonical render, use these steps in order:
 
-### 1. Check the server environment and install missing runtime dependencies
+### 1. Create the conda environment from the repo and verify it
 
 ```bash
 bash scripts/server/check_stage1_env.sh
@@ -115,7 +115,7 @@ Example:
 
 ```bash
 bash scripts/server/run_stage1_qwen_local.sh /data/cifar10_small 256
-bash scripts/server/run_stage1_qwen_local.sh /data/imagenette/train 256 DEFAULT 10 /data/imagenette/class_to_archetype.json
+bash scripts/server/run_stage1_qwen_local.sh /data/imagenette/train 256 DEFAULT 10 configs/stage1/class_to_archetype_imagenet1k_manual.json
 ```
 
 The output directory is generated automatically as:
@@ -204,6 +204,16 @@ Migration note:
 ## Dataset assumption
 
 All Stage 1 run scripts assume an ImageFolder-style dataset layout:
+
+```text
+dataset_root/
+  class_a/
+    1.jpg
+    2.jpg
+  class_b/
+    3.jpg
+```
+set layout:
 
 ```text
 dataset_root/

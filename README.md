@@ -129,6 +129,8 @@ cspd-stage1 render \
 
 If you use the provided shell helpers, the workflow can be driven end-to-end from prep through final Stage 1 canonical render. The full workflow script uses only a small mock smoke subset by default (first 3 classes, first 10 images per class), and also supports `--skip-smoke`.
 
+For routine ImageNet-1k / Imagenette reruns, you usually do not need to rerun Prep if you are happy using the repo-bundled `classes.json` plus `configs/stage1/class_to_archetype_imagenet1k_manual.json`.
+
 Useful extraction options:
 - `--disable-fast-processor`: use the slower processor path if the fast processor behaves oddly
 - `--no-raw-response`: skip saving raw model text in success rows

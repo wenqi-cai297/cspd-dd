@@ -6,7 +6,7 @@ set -euo pipefail
 #   bash scripts/server/setup_cspd_stage1.sh
 # Assumptions:
 #   - conda is installed
-#   - the environment name is cspd_vlm
+#   - the environment name is cspd-dd
 #   - this script is executed from anywhere after the repo is cloned
 
 ENV_NAME="cspd-dd"
