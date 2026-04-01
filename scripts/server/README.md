@@ -213,6 +213,16 @@ dataset_root/
   class_b/
     3.jpg
 ```
+older-style dataset layout:
+
+```text
+dataset_root/
+  class_a/
+    1.jpg
+    2.jpg
+  class_b/
+    3.jpg
+```
 set layout:
 
 ```text
