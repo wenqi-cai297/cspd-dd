@@ -1,0 +1,21 @@
+name: cspd-dd
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - setuptools>=68
+  - wheel
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+  - pillow
+  - tqdm>=4.66
+  - pip:
+      - transformers
+      - accelerate
+      - sentencepiece
+      - -e .

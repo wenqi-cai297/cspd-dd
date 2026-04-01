@@ -70,7 +70,19 @@ Notes:
 - images are discovered recursively inside each class folder
 - supported extensions: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.webp`
 
-## Local development quick start
+## Environment setup
+
+### Recommended: conda on Linux GPU servers
+
+```bash
+conda env create -f environment.yml
+conda activate cspd-dd
+bash scripts/server/check_stage1_env.sh
+```
+
+This is the intended one-command environment bootstrap for new servers.
+
+### Alternative: local venv / manual Python environment
 
 ```bash
 python -m venv .venv
@@ -143,6 +155,8 @@ configs/stage1/class_to_archetype_imagenet1k_manual.json
 ```
 
 This lets ImageNet-1k / Imagenette-style reruns skip re-running Prep when you just want a stable repo-bundled `classes.json` + `class_to_archetype.json` pair.
+
+The repo now also bundles a conda environment file at `environment.yml`, so new servers can create the `cspd-dd` environment directly from the repo instead of reconstructing runtime dependencies by hand each time.
 
 If you want Qwen to generate `class -> archetype` mappings, the recommended path is the multimodal class-level mapper:
 

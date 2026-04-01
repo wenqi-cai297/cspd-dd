@@ -19,8 +19,7 @@ python --version
 echo "[INFO] Torch / CUDA"
 python -c "import torch; print('torch', torch.__version__); print('cuda_available', torch.cuda.is_available()); print('cuda_device_count', torch.cuda.device_count())"
 
-echo "[INFO] Installing runtime dependencies"
-pip install transformers pillow accelerate sentencepiece
+echo "[INFO] Checking editable install"
 pip install -e .
 
 echo "[INFO] Transformers"
