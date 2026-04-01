@@ -41,6 +41,12 @@ This script:
 - copies a fixed `class_to_archetype.json` into the prep run directory
 - does not run VLM-based taxonomy discovery
 
+For ImageNet-1k / Imagenette-style reruns, the repo now also bundles a fixed mapping you can reuse directly:
+
+```text
+configs/stage1/class_to_archetype_imagenet1k_manual.json
+```
+
 If you want VLM to produce `class_to_archetype.json`, the recommended path is the multimodal class-level mapper:
 
 ```bash

@@ -136,6 +136,14 @@ configs/stage1/archetype_taxonomy_manual.json
 
 This file defines the manually curated archetype set used during Prep and Stage 1 schema decisions.
 
+Bundled fixed ImageNet-1k class-to-archetype mapping:
+
+```text
+configs/stage1/class_to_archetype_imagenet1k_manual.json
+```
+
+This lets ImageNet-1k / Imagenette-style reruns skip re-running Prep when you just want a stable repo-bundled `classes.json` + `class_to_archetype.json` pair.
+
 If you want Qwen to generate `class -> archetype` mappings, the recommended path is the multimodal class-level mapper:
 
 ```bash
