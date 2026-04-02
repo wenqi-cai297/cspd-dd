@@ -227,6 +227,7 @@ This helper currently:
 - pairs images with Stage 1 canonical captions conservatively by stable identifiers
 - writes `train_manifest.jsonl` plus unmatched-record reports
 - writes a Stage 2 config snapshot and trainer plan
+- records text-conditioning-focused trainable-component groups and adapter-plan metadata
 - keeps the training intent transformer-core-only by default (`freeze_text_encoder=true`, `freeze_vae=true`)
 
 Direct CLI example:
@@ -237,6 +238,10 @@ cspd-stage2 train \
   --render-input /path/to/stage1_render_records.jsonl \
   --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000 \
   --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
+  --trainable-component-group conditioning_bridge \
+  --trainable-component-group cross_attention \
+  --adapter-type lora \
+  --adapter-rank 16 \
   --batch-size 4 \
   --epochs 1 \
   --dry-run

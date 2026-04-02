@@ -20,7 +20,7 @@ from typing import Any, Iterable
 from PIL import Image
 
 from cspd_stage1.io_utils import write_json, write_jsonl
-from cspd_stage1.pipeline import IMAGE_EXTENSIONS, build_samples_from_imagefolder, load_string_mapping
+from cspd_stage1.pipeline import build_samples_from_imagefolder, load_string_mapping
 
 
 @dataclass(slots=True)
@@ -37,9 +37,15 @@ class Stage2PairRecord:
     class_name: str
     archetype: str
     canonical_caption: str
-    render_source_record_id: str
-    render_input_path: str
-    matched_via: str
+    caption_template_family: str | None = None
+    caption_template_id: str | None = None
+    caption_anchor_slot: str | None = None
+    caption_slot_count: int | None = None
+    caption_source_stage: str = "stage1_render"
+    conditioning_text_source: str = "canonical_caption"
+    render_source_record_id: str = ""
+    render_input_path: str = ""
+    matched_via: str = ""
     image_width: int | None = None
     image_height: int | None = None
 
@@ -55,6 +61,12 @@ class Stage2PairRecord:
             "class_name": self.class_name,
             "archetype": self.archetype,
             "canonical_caption": self.canonical_caption,
+            "caption_template_family": self.caption_template_family,
+            "caption_template_id": self.caption_template_id,
+            "caption_anchor_slot": self.caption_anchor_slot,
+            "caption_slot_count": self.caption_slot_count,
+            "caption_source_stage": self.caption_source_stage,
+            "conditioning_text_source": self.conditioning_text_source,
             "render_source_record_id": self.render_source_record_id,
             "render_input_path": self.render_input_path,
             "matched_via": self.matched_via,
@@ -102,6 +114,12 @@ class Stage2PairedDataset:
             "image": image,
             "image_path": pair.image_path,
             "caption": pair.canonical_caption,
+            "conditioning_text": pair.canonical_caption,
+            "conditioning_text_source": pair.conditioning_text_source,
+            "caption_template_family": pair.caption_template_family,
+            "caption_template_id": pair.caption_template_id,
+            "caption_anchor_slot": pair.caption_anchor_slot,
+            "caption_slot_count": pair.caption_slot_count,
             "class_name": pair.class_name,
             "class_name_raw": pair.class_name_raw,
             "archetype": pair.archetype,
@@ -136,7 +154,6 @@ def build_stage2_pairs(
     render_by_record_id: dict[str, dict[str, Any]] = {}
     render_by_sample_id: dict[str, dict[str, Any]] = {}
     render_by_relative_path: dict[str, dict[str, Any]] = {}
-    render_row_keys: dict[int, str] = {}
 
     for index, row in enumerate(render_rows):
         if not isinstance(row, dict):
@@ -150,8 +167,6 @@ def build_stage2_pairs(
             continue
         if not canonical_caption:
             continue
-        key = record_id or sample_id or rel_image or f"render_row_{index}"
-        render_row_keys[index] = key
         if record_id and record_id not in render_by_record_id:
             render_by_record_id[record_id] = row
         if sample_id and sample_id not in render_by_sample_id:
@@ -207,6 +222,10 @@ def build_stage2_pairs(
         if verify_images:
             width, height = _probe_image_size(sample.image_path)
 
+        renderer = matched_row.get("renderer") if isinstance(matched_row.get("renderer"), dict) else {}
+        verbalized_slots = matched_row.get("verbalized_slots")
+        caption_slot_count = len(verbalized_slots) if isinstance(verbalized_slots, list) else None
+
         pairs.append(
             Stage2PairRecord(
                 pair_id=record_id,
@@ -219,6 +238,12 @@ def build_stage2_pairs(
                 class_name=sample.class_name,
                 archetype=sample.archetype,
                 canonical_caption=str(matched_row["canonical_caption"]),
+                caption_template_family=_string_or_none(renderer.get("template_family")),
+                caption_template_id=_string_or_none(renderer.get("template_id")),
+                caption_anchor_slot=_string_or_none(matched_row.get("anchor_slot")),
+                caption_slot_count=caption_slot_count,
+                caption_source_stage="stage1_render",
+                conditioning_text_source="canonical_caption",
                 render_source_record_id=str(matched_row.get("record_id") or record_id),
                 render_input_path=str(Path(render_input).resolve()),
                 matched_via=str(matched_via or "unknown"),
@@ -301,7 +326,9 @@ def write_pairing_artifacts(result: PairingResult, output_dir: str | Path) -> Ma
 def _pair_to_manifest_row(pair: Stage2PairRecord) -> dict[str, Any]:
     row = pair.to_dict()
     row["text"] = pair.canonical_caption
+    row["conditioning_text"] = pair.canonical_caption
     row["image"] = pair.image_path
+    row["conditioning_target"] = "text_conditioning"
     return row
 
 
@@ -318,13 +345,19 @@ def _build_pairing_summary(
 ) -> dict[str, Any]:
     counts_by_class: dict[str, int] = {}
     counts_by_archetype: dict[str, int] = {}
+    counts_by_template_family: dict[str, int] = {}
+    counts_by_match_strategy: dict[str, int] = {}
     for pair in pairs:
         counts_by_class[pair.class_name_raw] = counts_by_class.get(pair.class_name_raw, 0) + 1
         counts_by_archetype[pair.archetype] = counts_by_archetype.get(pair.archetype, 0) + 1
+        template_family = pair.caption_template_family or "unknown"
+        counts_by_template_family[template_family] = counts_by_template_family.get(template_family, 0) + 1
+        counts_by_match_strategy[pair.matched_via] = counts_by_match_strategy.get(pair.matched_via, 0) + 1
 
     return {
         "dataset_root": str(Path(dataset_root).resolve()),
         "render_input": str(Path(render_input).resolve()),
+        "conditioning_text_source": "stage1_render.canonical_caption",
         "num_imagefolder_samples": len(samples),
         "num_pairs": len(pairs),
         "num_unmatched_images": len(unmatched_images),
@@ -332,6 +365,8 @@ def _build_pairing_summary(
         "pairing_success_rate": (len(pairs) / len(samples)) if samples else 0.0,
         "counts_by_class": counts_by_class,
         "counts_by_archetype": counts_by_archetype,
+        "counts_by_template_family": counts_by_template_family,
+        "counts_by_match_strategy": counts_by_match_strategy,
         "strict": strict,
         "verify_images": verify_images,
     }

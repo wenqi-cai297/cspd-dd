@@ -139,12 +139,16 @@ cspd-stage2 train \
   --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
   --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000 \
   --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
+  --trainable-component-group conditioning_bridge \
+  --trainable-component-group cross_attention \
+  --adapter-type lora \
+  --adapter-rank 16 \
   --batch-size 4 \
   --epochs 1 \
   --dry-run
 ```
 
-This Stage 2 CLI already implements pairing / manifest generation / run-directory setup for transformer-core-only adaptation intent. Full FLUX.1 Kontext fine-tuning is still a placeholder boundary in the current repo.
+This Stage 2 CLI already implements pairing / manifest generation / run-directory setup for a text-conditioning-focused adaptation plan. It now records trainable component groups, conservative module-selection patterns, and adapter/LoRA-style plan metadata for the current experimental FLUX.1 Kontext target. Full FLUX.1 Kontext fine-tuning is still a placeholder boundary in the current repo.
 
 If you use the provided shell helpers, the workflow can be driven end-to-end from prep through final Stage 1 canonical render, then into Stage 2 run scaffolding. The full workflow script uses only a small mock smoke subset by default (first 3 classes, first 10 images per class), and also supports `--skip-smoke`.
 

@@ -5,7 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 
-from cspd_stage2.training import Stage2TrainConfig, run_stage2_training
+from cspd_stage2.training import (
+    AdapterPlan,
+    Stage2TrainConfig,
+    run_stage2_training,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     train_parser = subparsers.add_parser(
         "train",
-        help="Build a Stage 2 paired manifest and optionally run a conservative transformer-core training scaffold",
+        help="Build a Stage 2 paired manifest and optionally run a conservative text-conditioning adaptation scaffold",
     )
     train_parser.add_argument("--dataset-root", required=True, help="ImageFolder-style dataset root used as visual input")
     train_parser.add_argument(
@@ -72,6 +76,55 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Override the default transformer-core-only plan in config metadata",
     )
+    train_parser.add_argument(
+        "--stage2-focus",
+        default="text_conditioning_adaptation",
+        help="High-level Stage 2 focus label; default keeps the implementation honest about text-conditioning adaptation",
+    )
+    train_parser.add_argument(
+        "--conditioning-objective",
+        default="align_stage1_canonical_captions_with_backbone_text_conditioning_path",
+        help="Short objective label describing what part of conditioning adaptation this run targets",
+    )
+    train_parser.add_argument(
+        "--conditioning-text-field",
+        default="canonical_caption",
+        help="Manifest field treated as the canonical text-conditioning source",
+    )
+    train_parser.add_argument(
+        "--trainable-component-group",
+        action="append",
+        dest="trainable_component_groups",
+        default=None,
+        help="Trainable component-group label to record in the plan; may be repeated",
+    )
+    train_parser.add_argument(
+        "--module-include-pattern",
+        action="append",
+        dest="module_include_patterns",
+        default=None,
+        help="Module-name include pattern placeholder for future backbone-specific selection; may be repeated",
+    )
+    train_parser.add_argument(
+        "--module-exclude-pattern",
+        action="append",
+        dest="module_exclude_patterns",
+        default=None,
+        help="Module-name exclude pattern placeholder for future backbone-specific selection; may be repeated",
+    )
+    train_parser.add_argument(
+        "--adapter-type",
+        default="lora",
+        help="Adapter strategy label recorded in the Stage 2 plan metadata",
+    )
+    train_parser.add_argument("--adapter-rank", type=int, default=16, help="Adapter rank placeholder")
+    train_parser.add_argument("--adapter-alpha", type=float, default=16.0, help="Adapter alpha placeholder")
+    train_parser.add_argument("--adapter-dropout", type=float, default=0.0, help="Adapter dropout placeholder")
+    train_parser.add_argument(
+        "--adapter-bias",
+        default="none",
+        help="Adapter bias mode placeholder",
+    )
     return parser
 
 
@@ -103,6 +156,49 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         freeze_text_encoder=not args.unfreeze_text_encoder,
         freeze_vae=not args.unfreeze_vae,
         train_transformer_core_only=not args.disable_train_transformer_core_only,
+        stage2_focus=args.stage2_focus,
+        conditioning_objective=args.conditioning_objective,
+        conditioning_text_field=args.conditioning_text_field,
+        trainable_component_groups=args.trainable_component_groups or [
+            "conditioning_bridge",
+            "cross_attention",
+            "transformer_text_conditioning",
+        ],
+        module_include_patterns=args.module_include_patterns or [
+            "transformer.*attn",
+            "transformer.*cross_attn",
+            "transformer.*context",
+            "transformer.*txt",
+            "context_embedder",
+            "conditioning_bridge",
+        ],
+        module_exclude_patterns=args.module_exclude_patterns or [
+            "vae",
+            "autoencoder",
+            "decoder",
+            "image_encoder",
+        ],
+        adapter_plan=AdapterPlan(
+            adapter_type=args.adapter_type,
+            rank=args.adapter_rank,
+            alpha=args.adapter_alpha,
+            dropout=args.adapter_dropout,
+            bias=args.adapter_bias,
+            target_module_patterns=args.module_include_patterns or [
+                "transformer.*attn",
+                "transformer.*cross_attn",
+                "transformer.*context",
+                "transformer.*txt",
+                "context_embedder",
+                "conditioning_bridge",
+            ],
+            exclude_module_patterns=args.module_exclude_patterns or [
+                "vae",
+                "autoencoder",
+                "decoder",
+                "image_encoder",
+            ],
+        ),
     )
 
 
