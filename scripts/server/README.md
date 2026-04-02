@@ -201,6 +201,52 @@ Migration note:
 - Use `bash scripts/server/run_stage1_render.sh ...` or `cspd-stage1 render ...`.
 - The old Stage 2 render compatibility entrypoints were removed because future Stage 2 will be different code.
 
+### Run Stage 2 v1 training scaffold
+
+Stage 2 now means diffusion adaptation / canonical-semantic-space familiarization.
+It consumes:
+- an ImageFolder dataset root as the visual source
+- a Stage 1 render `records.jsonl` file as the canonical text-conditioning source
+
+Recommended helper:
+
+```bash
+bash scripts/server/run_stage2_train.sh /path/to/dataset_root /path/to/stage1_render_records.jsonl
+```
+
+Example:
+
+```bash
+bash scripts/server/run_stage2_train.sh \
+  /data/imagenette/train \
+  runs/stage1/render/imagenette/qwen_local/2026-04-02_010203/records.jsonl
+```
+
+This helper currently:
+- builds a Stage 2 run directory under `runs/stage2/train/...`
+- pairs images with Stage 1 canonical captions conservatively by stable identifiers
+- writes `train_manifest.jsonl` plus unmatched-record reports
+- writes a Stage 2 config snapshot and trainer plan
+- keeps the training intent denoiser-only by default (`freeze_text_encoder=true`, `freeze_vae=true`)
+
+Direct CLI example:
+
+```bash
+cspd-stage2 train \
+  --dataset-root /path/to/dataset_root \
+  --render-input /path/to/stage1_render_records.jsonl \
+  --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000 \
+  --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
+  --batch-size 4 \
+  --epochs 1 \
+  --dry-run
+```
+
+Important scope note:
+- the pairing/manifest/run scaffold is implemented now
+- full FLUX.1 Kontext denoiser fine-tuning is **not** fully wired in this repo yet
+- use `--allow-placeholder-loop` only if you want a tiny PyTorch plumbing check rather than real model training
+
 ## Dataset assumption
 
 All Stage 1 run scripts assume an ImageFolder-style dataset layout:

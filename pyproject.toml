@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cspd-stage1"
 version = "0.1.0"
-description = "Prep + Stage 1 scaffold for CSPD (metadata prep, attribute extraction, normalization, canonical render)"
+description = "Prep + Stage 1 + Stage 2 scaffold for CSPD (metadata prep, Stage 1 canonicalization/render, Stage 2 adaptation scaffold)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 cspd-stage1 = "cspd_stage1.cli:main"
+cspd-stage2 = "cspd_stage2.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

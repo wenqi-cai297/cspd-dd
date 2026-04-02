@@ -1,9 +1,19 @@
-"""Reserved Stage 2 package scaffold.
+"""CSPD Stage 2 package.
 
-Stage 2 render compatibility entrypoints were intentionally removed.
-Future Stage 2 code should land here without inheriting old render semantics.
+Stage 2 now means diffusion adaptation / canonical-semantic-space
+familiarization. This package intentionally does not revive the old Stage 2
+render semantics.
 """
 
-__all__ = ["__version__"]
+from cspd_stage2.data import Stage2PairedDataset, Stage2PairRecord
+from cspd_stage2.training import Stage2TrainConfig, run_stage2_training
+
+__all__ = [
+    "__version__",
+    "Stage2PairRecord",
+    "Stage2PairedDataset",
+    "Stage2TrainConfig",
+    "run_stage2_training",
+]
 
 __version__ = "0.1.0"

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run CSPD Stage 2 v1 training scaffold.
+# Usage:
+#   bash scripts/server/run_stage2_train.sh <dataset_root> <stage1_render_records_jsonl> [backbone_name] [batch_size] [epochs]
+# Example:
+#   bash scripts/server/run_stage2_train.sh /data/imagenette/train runs/stage1/render/imagenette/qwen_local/2026-04-02_010203/records.jsonl
+#
+# Output directory:
+#   runs/stage2/train/<dataset_name>/<backbone_slug>/<timestamp>
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: bash scripts/server/run_stage2_train.sh <dataset_root> <stage1_render_records_jsonl> [backbone_name] [batch_size] [epochs] [extra args...]"
+  exit 1
+fi
+
+DATASET_ROOT="$1"
+RENDER_INPUT="$2"
+BACKBONE_NAME="${3:-black-forest-labs/FLUX.1-Kontext-dev}"
+BATCH_SIZE="${4:-4}"
+EPOCHS="${5:-1}"
+shift $(( $# >= 5 ? 5 : $# )) || true
+EXTRA_ARGS=("$@")
+ENV_NAME="cspd-dd"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+if [[ ! -d "$DATASET_ROOT" ]]; then
+  echo "[ERROR] Dataset root not found: $DATASET_ROOT"
+  exit 1
+fi
+
+if [[ ! -f "$RENDER_INPUT" ]]; then
+  echo "[ERROR] Stage 1 render input not found: $RENDER_INPUT"
+  exit 1
+fi
+
+DATASET_NAME="$(basename "$DATASET_ROOT")"
+BACKBONE_SLUG="$(echo "$BACKBONE_NAME" | tr '/ ' '__' | tr -cd '[:alnum:]_.-')"
+TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
+OUTPUT_DIR="runs/stage2/train/${DATASET_NAME}/${BACKBONE_SLUG}/${TIMESTAMP}"
+
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "$ENV_NAME"
+
+cd "$REPO_ROOT"
+mkdir -p "$OUTPUT_DIR"
+
+CMD=(
+  cspd-stage2 train
+  --dataset-root "$DATASET_ROOT"
+  --render-input "$RENDER_INPUT"
+  --output-dir "$OUTPUT_DIR"
+  --backbone-name "$BACKBONE_NAME"
+  --batch-size "$BATCH_SIZE"
+  --epochs "$EPOCHS"
+)
+
+if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+  CMD+=("${EXTRA_ARGS[@]}")
+fi
+
+echo "[INFO] dataset_root:        $DATASET_ROOT"
+echo "[INFO] render_input:        $RENDER_INPUT"
+echo "[INFO] backbone_name:       $BACKBONE_NAME"
+echo "[INFO] batch_size:          $BATCH_SIZE"
+echo "[INFO] epochs:              $EPOCHS"
+echo "[INFO] stage2_output_dir:   $OUTPUT_DIR"
+
+"${CMD[@]}"
+
+echo "[INFO] Stage 2 scaffold run complete."
+echo "[INFO] manifest:            $OUTPUT_DIR/train_manifest.jsonl"
+echo "[INFO] manifest_summary:    $OUTPUT_DIR/train_manifest_summary.json"
+echo "[INFO] run_summary:         $OUTPUT_DIR/stage2_run_summary.json"
+echo "[INFO] trainer_plan:        $OUTPUT_DIR/trainer_plan.json"

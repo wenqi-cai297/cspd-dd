@@ -34,7 +34,9 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 
 - `cspd-stage1 run --dataset-root ... --output-dir ...`
 - `cspd-stage1 render --input ... --output-dir ...`
+- `cspd-stage2 train --dataset-root ... --render-input ... --output-dir ...`
 - Canonical Stage 1 render implementation now lives under `src/cspd_stage1/`
+- Stage 2 now means diffusion adaptation / canonical-semantic-space familiarization; it no longer refers to render
 
 ### Main server helper scripts
 
@@ -42,6 +44,7 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 - `bash scripts/server/run_stage1_qwen_local.sh ...`
 - `bash scripts/server/run_stage1_normalization.sh ...`
 - `bash scripts/server/run_stage1_render.sh ...`
+- `bash scripts/server/run_stage2_train.sh ...`
 - `bash scripts/server/run_stage1_full_workflow.sh ...`
 
 ### Default server-side output roots
@@ -49,6 +52,7 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 - Prep metadata: `runs/prep/...`
 - Stage 1 attributes: `runs/stage1/attributes/<dataset_name>/<backend>/<timestamp>`
 - Stage 1 render: `runs/stage1/render/<dataset_name>/<backend>/<timestamp>`
+- Stage 2 train scaffold: `runs/stage2/train/<dataset_name>/<backbone>/<timestamp>`
 
 ## Expected dataset layout
 
@@ -127,7 +131,22 @@ cspd-stage1 render \
   --output-dir runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500
 ```
 
-If you use the provided shell helpers, the workflow can be driven end-to-end from prep through final Stage 1 canonical render. The full workflow script uses only a small mock smoke subset by default (first 3 classes, first 10 images per class), and also supports `--skip-smoke`.
+Then build the Stage 2 v1 training scaffold from real images + Stage 1 canonical captions:
+
+```bash
+cspd-stage2 train \
+  --dataset-root /path/to/imagefolder_dataset \
+  --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
+  --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000 \
+  --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
+  --batch-size 4 \
+  --epochs 1 \
+  --dry-run
+```
+
+This Stage 2 CLI already implements pairing / manifest generation / run-directory setup for denoiser-only adaptation intent. Full FLUX.1 Kontext fine-tuning is still a placeholder boundary in the current repo.
+
+If you use the provided shell helpers, the workflow can be driven end-to-end from prep through final Stage 1 canonical render, then into Stage 2 run scaffolding. The full workflow script uses only a small mock smoke subset by default (first 3 classes, first 10 images per class), and also supports `--skip-smoke`.
 
 For routine ImageNet-1k / Imagenette reruns, you usually do not need to rerun Prep if you are happy using the repo-bundled `classes.json` plus `configs/stage1/class_to_archetype_imagenet1k_manual.json`.
 
