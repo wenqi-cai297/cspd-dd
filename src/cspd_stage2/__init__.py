@@ -1,6 +1,6 @@
 """CSPD Stage 2 package.
 
-Stage 2 now means diffusion adaptation / canonical-semantic-space
+Stage 2 now means generative-backbone adaptation / canonical-semantic-space
 familiarization. This package intentionally does not revive the old Stage 2
 render semantics.
 """

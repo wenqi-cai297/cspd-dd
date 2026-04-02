@@ -10,13 +10,13 @@ from cspd_stage2.training import Stage2TrainConfig, run_stage2_training
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="CSPD Stage 2 CLI for diffusion adaptation / canonical-semantic-space familiarization"
+        description="CSPD Stage 2 CLI for generative-backbone adaptation / canonical-semantic-space familiarization"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     train_parser = subparsers.add_parser(
         "train",
-        help="Build a Stage 2 paired manifest and optionally run a conservative denoiser-only training scaffold",
+        help="Build a Stage 2 paired manifest and optionally run a conservative transformer-core training scaffold",
     )
     train_parser.add_argument("--dataset-root", required=True, help="ImageFolder-style dataset root used as visual input")
     train_parser.add_argument(
@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "--backbone-name",
         default="black-forest-labs/FLUX.1-Kontext-dev",
-        help="Backbone identifier for the intended Stage 2 diffusion adaptation target",
+        help="Backbone identifier for the intended Stage 2 generative-backbone adaptation target",
     )
     train_parser.add_argument("--batch-size", type=int, default=4, help="Logical training batch size")
     train_parser.add_argument("--learning-rate", type=float, default=1e-4, help="Optimizer learning rate")
@@ -60,17 +60,17 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "--unfreeze-text-encoder",
         action="store_true",
-        help="Override the default denoiser-only plan and mark text encoder as trainable",
+        help="Override the default transformer-core-only plan and mark text encoder as trainable",
     )
     train_parser.add_argument(
         "--unfreeze-vae",
         action="store_true",
-        help="Override the default denoiser-only plan and mark VAE as trainable",
+        help="Override the default transformer-core-only plan and mark VAE as trainable",
     )
     train_parser.add_argument(
-        "--disable-train-denoiser-only",
+        "--disable-train-transformer-core-only",
         action="store_true",
-        help="Override the default denoiser-only plan in config metadata",
+        help="Override the default transformer-core-only plan in config metadata",
     )
     return parser
 
@@ -102,7 +102,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         allow_placeholder_loop=args.allow_placeholder_loop,
         freeze_text_encoder=not args.unfreeze_text_encoder,
         freeze_vae=not args.unfreeze_vae,
-        train_denoiser_only=not args.disable_train_denoiser_only,
+        train_transformer_core_only=not args.disable_train_transformer_core_only,
     )
 
 

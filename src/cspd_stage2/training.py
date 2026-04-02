@@ -4,7 +4,7 @@ from __future__ import annotations
 
 This module is deliberately honest about scope:
 - it prepares run directories and paired manifests,
-- records denoiser-only adaptation intent,
+- records transformer-core-only adaptation intent,
 - exposes a minimal trainer contract,
 - optionally runs a tiny PyTorch-backed placeholder loop,
 - does not claim full FLUX.1 Kontext [dev] fine-tuning is implemented here.
@@ -48,7 +48,7 @@ class Stage2TrainConfig:
     allow_placeholder_loop: bool = False
     freeze_text_encoder: bool = True
     freeze_vae: bool = True
-    train_denoiser_only: bool = True
+    train_transformer_core_only: bool = True
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
@@ -83,30 +83,30 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         "implemented_training": False,
         "placeholder_training": False,
         "message": (
-            "Stage 2 paired manifest is ready. Full FLUX.1 Kontext denoiser fine-tuning is not wired in this repo yet."
+            "Stage 2 paired manifest is ready. Full FLUX.1 Kontext transformer-core fine-tuning is not wired in this repo yet."
         ),
     }
 
     if not config.generate_manifest_only and not config.dry_run:
         if config.allow_placeholder_loop:
-            training_result = run_placeholder_denoiser_loop(config, manifest_paths.manifest_path)
+            training_result = run_placeholder_transformer_core_loop(config, manifest_paths.manifest_path)
         else:
             training_result = {
                 "status": "not_run",
                 "implemented_training": False,
                 "placeholder_training": False,
                 "message": (
-                    "Manifest/data prep completed. Actual denoiser-side training remains a scaffold until "
+                    "Manifest/data prep completed. Actual generative-backbone training remains a scaffold until "
                     "a concrete FLUX Kontext training dependency stack is selected and integrated."
                 ),
             }
 
     summary = {
         "stage": "stage2_v1",
-        "definition": "diffusion adaptation / canonical-semantic-space familiarization",
+        "definition": "generative-backbone adaptation / canonical-semantic-space familiarization",
         "backbone_name": config.backbone_name,
         "run_dir": str(run_dir.resolve()),
-        "train_denoiser_only": config.train_denoiser_only,
+        "train_transformer_core_only": config.train_transformer_core_only,
         "freeze_text_encoder": config.freeze_text_encoder,
         "freeze_vae": config.freeze_vae,
         "manifest": manifest_paths.manifest_path,
@@ -127,7 +127,7 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
     return summary
 
 
-def run_placeholder_denoiser_loop(config: Stage2TrainConfig, manifest_path: str) -> dict[str, Any]:
+def run_placeholder_transformer_core_loop(config: Stage2TrainConfig, manifest_path: str) -> dict[str, Any]:
     """Optional tiny placeholder loop.
 
     This keeps the training surface honest: if torch is present, we can verify
@@ -177,7 +177,7 @@ def run_placeholder_denoiser_loop(config: Stage2TrainConfig, manifest_path: str)
 def _build_trainer_plan(config: Stage2TrainConfig, manifest_path: str, num_pairs: int) -> dict[str, Any]:
     return {
         "stage": "stage2_v1",
-        "objective": "denoiser-side diffusion adaptation using real-image + Stage-1-canonical-caption pairs",
+        "objective": "transformer-core adaptation of the selected generative backbone using real-image + Stage-1-canonical-caption pairs",
         "backbone_name": config.backbone_name,
         "manifest_path": str(Path(manifest_path).resolve()),
         "num_pairs": num_pairs,
@@ -189,7 +189,7 @@ def _build_trainer_plan(config: Stage2TrainConfig, manifest_path: str, num_pairs
         "resolution": config.resolution,
         "weight_dtype": config.weight_dtype,
         "freeze_plan": {
-            "train_denoiser_only": config.train_denoiser_only,
+            "train_transformer_core_only": config.train_transformer_core_only,
             "freeze_text_encoder": config.freeze_text_encoder,
             "freeze_vae": config.freeze_vae,
         },
@@ -203,6 +203,6 @@ def _build_trainer_plan(config: Stage2TrainConfig, manifest_path: str, num_pairs
         "notes": [
             "This scaffold is intentionally conservative.",
             "Stage 2 no longer means render; render belongs to Stage 1.",
-            "Current code treats Stage 2 as denoiser-side adaptation only.",
+            "Current code treats Stage 2 as transformer-core / generative-backbone adaptation only.",
         ],
     }

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Data loading and pairing utilities for CSPD Stage 2.
 
-Stage 2 now means diffusion adaptation / canonical-semantic-space familiarization.
+Stage 2 now means generative-backbone adaptation / canonical-semantic-space familiarization.
 This module implements the parts we can make real without claiming a complete
 FLUX Kontext fine-tuning stack:
 - scan an ImageFolder-style visual dataset,

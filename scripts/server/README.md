@@ -203,7 +203,7 @@ Migration note:
 
 ### Run Stage 2 v1 training scaffold
 
-Stage 2 now means diffusion adaptation / canonical-semantic-space familiarization.
+Stage 2 now means generative-backbone adaptation / canonical-semantic-space familiarization.
 It consumes:
 - an ImageFolder dataset root as the visual source
 - a Stage 1 render `records.jsonl` file as the canonical text-conditioning source
@@ -227,7 +227,7 @@ This helper currently:
 - pairs images with Stage 1 canonical captions conservatively by stable identifiers
 - writes `train_manifest.jsonl` plus unmatched-record reports
 - writes a Stage 2 config snapshot and trainer plan
-- keeps the training intent denoiser-only by default (`freeze_text_encoder=true`, `freeze_vae=true`)
+- keeps the training intent transformer-core-only by default (`freeze_text_encoder=true`, `freeze_vae=true`)
 
 Direct CLI example:
 
@@ -244,7 +244,7 @@ cspd-stage2 train \
 
 Important scope note:
 - the pairing/manifest/run scaffold is implemented now
-- full FLUX.1 Kontext denoiser fine-tuning is **not** fully wired in this repo yet
+- full FLUX.1 Kontext transformer-core fine-tuning is **not** fully wired in this repo yet
 - use `--allow-placeholder-loop` only if you want a tiny PyTorch plumbing check rather than real model training
 
 ## Dataset assumption

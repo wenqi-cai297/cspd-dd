@@ -36,7 +36,7 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 - `cspd-stage1 render --input ... --output-dir ...`
 - `cspd-stage2 train --dataset-root ... --render-input ... --output-dir ...`
 - Canonical Stage 1 render implementation now lives under `src/cspd_stage1/`
-- Stage 2 now means diffusion adaptation / canonical-semantic-space familiarization; it no longer refers to render
+- Stage 2 now means generative-backbone adaptation / canonical-semantic-space familiarization; it no longer refers to render
 
 ### Main server helper scripts
 
@@ -144,7 +144,7 @@ cspd-stage2 train \
   --dry-run
 ```
 
-This Stage 2 CLI already implements pairing / manifest generation / run-directory setup for denoiser-only adaptation intent. Full FLUX.1 Kontext fine-tuning is still a placeholder boundary in the current repo.
+This Stage 2 CLI already implements pairing / manifest generation / run-directory setup for transformer-core-only adaptation intent. Full FLUX.1 Kontext fine-tuning is still a placeholder boundary in the current repo.
 
 If you use the provided shell helpers, the workflow can be driven end-to-end from prep through final Stage 1 canonical render, then into Stage 2 run scaffolding. The full workflow script uses only a small mock smoke subset by default (first 3 classes, first 10 images per class), and also supports `--skip-smoke`.
 
@@ -280,3 +280,4 @@ See `scripts/server/README.md` for the recommended order and detailed examples.
 - `qwen_local` is intended for server-side GPU execution.
 - The pipeline enforces a unified schema and writes `unknown` / `not_applicable` / `null` when appropriate.
 - Real large-scale runs should still start with a small dataset slice first to inspect speed, failure rate, and output quality.
+tput quality.
