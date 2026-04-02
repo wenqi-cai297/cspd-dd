@@ -161,14 +161,6 @@ def stringify_slot_value(value: Any) -> str | None:
     return text
 
 
-def class_name_to_anchor(class_name: Any) -> str | None:
-    text = normalize_text(class_name)
-    if not text:
-        return None
-    primary = text.split(",", 1)[0].strip()
-    return primary.casefold() if primary else None
-
-
 def clean_pre_anchor_value(slot: str, value: str) -> str | None:
     text = normalize_text(value)
     if not text:

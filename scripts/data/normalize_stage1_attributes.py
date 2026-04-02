@@ -59,14 +59,6 @@ class Normalizer:
         self.shape_map = self._clean_mapping(rules.get("shape_map", {}))
         self.part_map = self._clean_mapping(rules.get("part_map", {}))
         self.background_map = self._clean_mapping(rules.get("background_map", {}))
-        self.class_slot_maps = {
-            class_name: {slot: self._clean_mapping(slot_map) for slot, slot_map in slot_maps.items()}
-            for class_name, slot_maps in rules.get("class_slot_maps", {}).items()
-        }
-        self.review_value_sets = {
-            class_name: {slot: {self._clean_key(v) for v in values} for slot, values in slot_maps.items()}
-            for class_name, slot_maps in rules.get("review_value_sets", {}).items()
-        }
         self.archetype_review_value_sets = {
             archetype: {slot: {self._clean_key(v) for v in values} for slot, values in slot_maps.items()}
             for archetype, slot_maps in rules.get("archetype_review_value_sets", {}).items()
@@ -134,9 +126,6 @@ class Normalizer:
         if status == "mapped_to_unknown":
             return self._result(original, cleaned, normalized, status, applied_rules, review_reasons)
 
-        slot_map = self.class_slot_maps.get(class_name_raw, {}).get(slot, {})
-        key = self._clean_key(normalized)
-
         if slot in self.viewpoint_slots:
             normalized, status, applied_rules = self.apply_simple_map(
                 normalized, status, applied_rules, self.viewpoint_map, "slot.viewpoint"
@@ -168,14 +157,6 @@ class Normalizer:
             normalized, status, applied_rules = self.normalize_color(normalized, status, applied_rules)
         elif slot in self.type_slots:
             normalized, status, applied_rules = self.normalize_type_like(normalized, status, applied_rules)
-
-        key = self._clean_key(normalized)
-        if key in slot_map:
-            mapped = slot_map[key]
-            if mapped != normalized:
-                normalized = mapped
-                status = "class_inferred"
-                applied_rules.append(f"class.{class_name_raw}.{slot}")
 
         review_reasons.extend(self.detect_review_reasons(class_name_raw, archetype, slot, normalized))
         if review_reasons:
@@ -381,9 +362,6 @@ class Normalizer:
     def detect_review_reasons(self, class_name_raw: str, archetype: str, slot: str, value: str) -> list[str]:
         reasons: list[str] = []
         key = self._clean_key(value)
-        class_review_values = self.review_value_sets.get(class_name_raw, {}).get(slot, set())
-        if key in class_review_values:
-            reasons.append("review.wrong_object_candidate")
 
         archetype_review_values = self.archetype_review_value_sets.get(archetype, {}).get(slot, set())
         if key in archetype_review_values:

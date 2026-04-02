@@ -6,7 +6,6 @@ from typing import Any
 
 from cspd_stage1.io_utils import append_jsonl, read_jsonl, write_json, write_jsonl
 from cspd_stage1.render_utils import (
-    class_name_to_anchor,
     clean_pre_anchor_value,
     cleanup_caption,
     format_post_slot,
@@ -138,11 +137,7 @@ def _render_with_template(
 
     anchor_value = _select_value(normalized_attributes.get(template.anchor_slot))
     if anchor_value is None:
-        class_anchor = class_name_to_anchor(base.get("class_name"))
-        if class_anchor:
-            anchor_value = class_anchor
-            warnings.append("class_name_anchor_used")
-        elif config.fallback_anchor_token:
+        if config.fallback_anchor_token:
             anchor_value = config.fallback_anchor_token
             warnings.append("fallback_anchor_used")
         elif config.fail_on_missing_anchor:
