@@ -4,7 +4,7 @@ from __future__ import annotations
 
 This module stays honest about scope:
 - resolves backbone-family assumptions from a name,
-- provides a lightweight loader hook contract,
+- provides a real loader path when the local dependency/runtime stack supports it,
 - applies include/exclude targeting rules to a real torch module tree when available,
 - offers a small inspection surface for candidate module names,
 - supports optional adapter injection on explicitly provided torch modules,
@@ -26,6 +26,8 @@ class BackboneLoadResult:
     module: Any = None
     loader_name: str | None = None
     notes: list[str] | None = None
+    resolved_module_name: str | None = None
+    resolved_module_type: str | None = None
 
 
 @dataclass(slots=True)
@@ -168,7 +170,6 @@ class LoRALinearAdapter:  # instantiated only when torch exists
             yield name, parameter
 
 
-# Make the adapter a real torch.nn.Module when torch is available at import time.
 if importlib.util.find_spec("torch") is not None:
     import torch
 
@@ -203,6 +204,8 @@ def infer_backbone_family(backbone_name: str) -> str:
     lowered = backbone_name.lower()
     if "flux" in lowered and "kontext" in lowered:
         return "flux_kontext"
+    if "flux" in lowered:
+        return "flux"
     return "generic_diffusion_backbone"
 
 
@@ -211,17 +214,16 @@ def load_generative_backbone(
     *,
     loader: str | None = None,
     allow_unimplemented: bool = True,
+    torch_dtype: str = "bfloat16",
+    device: str | None = None,
+    device_map: str | None = None,
+    local_files_only: bool = False,
+    component: str | None = None,
 ) -> BackboneLoadResult:
-    """Resolve a conservative loader hook.
-
-    This function intentionally avoids implicit network downloads or claiming that
-    a specific FLUX Kontext runtime is already wired. It exposes an honest load
-    contract so later code can plug in a real loader without changing the Stage 2
-    planning surface.
-    """
+    """Resolve a conservative loader hook, but use a real diffusers path when possible."""
 
     family = infer_backbone_family(backbone_name)
-    loader_name = loader or ("diffusers_flux_kontext" if family == "flux_kontext" else "generic_python_loader")
+    loader_name = loader or _default_loader_name(family)
 
     if loader_name == "generic_python_loader":
         return BackboneLoadResult(
@@ -235,32 +237,40 @@ def load_generative_backbone(
             ],
         )
 
-    if loader_name == "diffusers_flux_kontext":
-        has_torch = importlib.util.find_spec("torch") is not None
-        has_diffusers = importlib.util.find_spec("diffusers") is not None
-        if not has_torch or not has_diffusers:
-            status = "dependency_missing"
-            notes = [
-                "FLUX Kontext loader hook selected, but required dependencies are missing.",
-                f"torch_installed={has_torch}",
-                f"diffusers_installed={has_diffusers}",
-                "No fake model was created.",
-            ]
-        else:
-            status = "not_implemented"
-            notes = [
-                "Dependency probes passed, but a concrete FLUX Kontext backbone loader is still not implemented in this repo.",
-                "This guard is intentional: Stage 2 should not pretend full backbone loading exists when it does not.",
-            ]
-        if not allow_unimplemented and status != "loaded":
-            raise NotImplementedError("Concrete generative-backbone loading is not implemented for this backbone yet.")
-        return BackboneLoadResult(
-            backbone_name=backbone_name,
-            family=family,
-            implementation_status=status,
-            loader_name=loader_name,
-            notes=notes,
-        )
+    if loader_name in {"diffusers_flux_kontext", "diffusers_flux"}:
+        try:
+            return _load_diffusers_backbone(
+                backbone_name,
+                family=family,
+                loader_name=loader_name,
+                torch_dtype=torch_dtype,
+                device=device,
+                device_map=device_map,
+                local_files_only=local_files_only,
+                component=component,
+            )
+        except Exception as exc:  # noqa: BLE001
+            status = _classify_loader_exception(exc)
+            notes = [f"Real diffusers load attempt failed: {type(exc).__name__}: {exc}"]
+            if status == "dependency_missing":
+                notes.append("Install/repair the missing runtime dependencies first.")
+            elif status == "unsupported_runtime":
+                notes.append("The installed diffusers build likely lacks the required FLUX pipeline class.")
+            elif status == "load_failed_local_files_only":
+                notes.append("The requested model was not found in the local Hugging Face cache while local_files_only=True.")
+            elif status == "auth_required":
+                notes.append("A Hugging Face login/token or accepted model license may still be required on this machine.")
+            elif status == "download_or_resolution_failed":
+                notes.append("The runtime reached a real loader path, but model resolution/download did not succeed.")
+            if not allow_unimplemented:
+                raise
+            return BackboneLoadResult(
+                backbone_name=backbone_name,
+                family=family,
+                implementation_status=status,
+                loader_name=loader_name,
+                notes=notes,
+            )
 
     if not allow_unimplemented:
         raise ValueError(f"Unknown backbone loader: {loader_name}")
@@ -385,13 +395,7 @@ def inject_lora_adapters(
     alpha: float = 16.0,
     dropout: float = 0.0,
 ) -> AdapterInjectionResult:
-    """Inject lightweight LoRA adapters into matching real torch submodules.
-
-    Current support is intentionally narrow and honest:
-    - requires an explicitly provided torch module tree
-    - only replaces torch.nn.Linear leaves
-    - returns an artifact-friendly summary of what was actually injected
-    """
+    """Inject lightweight LoRA adapters into matching real torch submodules."""
 
     _ensure_torch_module(module)
     exclude_patterns = list(exclude_patterns or [])
@@ -457,6 +461,141 @@ def inject_lora_adapters(
         skipped_modules=skipped_modules,
         total_adapter_parameter_count=int(total_adapter_parameter_count),
     )
+
+
+def load_real_backbone_module(
+    backbone_name: str,
+    *,
+    torch_dtype: str = "bfloat16",
+    device: str | None = None,
+    device_map: str | None = None,
+    local_files_only: bool = False,
+    component: str | None = None,
+    allow_unimplemented: bool = False,
+) -> BackboneLoadResult:
+    return load_generative_backbone(
+        backbone_name,
+        allow_unimplemented=allow_unimplemented,
+        torch_dtype=torch_dtype,
+        device=device,
+        device_map=device_map,
+        local_files_only=local_files_only,
+        component=component,
+    )
+
+
+def _default_loader_name(family: str) -> str:
+    if family == "flux_kontext":
+        return "diffusers_flux_kontext"
+    if family == "flux":
+        return "diffusers_flux"
+    return "generic_python_loader"
+
+
+def _load_diffusers_backbone(
+    backbone_name: str,
+    *,
+    family: str,
+    loader_name: str,
+    torch_dtype: str,
+    device: str | None,
+    device_map: str | None,
+    local_files_only: bool,
+    component: str | None,
+) -> BackboneLoadResult:
+    if importlib.util.find_spec("torch") is None:
+        raise ModuleNotFoundError("torch is not installed")
+    if importlib.util.find_spec("diffusers") is None:
+        raise ModuleNotFoundError("diffusers is not installed")
+
+    import torch
+    import diffusers
+
+    pipeline_class_name = "FluxKontextPipeline" if family == "flux_kontext" else "FluxPipeline"
+    if not hasattr(diffusers, pipeline_class_name):
+        raise RuntimeError(f"Installed diffusers does not expose {pipeline_class_name}")
+
+    pipeline_class = getattr(diffusers, pipeline_class_name)
+    load_kwargs: dict[str, Any] = {
+        "torch_dtype": _resolve_torch_dtype(torch_dtype),
+        "local_files_only": local_files_only,
+    }
+    if device_map:
+        load_kwargs["device_map"] = device_map
+
+    pipeline = pipeline_class.from_pretrained(backbone_name, **load_kwargs)
+    if device and not device_map and hasattr(pipeline, "to"):
+        pipeline = pipeline.to(device)
+
+    resolved_module_name, resolved_module = _resolve_loaded_module(pipeline, requested_component=component)
+    notes = [
+        f"Loaded via diffusers.{pipeline_class_name}.from_pretrained(...)",
+        f"Resolved inspection module: {resolved_module_name} ({type(resolved_module).__name__})",
+    ]
+    if local_files_only:
+        notes.append("local_files_only=True was used for this load attempt.")
+    return BackboneLoadResult(
+        backbone_name=backbone_name,
+        family=family,
+        implementation_status="loaded",
+        module=resolved_module,
+        loader_name=loader_name,
+        notes=notes,
+        resolved_module_name=resolved_module_name,
+        resolved_module_type=type(resolved_module).__name__,
+    )
+
+
+def _resolve_torch_dtype(torch_dtype: str) -> Any:
+    import torch
+
+    normalized = str(torch_dtype).lower().strip()
+    mapping = {
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "half": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+    }
+    if normalized not in mapping:
+        raise ValueError(f"Unsupported torch dtype label: {torch_dtype}")
+    return mapping[normalized]
+
+
+def _resolve_loaded_module(pipeline: Any, *, requested_component: str | None) -> tuple[str, Any]:
+    if requested_component:
+        if not hasattr(pipeline, requested_component):
+            raise AttributeError(f"Loaded pipeline does not expose component '{requested_component}'")
+        module = getattr(pipeline, requested_component)
+        _ensure_torch_module(module)
+        return requested_component, module
+
+    for candidate_name in ["transformer", "transformer_2d", "unet", "text_encoder", "text_encoder_2"]:
+        candidate = getattr(pipeline, candidate_name, None)
+        if candidate is not None and hasattr(candidate, "named_modules") and hasattr(candidate, "named_parameters"):
+            return candidate_name, candidate
+
+    if hasattr(pipeline, "named_modules") and hasattr(pipeline, "named_parameters"):
+        return "pipeline", pipeline
+
+    raise TypeError("Loaded diffusers pipeline did not expose an inspectable torch module component")
+
+
+def _classify_loader_exception(exc: Exception) -> str:
+    text = str(exc).lower()
+    if isinstance(exc, ModuleNotFoundError):
+        return "dependency_missing"
+    if "does not expose fluxkontextpipeline" in text or "does not expose fluxpipeline" in text:
+        return "unsupported_runtime"
+    if "local_files_only" in text or "cannot find the requested files in the disk cache" in text:
+        return "load_failed_local_files_only"
+    if "401" in text or "403" in text or "gated" in text or "access" in text or "token" in text or "login" in text:
+        return "auth_required"
+    if "not found" in text or "couldn't connect" in text or "connection" in text or "resolve" in text:
+        return "download_or_resolution_failed"
+    return "load_failed"
 
 
 def _named_modules(module: Any) -> list[tuple[str, Any]]:

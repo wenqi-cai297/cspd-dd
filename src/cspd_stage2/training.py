@@ -25,6 +25,7 @@ from cspd_stage2.backbone import (
     inspect_target_modules,
     load_generative_backbone,
     load_module_from_reference,
+    load_real_backbone_module,
 )
 from cspd_stage2.data import build_stage2_pairs, write_pairing_artifacts
 
@@ -104,6 +105,11 @@ class Stage2TrainConfig:
     inspect_limit: int = 200
     apply_real_module_selection: bool = False
     inject_adapters_on_real_module: bool = False
+    backbone_torch_dtype: str = "bfloat16"
+    backbone_device: str | None = None
+    backbone_device_map: str | None = None
+    backbone_local_files_only: bool = False
+    backbone_component: str | None = None
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
@@ -281,26 +287,60 @@ def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str,
 
 
 def _build_backbone_runtime_summary(config: Stage2TrainConfig) -> dict[str, Any]:
-    load_result = load_generative_backbone(config.backbone_name, allow_unimplemented=True)
+    loader_name = "generic_python_loader" if not config.inspect_module_reference else None
+    load_result = load_generative_backbone(
+        config.backbone_name,
+        loader=loader_name,
+        allow_unimplemented=True,
+        torch_dtype=config.backbone_torch_dtype,
+        device=config.backbone_device,
+        device_map=config.backbone_device_map,
+        local_files_only=config.backbone_local_files_only,
+        component=config.backbone_component,
+    )
     summary: dict[str, Any] = {
         "backbone_name": config.backbone_name,
         "family": infer_backbone_family(config.backbone_name),
         "loader": load_result.loader_name,
         "loader_status": load_result.implementation_status,
         "loader_notes": list(load_result.notes or []),
+        "resolved_module_name": load_result.resolved_module_name,
+        "resolved_module_type": load_result.resolved_module_type,
         "module_reference": config.inspect_module_reference,
         "module_selection_applied": False,
         "adapter_injection_applied": False,
         "module_targeting": None,
         "adapter_injection": None,
+        "requested_component": config.backbone_component,
+        "requested_torch_dtype": config.backbone_torch_dtype,
+        "requested_device": config.backbone_device,
+        "requested_device_map": config.backbone_device_map,
+        "local_files_only": config.backbone_local_files_only,
     }
 
-    if not config.inspect_module_reference:
+    if not config.inspect_module_reference and load_result.implementation_status != "loaded":
         summary["inspection_status"] = "not_requested"
         return summary
 
     try:
-        module = load_module_from_reference(config.inspect_module_reference)
+        if config.inspect_module_reference:
+            module = load_module_from_reference(config.inspect_module_reference)
+        else:
+            real_load = load_real_backbone_module(
+                config.backbone_name,
+                torch_dtype=config.backbone_torch_dtype,
+                device=config.backbone_device,
+                device_map=config.backbone_device_map,
+                local_files_only=config.backbone_local_files_only,
+                component=config.backbone_component,
+                allow_unimplemented=False,
+            )
+            module = real_load.module
+            summary["loader"] = real_load.loader_name
+            summary["loader_status"] = real_load.implementation_status
+            summary["loader_notes"] = list(real_load.notes or [])
+            summary["resolved_module_name"] = real_load.resolved_module_name
+            summary["resolved_module_type"] = real_load.resolved_module_type
         if config.apply_real_module_selection:
             targeting = apply_trainable_parameter_selection(
                 module,
@@ -345,15 +385,75 @@ def _build_backbone_runtime_summary(config: Stage2TrainConfig) -> dict[str, Any]
 def inspect_stage2_backbone_targets(
     *,
     backbone_name: str,
-    module_reference: str,
+    module_reference: str | None,
     include_patterns: list[str],
     exclude_patterns: list[str] | None = None,
     limit: int = 200,
     apply_selection: bool = False,
     inject_adapters: bool = False,
     adapter_plan: AdapterPlan | None = None,
+    load_backbone: bool = False,
+    torch_dtype: str = "bfloat16",
+    device: str | None = None,
+    device_map: str | None = None,
+    local_files_only: bool = False,
+    component: str | None = None,
 ) -> dict[str, Any]:
-    module = load_module_from_reference(module_reference)
+    if load_backbone:
+        try:
+            real_load = load_real_backbone_module(
+                backbone_name,
+                torch_dtype=torch_dtype,
+                device=device,
+                device_map=device_map,
+                local_files_only=local_files_only,
+                component=component,
+                allow_unimplemented=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "backbone_name": backbone_name,
+                "backbone_family": infer_backbone_family(backbone_name),
+                "module_reference": None,
+                "loaded_backbone": True,
+                "load_summary": {
+                    "loader": "real_backbone_loader",
+                    "loader_status": "failed",
+                    "loader_error": str(exc),
+                    "local_files_only": local_files_only,
+                    "torch_dtype": torch_dtype,
+                    "device": device,
+                    "device_map": device_map,
+                    "component": component,
+                },
+                "apply_selection": apply_selection,
+                "targeting": None,
+                "inject_adapters": False,
+                "notes": [
+                    "Real backbone load was attempted but did not complete.",
+                    "This is a real runtime failure report, not a fake success.",
+                ],
+            }
+        module = real_load.module
+        module_reference_value = None
+        load_summary = {
+            "loader": real_load.loader_name,
+            "loader_status": real_load.implementation_status,
+            "loader_notes": list(real_load.notes or []),
+            "resolved_module_name": real_load.resolved_module_name,
+            "resolved_module_type": real_load.resolved_module_type,
+            "local_files_only": local_files_only,
+            "torch_dtype": torch_dtype,
+            "device": device,
+            "device_map": device_map,
+            "component": component,
+        }
+    else:
+        if not module_reference:
+            raise ValueError("module_reference is required unless load_backbone=True")
+        module = load_module_from_reference(module_reference)
+        module_reference_value = module_reference
+        load_summary = None
     if apply_selection:
         targeting = apply_trainable_parameter_selection(
             module,
@@ -371,12 +471,14 @@ def inspect_stage2_backbone_targets(
     summary: dict[str, Any] = {
         "backbone_name": backbone_name,
         "backbone_family": infer_backbone_family(backbone_name),
-        "module_reference": module_reference,
+        "module_reference": module_reference_value,
+        "loaded_backbone": load_backbone,
+        "load_summary": load_summary,
         "apply_selection": apply_selection,
         "targeting": targeting.to_dict(),
         "notes": [
-            "This utility inspects an explicitly provided torch module tree.",
-            "It does not imply that full backbone loading or full Stage 2 training is wired for this backbone family.",
+            "This utility inspects either an explicitly provided torch module tree or a real loaded backbone component.",
+            "It does not imply that full backbone loading or full Stage 2 training is wired for every backbone family.",
         ],
     }
 

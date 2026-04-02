@@ -132,6 +132,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional Python object reference in the form package.module:object_or_factory used for real module inspection",
     )
     train_parser.add_argument(
+        "--backbone-torch-dtype",
+        default="bfloat16",
+        help="Torch dtype label used when attempting a real diffusers backbone load",
+    )
+    train_parser.add_argument(
+        "--backbone-device",
+        default=None,
+        help="Optional device passed to pipeline.to(...) after a real load, e.g. cuda or cpu",
+    )
+    train_parser.add_argument(
+        "--backbone-device-map",
+        default=None,
+        help="Optional device_map forwarded to diffusers from_pretrained when attempting a real load",
+    )
+    train_parser.add_argument(
+        "--backbone-local-files-only",
+        action="store_true",
+        help="Require real backbone loads to use only the local Hugging Face cache",
+    )
+    train_parser.add_argument(
+        "--backbone-component",
+        default=None,
+        help="Optional component name to inspect from a real loaded backbone, e.g. transformer or text_encoder",
+    )
+    train_parser.add_argument(
         "--inspect-limit",
         type=int,
         default=200,
@@ -155,8 +180,38 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--backbone-name", default="black-forest-labs/FLUX.1-Kontext-dev")
     inspect_parser.add_argument(
         "--module-reference",
-        required=True,
+        default=None,
         help="Python object reference in the form package.module:object_or_factory",
+    )
+    inspect_parser.add_argument(
+        "--load-backbone",
+        action="store_true",
+        help="Load the real backbone through the Stage 2 loader instead of requiring --module-reference",
+    )
+    inspect_parser.add_argument(
+        "--torch-dtype",
+        default="bfloat16",
+        help="Torch dtype label used when attempting a real diffusers backbone load",
+    )
+    inspect_parser.add_argument(
+        "--device",
+        default=None,
+        help="Optional device passed to pipeline.to(...) after a real load, e.g. cuda or cpu",
+    )
+    inspect_parser.add_argument(
+        "--device-map",
+        default=None,
+        help="Optional device_map forwarded to diffusers from_pretrained when attempting a real load",
+    )
+    inspect_parser.add_argument(
+        "--local-files-only",
+        action="store_true",
+        help="Require real backbone loads to use only the local Hugging Face cache",
+    )
+    inspect_parser.add_argument(
+        "--component",
+        default=None,
+        help="Optional component name to inspect from a real loaded backbone, e.g. transformer or text_encoder",
     )
     inspect_parser.add_argument(
         "--module-include-pattern",
@@ -265,6 +320,11 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         inspect_limit=args.inspect_limit,
         apply_real_module_selection=args.apply_real_module_selection,
         inject_adapters_on_real_module=args.inject_adapters_on_real_module,
+        backbone_torch_dtype=args.backbone_torch_dtype,
+        backbone_device=args.backbone_device,
+        backbone_device_map=args.backbone_device_map,
+        backbone_local_files_only=args.backbone_local_files_only,
+        backbone_component=args.backbone_component,
     )
 
 
@@ -309,6 +369,12 @@ def main() -> None:
                 target_module_patterns=include_patterns,
                 exclude_module_patterns=exclude_patterns,
             ),
+            load_backbone=args.load_backbone,
+            torch_dtype=args.torch_dtype,
+            device=args.device,
+            device_map=args.device_map,
+            local_files_only=args.local_files_only,
+            component=args.component,
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return

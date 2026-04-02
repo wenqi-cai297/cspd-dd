@@ -254,6 +254,17 @@ Important scope note:
 - full FLUX.1 Kontext transformer-core fine-tuning is **not** fully wired in this repo yet
 - use `--allow-placeholder-loop` only if you want a tiny PyTorch plumbing check rather than real model training
 
+Real backbone-load inspection example:
+
+```bash
+cspd-stage2 inspect-targets \
+  --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
+  --load-backbone \
+  --local-files-only
+```
+
+If the weights are not present in the local Hugging Face cache, the command now returns an explicit real-load failure instead of a fake loaded module.
+
 ## Dataset assumption
 
 All Stage 1 run scripts assume an ImageFolder-style dataset layout:

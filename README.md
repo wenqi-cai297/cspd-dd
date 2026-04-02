@@ -152,6 +152,17 @@ cspd-stage2 train \
 
 This Stage 2 CLI already implements pairing / manifest generation / run-directory setup for a text-conditioning-focused adaptation plan. It now records trainable component groups, conservative module-selection patterns, and adapter/LoRA-style plan metadata for the current experimental FLUX.1 Kontext target. Full FLUX.1 Kontext fine-tuning is still a placeholder boundary in the current repo.
 
+Stage 2 now also has a real diffusers-backed backbone load path for inspection when the environment actually supports it. Example:
+
+```bash
+cspd-stage2 inspect-targets \
+  --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
+  --load-backbone \
+  --local-files-only
+```
+
+If the model weights are not cached locally, or Hugging Face access/downloads are unavailable, the command reports the real runtime failure instead of pretending the backbone was loaded.
+
 If you use the provided shell helpers, the workflow can be driven end-to-end from prep through final Stage 1 canonical render, then into Stage 2 run scaffolding. The full workflow script uses only a small mock smoke subset by default (first 3 classes, first 10 images per class), and also supports `--skip-smoke`.
 
 For routine ImageNet-1k / Imagenette reruns, you usually do not need to rerun Prep if you are happy using the repo-bundled `classes.json` plus `configs/stage1/class_to_archetype_imagenet1k_manual.json`.
