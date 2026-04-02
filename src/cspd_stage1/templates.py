@@ -106,6 +106,7 @@ TEMPLATE_SPECS: dict[str, TemplateSpec] = {
         slot_prefixes={"operating_state_or_display_state": "", "background_or_context": "in", "viewpoint": "from"},
         drop_if_unknown=("color", "material_or_finish", "shape_or_structure", "operating_state_or_display_state", "background_or_context", "viewpoint"),
         optional_slots=("color", "material_or_finish", "shape_or_structure", "operating_state_or_display_state", "background_or_context", "viewpoint"),
+        fallback_anchor="device",
     ),
     "instrument": TemplateSpec(
         archetype="instrument",
@@ -116,6 +117,7 @@ TEMPLATE_SPECS: dict[str, TemplateSpec] = {
         slot_prefixes={"playing_state_or_pose": "", "background_or_context": "in", "viewpoint": "from"},
         drop_if_unknown=("color", "material", "shape_or_structure", "playing_state_or_pose", "background_or_context", "viewpoint"),
         optional_slots=("color", "material", "shape_or_structure", "playing_state_or_pose", "background_or_context", "viewpoint"),
+        fallback_anchor="instrument",
     ),
     "weapon": TemplateSpec(
         archetype="weapon",
@@ -136,6 +138,7 @@ TEMPLATE_SPECS: dict[str, TemplateSpec] = {
         slot_prefixes={"activity_or_usage_state": "", "background_or_context": "in", "viewpoint": "from"},
         drop_if_unknown=("color_or_pattern", "material", "shape_or_structure", "activity_or_usage_state", "background_or_context", "viewpoint"),
         optional_slots=("color_or_pattern", "material", "shape_or_structure", "activity_or_usage_state", "background_or_context", "viewpoint"),
+        fallback_anchor="sports item",
     ),
     "household_object": TemplateSpec(
         archetype="household_object",

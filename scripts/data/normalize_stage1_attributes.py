@@ -59,6 +59,7 @@ class Normalizer:
         self.shape_map = self._clean_mapping(rules.get("shape_map", {}))
         self.part_map = self._clean_mapping(rules.get("part_map", {}))
         self.background_map = self._clean_mapping(rules.get("background_map", {}))
+        self.type_map = self._clean_mapping(rules.get("type_map", {}))
         self.archetype_review_value_sets = {
             archetype: {slot: {self._clean_key(v) for v in values} for slot, values in slot_maps.items()}
             for archetype, slot_maps in rules.get("archetype_review_value_sets", {}).items()
@@ -277,12 +278,19 @@ class Normalizer:
         return value, status, applied_rules
 
     def normalize_type_like(self, value: str, status: str, applied_rules: list[str]) -> tuple[str, str, list[str]]:
+        key = self._clean_key(value)
+
+        if key in self.type_map:
+            mapped = self.type_map[key]
+            if mapped != value:
+                applied_rules.append("slot.type.canonicalize")
+                return mapped, "canonicalized", applied_rules
+
         singular_map = {
             "golf balls": "golf ball",
             "crosses": "cross",
             "towers": "tower",
         }
-        key = self._clean_key(value)
         if key in singular_map:
             applied_rules.append("slot.type.singularize")
             return singular_map[key], "canonicalized", applied_rules
