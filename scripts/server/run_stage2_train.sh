@@ -8,7 +8,10 @@ set -euo pipefail
 #   bash scripts/server/run_stage2_train.sh /data/imagenette/train runs/stage1/render/imagenette/qwen_local/2026-04-02_010203/records.jsonl
 #
 # Output directory:
-#   runs/stage2/train/<dataset_name>/<backbone_slug>/<timestamp>
+#   runs/stage2/train/<dataset_label>/<backbone_slug>/<timestamp>
+#   - default label is basename(dataset_root)
+#   - split-only roots like .../train become <parent>_train
+#   - override with STAGE2_DATASET_LABEL=...
 
 if [[ $# -lt 2 ]]; then
   echo "Usage: bash scripts/server/run_stage2_train.sh <dataset_root> <stage1_render_records_jsonl> [backbone_name] [batch_size] [epochs] [extra args...]"
@@ -37,10 +40,30 @@ if [[ ! -f "$RENDER_INPUT" ]]; then
   exit 1
 fi
 
-DATASET_NAME="$(basename "$DATASET_ROOT")"
+derive_dataset_label() {
+  local dataset_root="$1"
+  local base_name
+  local parent_name
+
+  base_name="$(basename "$dataset_root")"
+  parent_name="$(basename "$(dirname "$dataset_root")")"
+
+  case "$base_name" in
+    train|val|valid|validation|test|testing)
+      if [[ -n "$parent_name" && "$parent_name" != "." && "$parent_name" != "/" ]]; then
+        printf '%s_%s\n' "$parent_name" "$base_name"
+        return
+      fi
+      ;;
+  esac
+
+  printf '%s\n' "$base_name"
+}
+
+DATASET_LABEL="${STAGE2_DATASET_LABEL:-$(derive_dataset_label "$DATASET_ROOT")}"
 BACKBONE_SLUG="$(echo "$BACKBONE_NAME" | tr '/ ' '__' | tr -cd '[:alnum:]_.-')"
 TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
-OUTPUT_DIR="runs/stage2/train/${DATASET_NAME}/${BACKBONE_SLUG}/${TIMESTAMP}"
+OUTPUT_DIR="runs/stage2/train/${DATASET_LABEL}/${BACKBONE_SLUG}/${TIMESTAMP}"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
@@ -63,6 +86,7 @@ if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
 fi
 
 echo "[INFO] dataset_root:        $DATASET_ROOT"
+echo "[INFO] dataset_label:       $DATASET_LABEL"
 echo "[INFO] render_input:        $RENDER_INPUT"
 echo "[INFO] backbone_name:       $BACKBONE_NAME"
 echo "[INFO] batch_size:          $BATCH_SIZE"

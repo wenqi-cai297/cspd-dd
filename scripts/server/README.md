@@ -224,6 +224,8 @@ bash scripts/server/run_stage2_train.sh \
 
 This helper currently:
 - builds a Stage 2 run directory under `runs/stage2/train/...`
+  - default dataset label is the dataset-root basename, except split-only roots like `.../train` become `<parent>_train` (same for `val`/`valid`/`validation`/`test`/`testing`)
+  - optional override: set `STAGE2_DATASET_LABEL=...` before invoking the script
 - pairs images with Stage 1 canonical captions conservatively by stable identifiers
 - writes `train_manifest.jsonl` plus unmatched-record reports
 - writes a Stage 2 config snapshot and trainer plan

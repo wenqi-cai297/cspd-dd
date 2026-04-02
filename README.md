@@ -52,7 +52,9 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 - Prep metadata: `runs/prep/...`
 - Stage 1 attributes: `runs/stage1/attributes/<dataset_name>/<backend>/<timestamp>`
 - Stage 1 render: `runs/stage1/render/<dataset_name>/<backend>/<timestamp>`
-- Stage 2 train scaffold: `runs/stage2/train/<dataset_name>/<backbone>/<timestamp>`
+- Stage 2 train scaffold: `runs/stage2/train/<dataset_label>/<backbone>/<timestamp>`
+  - default dataset label is the dataset-root basename, except split-only roots like `.../train` become `<parent>_train` (same for `val`/`valid`/`validation`/`test`/`testing`)
+  - optional override: set `STAGE2_DATASET_LABEL=...` before `bash scripts/server/run_stage2_train.sh ...`
 
 ## Expected dataset layout
 
