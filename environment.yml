@@ -15,7 +15,9 @@ dependencies:
   - pillow
   - tqdm>=4.66
   - pip:
+      - diffusers>=0.37.1
       - transformers
       - accelerate
       - sentencepiece
+      - safetensors
       - -e .
