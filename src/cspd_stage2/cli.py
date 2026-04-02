@@ -8,6 +8,7 @@ import json
 from cspd_stage2.training import (
     AdapterPlan,
     Stage2TrainConfig,
+    inspect_stage2_backbone_targets,
     run_stage2_training,
 )
 
@@ -125,6 +126,53 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         help="Adapter bias mode placeholder",
     )
+    train_parser.add_argument(
+        "--inspect-module-reference",
+        default=None,
+        help="Optional Python object reference in the form package.module:object_or_factory used for real module inspection",
+    )
+    train_parser.add_argument(
+        "--inspect-limit",
+        type=int,
+        default=200,
+        help="Maximum matched modules to emit during optional module inspection",
+    )
+    train_parser.add_argument(
+        "--apply-real-module-selection",
+        action="store_true",
+        help="If --inspect-module-reference is provided, apply include/exclude rules to the real module tree via requires_grad",
+    )
+
+    inspect_parser = subparsers.add_parser(
+        "inspect-targets",
+        help="Inspect candidate trainable module names on an explicitly provided torch module tree",
+    )
+    inspect_parser.add_argument("--backbone-name", default="black-forest-labs/FLUX.1-Kontext-dev")
+    inspect_parser.add_argument(
+        "--module-reference",
+        required=True,
+        help="Python object reference in the form package.module:object_or_factory",
+    )
+    inspect_parser.add_argument(
+        "--module-include-pattern",
+        action="append",
+        dest="module_include_patterns",
+        default=None,
+        help="Include pattern to match candidate module names; may be repeated",
+    )
+    inspect_parser.add_argument(
+        "--module-exclude-pattern",
+        action="append",
+        dest="module_exclude_patterns",
+        default=None,
+        help="Exclude pattern to filter module names; may be repeated",
+    )
+    inspect_parser.add_argument("--limit", type=int, default=200)
+    inspect_parser.add_argument(
+        "--apply-selection",
+        action="store_true",
+        help="Apply include/exclude rules to requires_grad on the provided module tree before reporting",
+    )
     return parser
 
 
@@ -199,6 +247,9 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
                 "image_encoder",
             ],
         ),
+        inspect_module_reference=args.inspect_module_reference,
+        inspect_limit=args.inspect_limit,
+        apply_real_module_selection=args.apply_real_module_selection,
     )
 
 
@@ -208,6 +259,30 @@ def main() -> None:
 
     if args.command == "train":
         summary = run_stage2_training(config_from_args(args))
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "inspect-targets":
+        summary = inspect_stage2_backbone_targets(
+            backbone_name=args.backbone_name,
+            module_reference=args.module_reference,
+            include_patterns=args.module_include_patterns or [
+                "transformer.*attn",
+                "transformer.*cross_attn",
+                "transformer.*context",
+                "transformer.*txt",
+                "context_embedder",
+                "conditioning_bridge",
+            ],
+            exclude_patterns=args.module_exclude_patterns or [
+                "vae",
+                "autoencoder",
+                "decoder",
+                "image_encoder",
+            ],
+            limit=args.limit,
+            apply_selection=args.apply_selection,
+        )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
 

@@ -37,6 +37,8 @@ class Stage2PairRecord:
     class_name: str
     archetype: str
     canonical_caption: str
+    dataset_archetype: str | None = None
+    render_archetype: str | None = None
     caption_template_family: str | None = None
     caption_template_id: str | None = None
     caption_anchor_slot: str | None = None
@@ -60,6 +62,8 @@ class Stage2PairRecord:
             "class_name_raw": self.class_name_raw,
             "class_name": self.class_name,
             "archetype": self.archetype,
+            "dataset_archetype": self.dataset_archetype,
+            "render_archetype": self.render_archetype,
             "canonical_caption": self.canonical_caption,
             "caption_template_family": self.caption_template_family,
             "caption_template_id": self.caption_template_id,
@@ -225,6 +229,9 @@ def build_stage2_pairs(
         renderer = matched_row.get("renderer") if isinstance(matched_row.get("renderer"), dict) else {}
         verbalized_slots = matched_row.get("verbalized_slots")
         caption_slot_count = len(verbalized_slots) if isinstance(verbalized_slots, list) else None
+        render_archetype = _string_or_none(matched_row.get("archetype"))
+        template_family = _string_or_none(renderer.get("template_family"))
+        effective_archetype = render_archetype or template_family or sample.archetype
 
         pairs.append(
             Stage2PairRecord(
@@ -236,9 +243,11 @@ def build_stage2_pairs(
                 class_id=sample.class_id,
                 class_name_raw=sample.class_name_raw,
                 class_name=sample.class_name,
-                archetype=sample.archetype,
+                archetype=effective_archetype,
+                dataset_archetype=sample.archetype,
+                render_archetype=render_archetype,
                 canonical_caption=str(matched_row["canonical_caption"]),
-                caption_template_family=_string_or_none(renderer.get("template_family")),
+                caption_template_family=template_family,
                 caption_template_id=_string_or_none(renderer.get("template_id")),
                 caption_anchor_slot=_string_or_none(matched_row.get("anchor_slot")),
                 caption_slot_count=caption_slot_count,
@@ -347,12 +356,22 @@ def _build_pairing_summary(
     counts_by_archetype: dict[str, int] = {}
     counts_by_template_family: dict[str, int] = {}
     counts_by_match_strategy: dict[str, int] = {}
+    counts_by_dataset_archetype: dict[str, int] = {}
+    counts_by_render_archetype: dict[str, int] = {}
+    num_pairs_with_archetype_source_mismatch = 0
     for pair in pairs:
         counts_by_class[pair.class_name_raw] = counts_by_class.get(pair.class_name_raw, 0) + 1
         counts_by_archetype[pair.archetype] = counts_by_archetype.get(pair.archetype, 0) + 1
         template_family = pair.caption_template_family or "unknown"
         counts_by_template_family[template_family] = counts_by_template_family.get(template_family, 0) + 1
         counts_by_match_strategy[pair.matched_via] = counts_by_match_strategy.get(pair.matched_via, 0) + 1
+
+        dataset_archetype = pair.dataset_archetype or "unknown"
+        render_archetype = pair.render_archetype or template_family
+        counts_by_dataset_archetype[dataset_archetype] = counts_by_dataset_archetype.get(dataset_archetype, 0) + 1
+        counts_by_render_archetype[render_archetype] = counts_by_render_archetype.get(render_archetype, 0) + 1
+        if pair.dataset_archetype and render_archetype and pair.dataset_archetype != render_archetype:
+            num_pairs_with_archetype_source_mismatch += 1
 
     return {
         "dataset_root": str(Path(dataset_root).resolve()),
@@ -366,6 +385,10 @@ def _build_pairing_summary(
         "counts_by_class": counts_by_class,
         "counts_by_archetype": counts_by_archetype,
         "counts_by_template_family": counts_by_template_family,
+        "counts_by_dataset_archetype": counts_by_dataset_archetype,
+        "counts_by_render_archetype": counts_by_render_archetype,
+        "archetype_count_source": "matched_stage1_render_record",
+        "num_pairs_with_archetype_source_mismatch": num_pairs_with_archetype_source_mismatch,
         "counts_by_match_strategy": counts_by_match_strategy,
         "strict": strict,
         "verify_images": verify_images,

@@ -18,6 +18,13 @@ from pathlib import Path
 from typing import Any
 
 from cspd_stage1.io_utils import write_json
+from cspd_stage2.backbone import (
+    apply_trainable_parameter_selection,
+    infer_backbone_family,
+    inspect_target_modules,
+    load_generative_backbone,
+    load_module_from_reference,
+)
 from cspd_stage2.data import build_stage2_pairs, write_pairing_artifacts
 
 
@@ -92,6 +99,9 @@ class Stage2TrainConfig:
     module_include_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_FLUX_KONTEXT_INCLUDE_PATTERNS))
     module_exclude_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE_PATTERNS))
     adapter_plan: AdapterPlan = field(default_factory=AdapterPlan)
+    inspect_module_reference: str | None = None
+    inspect_limit: int = 200
+    apply_real_module_selection: bool = False
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
@@ -116,7 +126,8 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         pairing.summary["num_pairs_after_limit"] = len(pairing.pairs)
 
     manifest_paths = write_pairing_artifacts(pairing, run_dir)
-    component_plan = _build_component_plan(config)
+    backbone_runtime = _build_backbone_runtime_summary(config)
+    component_plan = _build_component_plan(config, backbone_runtime)
     trainer_plan = _build_trainer_plan(config, manifest_paths.manifest_path, len(pairing.pairs), component_plan)
     write_json(run_dir / "stage2_config_snapshot.json", _config_to_dict(config))
     write_json(run_dir / "trainer_plan.json", trainer_plan)
@@ -159,6 +170,7 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         "freeze_text_encoder": config.freeze_text_encoder,
         "freeze_vae": config.freeze_vae,
         "component_plan": component_plan,
+        "backbone_runtime": backbone_runtime,
         "manifest": manifest_paths.manifest_path,
         "manifest_summary": manifest_paths.summary_path,
         "unmatched_images": manifest_paths.unmatched_images_path,
@@ -232,7 +244,7 @@ def _config_to_dict(config: Stage2TrainConfig) -> dict[str, Any]:
     return payload
 
 
-def _build_component_plan(config: Stage2TrainConfig) -> dict[str, Any]:
+def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str, Any]) -> dict[str, Any]:
     trainable_groups = list(dict.fromkeys(config.trainable_component_groups))
     frozen_groups: list[str] = []
     if config.train_transformer_core_only:
@@ -254,10 +266,90 @@ def _build_component_plan(config: Stage2TrainConfig) -> dict[str, Any]:
         },
         "adapter_plan": asdict(config.adapter_plan),
         "backbone_assumptions": _infer_backbone_assumptions(config.backbone_name),
+        "backbone_runtime": backbone_runtime,
         "implementation_boundary": (
-            "Module group labels and pattern selectors are exported as auditable plan metadata only. "
-            "They are not yet applied to a real FLUX Kontext parameter tree in this repo."
+            "Pattern selectors now support inspection and optional requires_grad application on a real torch module tree "
+            "when one is explicitly provided. Concrete FLUX Kontext loading/training is still not implemented in this repo."
         ),
+    }
+
+
+def _build_backbone_runtime_summary(config: Stage2TrainConfig) -> dict[str, Any]:
+    load_result = load_generative_backbone(config.backbone_name, allow_unimplemented=True)
+    summary: dict[str, Any] = {
+        "backbone_name": config.backbone_name,
+        "family": infer_backbone_family(config.backbone_name),
+        "loader": load_result.loader_name,
+        "loader_status": load_result.implementation_status,
+        "loader_notes": list(load_result.notes or []),
+        "module_reference": config.inspect_module_reference,
+        "module_selection_applied": False,
+        "module_targeting": None,
+    }
+
+    if not config.inspect_module_reference:
+        summary["inspection_status"] = "not_requested"
+        return summary
+
+    try:
+        module = load_module_from_reference(config.inspect_module_reference)
+        if config.apply_real_module_selection:
+            targeting = apply_trainable_parameter_selection(
+                module,
+                include_patterns=config.module_include_patterns,
+                exclude_patterns=config.module_exclude_patterns,
+            )
+            summary["module_selection_applied"] = True
+        else:
+            targeting = inspect_target_modules(
+                module,
+                include_patterns=config.module_include_patterns,
+                exclude_patterns=config.module_exclude_patterns,
+                limit=config.inspect_limit,
+            )
+        summary["inspection_status"] = "ok"
+        summary["module_targeting"] = targeting.to_dict()
+    except Exception as exc:  # noqa: BLE001
+        summary["inspection_status"] = "failed"
+        summary["inspection_error"] = str(exc)
+
+    return summary
+
+
+def inspect_stage2_backbone_targets(
+    *,
+    backbone_name: str,
+    module_reference: str,
+    include_patterns: list[str],
+    exclude_patterns: list[str] | None = None,
+    limit: int = 200,
+    apply_selection: bool = False,
+) -> dict[str, Any]:
+    module = load_module_from_reference(module_reference)
+    if apply_selection:
+        targeting = apply_trainable_parameter_selection(
+            module,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+        )
+    else:
+        targeting = inspect_target_modules(
+            module,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+            limit=limit,
+        )
+
+    return {
+        "backbone_name": backbone_name,
+        "backbone_family": infer_backbone_family(backbone_name),
+        "module_reference": module_reference,
+        "apply_selection": apply_selection,
+        "targeting": targeting.to_dict(),
+        "notes": [
+            "This utility inspects an explicitly provided torch module tree.",
+            "It does not imply that full backbone loading or full Stage 2 training is wired for this backbone family.",
+        ],
     }
 
 
@@ -297,8 +389,9 @@ def _build_trainer_plan(
             "text_conditioning_manifest_fields": "implemented",
             "run_directory_setup": "implemented",
             "config_snapshot": "implemented",
-            "component_target_plan": "implemented_metadata_only",
+            "component_target_plan": "implemented_with_optional_real_module_inspection",
             "adapter_target_plan": "implemented_metadata_only",
+            "real_module_target_selection": "optional_when_explicit_module_reference_is_provided",
             "placeholder_loop": "optional",
             "full_flux_kontext_finetuning": "not_implemented",
         },
@@ -312,8 +405,8 @@ def _build_trainer_plan(
 
 
 def _infer_backbone_assumptions(backbone_name: str) -> dict[str, Any]:
-    lowered = backbone_name.lower()
-    if "flux" in lowered and "kontext" in lowered:
+    family = infer_backbone_family(backbone_name)
+    if family == "flux_kontext":
         return {
             "family": "flux_kontext",
             "notes": [
