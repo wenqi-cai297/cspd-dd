@@ -21,6 +21,7 @@ from cspd_stage1.io_utils import write_json
 from cspd_stage2.backbone import (
     apply_trainable_parameter_selection,
     infer_backbone_family,
+    inject_lora_adapters,
     inspect_target_modules,
     load_generative_backbone,
     load_module_from_reference,
@@ -102,6 +103,7 @@ class Stage2TrainConfig:
     inspect_module_reference: str | None = None
     inspect_limit: int = 200
     apply_real_module_selection: bool = False
+    inject_adapters_on_real_module: bool = False
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
@@ -262,7 +264,11 @@ def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str,
         "module_selection": {
             "include_patterns": config.module_include_patterns,
             "exclude_patterns": config.module_exclude_patterns,
-            "selection_semantics": "pattern_metadata_only",
+            "selection_semantics": (
+                "pattern_inspection_with_optional_requires_grad_and_adapter_injection"
+                if config.inspect_module_reference
+                else "pattern_metadata_only"
+            ),
         },
         "adapter_plan": asdict(config.adapter_plan),
         "backbone_assumptions": _infer_backbone_assumptions(config.backbone_name),
@@ -284,7 +290,9 @@ def _build_backbone_runtime_summary(config: Stage2TrainConfig) -> dict[str, Any]
         "loader_notes": list(load_result.notes or []),
         "module_reference": config.inspect_module_reference,
         "module_selection_applied": False,
+        "adapter_injection_applied": False,
         "module_targeting": None,
+        "adapter_injection": None,
     }
 
     if not config.inspect_module_reference:
@@ -309,6 +317,24 @@ def _build_backbone_runtime_summary(config: Stage2TrainConfig) -> dict[str, Any]
             )
         summary["inspection_status"] = "ok"
         summary["module_targeting"] = targeting.to_dict()
+
+        if config.inject_adapters_on_real_module:
+            injection = inject_lora_adapters(
+                module,
+                include_patterns=config.adapter_plan.target_module_patterns,
+                exclude_patterns=config.adapter_plan.exclude_module_patterns,
+                rank=config.adapter_plan.rank,
+                alpha=config.adapter_plan.alpha,
+                dropout=config.adapter_plan.dropout,
+            )
+            summary["adapter_injection_applied"] = True
+            summary["adapter_injection"] = injection.to_dict()
+            summary["module_targeting_after_adapter_injection"] = inspect_target_modules(
+                module,
+                include_patterns=config.module_include_patterns,
+                exclude_patterns=config.module_exclude_patterns,
+                limit=config.inspect_limit,
+            ).to_dict()
     except Exception as exc:  # noqa: BLE001
         summary["inspection_status"] = "failed"
         summary["inspection_error"] = str(exc)
@@ -324,6 +350,8 @@ def inspect_stage2_backbone_targets(
     exclude_patterns: list[str] | None = None,
     limit: int = 200,
     apply_selection: bool = False,
+    inject_adapters: bool = False,
+    adapter_plan: AdapterPlan | None = None,
 ) -> dict[str, Any]:
     module = load_module_from_reference(module_reference)
     if apply_selection:
@@ -340,7 +368,7 @@ def inspect_stage2_backbone_targets(
             limit=limit,
         )
 
-    return {
+    summary: dict[str, Any] = {
         "backbone_name": backbone_name,
         "backbone_family": infer_backbone_family(backbone_name),
         "module_reference": module_reference,
@@ -351,6 +379,33 @@ def inspect_stage2_backbone_targets(
             "It does not imply that full backbone loading or full Stage 2 training is wired for this backbone family.",
         ],
     }
+
+    if inject_adapters:
+        active_plan = adapter_plan or AdapterPlan(
+            target_module_patterns=list(include_patterns),
+            exclude_module_patterns=list(exclude_patterns or []),
+        )
+        injection = inject_lora_adapters(
+            module,
+            include_patterns=active_plan.target_module_patterns,
+            exclude_patterns=active_plan.exclude_module_patterns,
+            rank=active_plan.rank,
+            alpha=active_plan.alpha,
+            dropout=active_plan.dropout,
+        )
+        summary["inject_adapters"] = True
+        summary["adapter_plan"] = asdict(active_plan)
+        summary["adapter_injection"] = injection.to_dict()
+        summary["targeting_after_adapter_injection"] = inspect_target_modules(
+            module,
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
+            limit=limit,
+        ).to_dict()
+    else:
+        summary["inject_adapters"] = False
+
+    return summary
 
 
 def _build_trainer_plan(
@@ -390,8 +445,9 @@ def _build_trainer_plan(
             "run_directory_setup": "implemented",
             "config_snapshot": "implemented",
             "component_target_plan": "implemented_with_optional_real_module_inspection",
-            "adapter_target_plan": "implemented_metadata_only",
+            "adapter_target_plan": "implemented_with_optional_real_module_lora_injection",
             "real_module_target_selection": "optional_when_explicit_module_reference_is_provided",
+            "real_module_adapter_injection": "optional_when_explicit_module_reference_is_provided",
             "placeholder_loop": "optional",
             "full_flux_kontext_finetuning": "not_implemented",
         },

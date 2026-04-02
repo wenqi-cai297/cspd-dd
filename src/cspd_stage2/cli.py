@@ -142,6 +142,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="If --inspect-module-reference is provided, apply include/exclude rules to the real module tree via requires_grad",
     )
+    train_parser.add_argument(
+        "--inject-adapters-on-real-module",
+        action="store_true",
+        help="If --inspect-module-reference is provided, inject lightweight LoRA adapters into matching real torch modules",
+    )
 
     inspect_parser = subparsers.add_parser(
         "inspect-targets",
@@ -173,6 +178,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Apply include/exclude rules to requires_grad on the provided module tree before reporting",
     )
+    inspect_parser.add_argument(
+        "--inject-adapters",
+        action="store_true",
+        help="Inject lightweight LoRA adapters into matching real torch modules before reporting",
+    )
+    inspect_parser.add_argument("--adapter-rank", type=int, default=16, help="Adapter rank for optional injection")
+    inspect_parser.add_argument("--adapter-alpha", type=float, default=16.0, help="Adapter alpha for optional injection")
+    inspect_parser.add_argument("--adapter-dropout", type=float, default=0.0, help="Adapter dropout for optional injection")
+    inspect_parser.add_argument("--adapter-bias", default="none", help="Adapter bias label for metadata")
     return parser
 
 
@@ -250,6 +264,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         inspect_module_reference=args.inspect_module_reference,
         inspect_limit=args.inspect_limit,
         apply_real_module_selection=args.apply_real_module_selection,
+        inject_adapters_on_real_module=args.inject_adapters_on_real_module,
     )
 
 
@@ -263,25 +278,37 @@ def main() -> None:
         return
 
     if args.command == "inspect-targets":
+        include_patterns = args.module_include_patterns or [
+            "transformer.*attn",
+            "transformer.*cross_attn",
+            "transformer.*context",
+            "transformer.*txt",
+            "context_embedder",
+            "conditioning_bridge",
+        ]
+        exclude_patterns = args.module_exclude_patterns or [
+            "vae",
+            "autoencoder",
+            "decoder",
+            "image_encoder",
+        ]
         summary = inspect_stage2_backbone_targets(
             backbone_name=args.backbone_name,
             module_reference=args.module_reference,
-            include_patterns=args.module_include_patterns or [
-                "transformer.*attn",
-                "transformer.*cross_attn",
-                "transformer.*context",
-                "transformer.*txt",
-                "context_embedder",
-                "conditioning_bridge",
-            ],
-            exclude_patterns=args.module_exclude_patterns or [
-                "vae",
-                "autoencoder",
-                "decoder",
-                "image_encoder",
-            ],
+            include_patterns=include_patterns,
+            exclude_patterns=exclude_patterns,
             limit=args.limit,
             apply_selection=args.apply_selection,
+            inject_adapters=args.inject_adapters,
+            adapter_plan=AdapterPlan(
+                adapter_type="lora",
+                rank=args.adapter_rank,
+                alpha=args.adapter_alpha,
+                dropout=args.adapter_dropout,
+                bias=args.adapter_bias,
+                target_module_patterns=include_patterns,
+                exclude_module_patterns=exclude_patterns,
+            ),
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return

@@ -7,6 +7,7 @@ This module stays honest about scope:
 - provides a lightweight loader hook contract,
 - applies include/exclude targeting rules to a real torch module tree when available,
 - offers a small inspection surface for candidate module names,
+- supports optional adapter injection on explicitly provided torch modules,
 - does not pretend full FLUX.1 Kontext training is already integrated.
 """
 
@@ -69,6 +70,133 @@ class ModuleTargetingResult:
             "selected_parameter_names": list(self.selected_parameter_names),
             "selected_parameter_count": self.selected_parameter_count,
         }
+
+
+@dataclass(slots=True)
+class AdapterInjectionMatch:
+    module_name: str
+    original_module_type: str
+    injected_module_type: str
+    rank: int
+    alpha: float
+    dropout: float
+    base_parameter_count: int
+    adapter_parameter_count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "module_name": self.module_name,
+            "original_module_type": self.original_module_type,
+            "injected_module_type": self.injected_module_type,
+            "rank": self.rank,
+            "alpha": self.alpha,
+            "dropout": self.dropout,
+            "base_parameter_count": self.base_parameter_count,
+            "adapter_parameter_count": self.adapter_parameter_count,
+        }
+
+
+@dataclass(slots=True)
+class AdapterInjectionResult:
+    adapter_type: str
+    target_module_type: str
+    include_patterns: list[str]
+    exclude_patterns: list[str]
+    attempted_module_names: list[str]
+    injected_modules: list[AdapterInjectionMatch]
+    skipped_modules: list[dict[str, Any]]
+    total_adapter_parameter_count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "adapter_type": self.adapter_type,
+            "target_module_type": self.target_module_type,
+            "include_patterns": list(self.include_patterns),
+            "exclude_patterns": list(self.exclude_patterns),
+            "attempted_module_names": list(self.attempted_module_names),
+            "injected_modules": [item.to_dict() for item in self.injected_modules],
+            "skipped_modules": list(self.skipped_modules),
+            "total_adapter_parameter_count": self.total_adapter_parameter_count,
+        }
+
+
+class LoRALinearAdapter:  # instantiated only when torch exists
+    def __init__(self, base_layer: Any, *, rank: int, alpha: float, dropout: float) -> None:
+        import torch
+
+        if rank <= 0:
+            raise ValueError("Adapter rank must be positive")
+        if not hasattr(base_layer, "in_features") or not hasattr(base_layer, "out_features"):
+            raise TypeError("LoRALinearAdapter requires a linear-like module with in_features/out_features")
+
+        self._torch = torch
+        self.base_layer = base_layer
+        self.rank = int(rank)
+        self.alpha = float(alpha)
+        self.scaling = float(alpha) / float(rank)
+        self.dropout = torch.nn.Dropout(dropout) if dropout and dropout > 0 else torch.nn.Identity()
+        self.lora_A = torch.nn.Linear(base_layer.in_features, rank, bias=False)
+        self.lora_B = torch.nn.Linear(rank, base_layer.out_features, bias=False)
+        torch.nn.init.kaiming_uniform_(self.lora_A.weight, a=5**0.5)
+        torch.nn.init.zeros_(self.lora_B.weight)
+
+        for parameter in self.base_layer.parameters():
+            parameter.requires_grad = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.__dict__["base_layer"], name)
+
+    def forward(self, inputs: Any) -> Any:
+        base = self.base_layer(inputs)
+        update = self.lora_B(self.lora_A(self.dropout(inputs))) * self.scaling
+        return base + update
+
+    def parameters(self, recurse: bool = True):
+        for parameter in self.base_layer.parameters(recurse=recurse):
+            yield parameter
+        for parameter in self.lora_A.parameters(recurse=recurse):
+            yield parameter
+        for parameter in self.lora_B.parameters(recurse=recurse):
+            yield parameter
+
+    def named_parameters(self, prefix: str = "", recurse: bool = True):
+        for name, parameter in self.base_layer.named_parameters(prefix=f"{prefix}.base_layer" if prefix else "base_layer", recurse=recurse):
+            yield name, parameter
+        for name, parameter in self.lora_A.named_parameters(prefix=f"{prefix}.lora_A" if prefix else "lora_A", recurse=recurse):
+            yield name, parameter
+        for name, parameter in self.lora_B.named_parameters(prefix=f"{prefix}.lora_B" if prefix else "lora_B", recurse=recurse):
+            yield name, parameter
+
+
+# Make the adapter a real torch.nn.Module when torch is available at import time.
+if importlib.util.find_spec("torch") is not None:
+    import torch
+
+    class LoRALinearAdapter(torch.nn.Module):
+        def __init__(self, base_layer: Any, *, rank: int, alpha: float, dropout: float) -> None:
+            super().__init__()
+            if rank <= 0:
+                raise ValueError("Adapter rank must be positive")
+            if not isinstance(base_layer, torch.nn.Linear):
+                raise TypeError("LoRALinearAdapter currently supports torch.nn.Linear modules only")
+
+            self.base_layer = base_layer
+            self.rank = int(rank)
+            self.alpha = float(alpha)
+            self.scaling = float(alpha) / float(rank)
+            self.dropout = torch.nn.Dropout(dropout) if dropout and dropout > 0 else torch.nn.Identity()
+            self.lora_A = torch.nn.Linear(base_layer.in_features, rank, bias=False)
+            self.lora_B = torch.nn.Linear(rank, base_layer.out_features, bias=False)
+            torch.nn.init.kaiming_uniform_(self.lora_A.weight, a=5**0.5)
+            torch.nn.init.zeros_(self.lora_B.weight)
+
+            for parameter in self.base_layer.parameters():
+                parameter.requires_grad = False
+
+        def forward(self, inputs: Any) -> Any:
+            base = self.base_layer(inputs)
+            update = self.lora_B(self.lora_A(self.dropout(inputs))) * self.scaling
+            return base + update
 
 
 def infer_backbone_family(backbone_name: str) -> str:
@@ -248,6 +376,89 @@ def apply_trainable_parameter_selection(
     )
 
 
+def inject_lora_adapters(
+    module: Any,
+    *,
+    include_patterns: list[str],
+    exclude_patterns: list[str] | None = None,
+    rank: int = 16,
+    alpha: float = 16.0,
+    dropout: float = 0.0,
+) -> AdapterInjectionResult:
+    """Inject lightweight LoRA adapters into matching real torch submodules.
+
+    Current support is intentionally narrow and honest:
+    - requires an explicitly provided torch module tree
+    - only replaces torch.nn.Linear leaves
+    - returns an artifact-friendly summary of what was actually injected
+    """
+
+    _ensure_torch_module(module)
+    exclude_patterns = list(exclude_patterns or [])
+
+    attempted_module_names: list[str] = []
+    injected_modules: list[AdapterInjectionMatch] = []
+    skipped_modules: list[dict[str, Any]] = []
+    total_adapter_parameter_count = 0
+
+    for module_name, submodule in list(module.named_modules()):
+        if not module_name:
+            continue
+        include_hits = _matched_patterns(module_name, include_patterns)
+        exclude_hits = _matched_patterns(module_name, exclude_patterns)
+        if not include_hits or exclude_hits:
+            continue
+        attempted_module_names.append(module_name)
+
+        parent_module, child_name = _resolve_parent_module(module, module_name)
+        if parent_module is None or child_name is None:
+            skipped_modules.append({"module_name": module_name, "reason": "parent_resolution_failed"})
+            continue
+        target_module = getattr(parent_module, child_name, None)
+        if target_module is None:
+            skipped_modules.append({"module_name": module_name, "reason": "target_missing"})
+            continue
+
+        if type(target_module).__name__ != "Linear":
+            skipped_modules.append(
+                {
+                    "module_name": module_name,
+                    "module_type": type(target_module).__name__,
+                    "reason": "unsupported_module_type",
+                }
+            )
+            continue
+
+        base_parameter_count = sum(parameter.numel() for parameter in target_module.parameters())
+        adapted = LoRALinearAdapter(target_module, rank=rank, alpha=alpha, dropout=dropout)
+        setattr(parent_module, child_name, adapted)
+        adapter_parameter_count = sum(parameter.numel() for name, parameter in adapted.named_parameters() if ".lora_" in name or name.startswith("lora_"))
+        total_adapter_parameter_count += int(adapter_parameter_count)
+        injected_modules.append(
+            AdapterInjectionMatch(
+                module_name=module_name,
+                original_module_type="Linear",
+                injected_module_type=type(adapted).__name__,
+                rank=int(rank),
+                alpha=float(alpha),
+                dropout=float(dropout),
+                base_parameter_count=int(base_parameter_count),
+                adapter_parameter_count=int(adapter_parameter_count),
+            )
+        )
+
+    return AdapterInjectionResult(
+        adapter_type="lora",
+        target_module_type="torch.nn.Linear",
+        include_patterns=list(include_patterns),
+        exclude_patterns=list(exclude_patterns),
+        attempted_module_names=attempted_module_names,
+        injected_modules=injected_modules,
+        skipped_modules=skipped_modules,
+        total_adapter_parameter_count=int(total_adapter_parameter_count),
+    )
+
+
 def _named_modules(module: Any) -> list[tuple[str, Any]]:
     _ensure_torch_module(module)
     return list(module.named_modules())
@@ -260,3 +471,15 @@ def _ensure_torch_module(module: Any) -> None:
 
 def _matched_patterns(name: str, patterns: list[str]) -> list[str]:
     return [pattern for pattern in patterns if fnmatch.fnmatchcase(name, pattern)]
+
+
+def _resolve_parent_module(root_module: Any, qualified_name: str) -> tuple[Any | None, str | None]:
+    parts = qualified_name.split(".")
+    if not parts:
+        return None, None
+    parent = root_module
+    for part in parts[:-1]:
+        if not hasattr(parent, part):
+            return None, None
+        parent = getattr(parent, part)
+    return parent, parts[-1]
