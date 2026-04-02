@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from cspd_stage1.schema import SampleRecord
+from cspd_stage1.templates import TEMPLATE_SPECS
 from cspd_stage1.vlm.base import BaseVLMClient, VLMOutputParseError
 from cspd_stage1.vlm.factory import create_vlm_client
 
@@ -46,6 +47,9 @@ class Normalizer:
         self.rules = rules
         slot_groups = rules.get("slot_alias_groups", {})
         self.type_slots = set(slot_groups.get("type_slots", []))
+        self.anchor_type_slots = {
+            spec.anchor_slot for spec in TEMPLATE_SPECS.values() if spec.anchor_slot in self.type_slots
+        }
         self.material_slots = set(slot_groups.get("material_slots", []))
         self.color_slots = set(slot_groups.get("color_slots", []))
         self.state_slots = set(slot_groups.get("state_slots", []))
@@ -98,7 +102,7 @@ class Normalizer:
     def _clean_mapping(self, mapping: dict[str, str]) -> dict[str, str]:
         return {self._clean_key(k): v for k, v in mapping.items()}
 
-    def normalize_field(self, class_name_raw: str, archetype: str, slot: str, raw_value: Any) -> dict[str, Any]:
+    def normalize_field(self, class_name: str, class_name_raw: str, archetype: str, slot: str, raw_value: Any) -> dict[str, Any]:
         original = raw_value
         cleaned = self.clean_value(raw_value)
         status = "unchanged"
@@ -157,7 +161,9 @@ class Normalizer:
         elif slot in self.color_slots:
             normalized, status, applied_rules = self.normalize_color(normalized, status, applied_rules)
         elif slot in self.type_slots:
-            normalized, status, applied_rules = self.normalize_type_like(normalized, status, applied_rules)
+            normalized, status, applied_rules = self.normalize_type_like(
+                class_name, slot, normalized, status, applied_rules
+            )
 
         review_reasons.extend(self.detect_review_reasons(class_name_raw, archetype, slot, normalized))
         if review_reasons:
@@ -277,8 +283,22 @@ class Normalizer:
             return mapping[key], "canonicalized", applied_rules
         return value, status, applied_rules
 
-    def normalize_type_like(self, value: str, status: str, applied_rules: list[str]) -> tuple[str, str, list[str]]:
+    def normalize_type_like(
+        self,
+        class_name: str,
+        slot: str,
+        value: str,
+        status: str,
+        applied_rules: list[str],
+    ) -> tuple[str, str, list[str]]:
         key = self._clean_key(value)
+
+        if slot in self.anchor_type_slots:
+            class_short_name = self.extract_class_short_name(class_name)
+            if class_short_name and class_short_name != value:
+                applied_rules.append("slot.anchor_type.from_class_name_first_item")
+                return class_short_name, "canonicalized", applied_rules
+            return value, status, applied_rules
 
         if key in self.type_map:
             mapped = self.type_map[key]
@@ -361,6 +381,17 @@ class Normalizer:
                 applied_rules.append("slot.color.separator_unify")
                 return "+".join(deduped), "canonicalized", applied_rules
         return value, status, applied_rules
+
+    def extract_class_short_name(self, class_name: Any) -> str:
+        if class_name is None:
+            return ""
+        text = str(class_name).strip()
+        if not text:
+            return ""
+        first_item = text.split(",", 1)[0].strip()
+        if not first_item:
+            return ""
+        return self.clean_value(first_item)
 
     def _split_compound_value(self, value: str) -> list[str]:
         tmp = value.replace(" and ", ",")
@@ -791,6 +822,7 @@ def normalize_file(input_path: Path, output_dir: Path, rules_path: Path, *, enab
         summary["num_rows"] += 1
         if row.get("extraction_status") == "success":
             summary["num_success_rows"] += 1
+        class_name = str(row.get("class_name") or "")
         class_name_raw = str(row.get("class_name_raw") or "")
         archetype = str(row.get("archetype") or "")
         raw_attributes = row.get("attributes", {})
@@ -800,7 +832,7 @@ def normalize_file(input_path: Path, output_dir: Path, rules_path: Path, *, enab
         normalization_meta: dict[str, Any] = {}
         per_slot_results: dict[str, dict[str, Any]] = {}
         for slot, raw_value in raw_attributes.items():
-            result = normalizer.normalize_field(class_name_raw, archetype, slot, raw_value)
+            result = normalizer.normalize_field(class_name, class_name_raw, archetype, slot, raw_value)
             normalized_attributes[slot] = result["normalized_value"]
             normalization_meta[slot] = {"raw_value": result["raw_value"], "normalized_value": result["normalized_value"], "status": result["status"], "applied_rules": result["applied_rules"], "review_reasons": result["review_reasons"]}
             per_slot_results[slot] = result
