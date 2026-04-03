@@ -141,16 +141,14 @@ cspd-stage2 train \
   --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
   --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000 \
   --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
-  --trainable-component-group conditioning_bridge \
-  --trainable-component-group cross_attention \
-  --adapter-type lora \
-  --adapter-rank 16 \
+  --trainable-component-group full_transformer \
+  --module-include-pattern "*" \
   --batch-size 4 \
   --epochs 1 \
   --dry-run
 ```
 
-This Stage 2 CLI already implements pairing / manifest generation / run-directory setup for a text-conditioning-focused adaptation plan. It now records trainable component groups, conservative module-selection patterns, and adapter/LoRA-style plan metadata for the current experimental FLUX.1 Kontext target. Full FLUX.1 Kontext fine-tuning is still a placeholder boundary in the current repo.
+This Stage 2 CLI already implements pairing / manifest generation / run-directory setup for a full-transformer fine-tuning plan on the current experimental FLUX.1 Kontext target. The current default policy is to freeze non-transformer top-level modules and train the full `FluxTransformer2DModel`; if memory is insufficient, the intended fallback is to reduce training to conditioning-related transformer submodules. Executable real FLUX.1 Kontext training is still a placeholder boundary in the current repo.
 
 Stage 2 now also has a real diffusers-backed backbone load path for inspection when the environment actually supports it. Example:
 

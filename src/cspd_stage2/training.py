@@ -31,18 +31,11 @@ from cspd_stage2.data import build_stage2_pairs, write_pairing_artifacts
 
 
 DEFAULT_TEXT_CONDITIONING_GROUPS = [
-    "conditioning_bridge",
-    "cross_attention",
-    "transformer_text_conditioning",
+    "full_transformer",
 ]
 
 DEFAULT_FLUX_KONTEXT_INCLUDE_PATTERNS = [
-    "transformer.*attn",
-    "transformer.*cross_attn",
-    "transformer.*context",
-    "transformer.*txt",
-    "context_embedder",
-    "conditioning_bridge",
+    "*",
 ]
 
 DEFAULT_EXCLUDE_PATTERNS = [
@@ -94,8 +87,8 @@ class Stage2TrainConfig:
     freeze_text_encoder: bool = True
     freeze_vae: bool = True
     train_transformer_core_only: bool = True
-    stage2_focus: str = "text_conditioning_adaptation"
-    conditioning_objective: str = "align_stage1_canonical_captions_with_backbone_text_conditioning_path"
+    stage2_focus: str = "transformer_finetuning"
+    conditioning_objective: str = "finetune_full_flux_transformer_on_real_image_and_stage1_canonical_caption_pairs"
     conditioning_text_field: str = "canonical_caption"
     trainable_component_groups: list[str] = field(default_factory=lambda: list(DEFAULT_TEXT_CONDITIONING_GROUPS))
     module_include_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_FLUX_KONTEXT_INCLUDE_PATTERNS))
@@ -145,8 +138,8 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         "implemented_training": False,
         "placeholder_training": False,
         "message": (
-            "Stage 2 paired manifest is ready. The code now records a concrete text-conditioning adaptation plan, "
-            "but full FLUX.1 Kontext fine-tuning is still not wired in this repo."
+            "Stage 2 paired manifest is ready. The code now records a concrete full-transformer fine-tuning plan "
+            "for FLUX.1 Kontext, but executable real training is still not wired in this repo."
         ),
         "component_plan_status": "implemented_metadata_only",
     }
@@ -168,7 +161,7 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
 
     summary = {
         "stage": "stage2_v1",
-        "definition": "generative-backbone adaptation / canonical-semantic-space familiarization",
+        "definition": "full-transformer fine-tuning of the selected generative backbone with Stage 1 canonical-caption conditioning",
         "backbone_name": config.backbone_name,
         "run_dir": str(run_dir.resolve()),
         "stage2_focus": config.stage2_focus,
@@ -265,6 +258,7 @@ def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str,
     return {
         "focus": config.stage2_focus,
         "conditioning_objective": config.conditioning_objective,
+        "fallback_if_oom": "restrict training to conditioning-related transformer submodules",
         "trainable_component_groups": trainable_groups,
         "frozen_component_groups": frozen_groups,
         "module_selection": {
@@ -518,7 +512,7 @@ def _build_trainer_plan(
 ) -> dict[str, Any]:
     return {
         "stage": "stage2_v1",
-        "objective": "text-conditioning-focused adaptation of the selected generative backbone using real-image + Stage-1-canonical-caption pairs",
+        "objective": "full-transformer fine-tuning of the selected generative backbone using real-image + Stage-1-canonical-caption pairs",
         "backbone_name": config.backbone_name,
         "manifest_path": str(Path(manifest_path).resolve()),
         "num_pairs": num_pairs,

@@ -82,13 +82,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.add_argument(
         "--stage2-focus",
-        default="text_conditioning_adaptation",
-        help="High-level Stage 2 focus label; default keeps the implementation honest about text-conditioning adaptation",
+        default="transformer_finetuning",
+        help="High-level Stage 2 focus label; default records full-transformer fine-tuning intent",
     )
     train_parser.add_argument(
         "--conditioning-objective",
-        default="align_stage1_canonical_captions_with_backbone_text_conditioning_path",
-        help="Short objective label describing what part of conditioning adaptation this run targets",
+        default="finetune_full_flux_transformer_on_real_image_and_stage1_canonical_caption_pairs",
+        help="Short objective label describing the full-transformer fine-tuning target for this run",
     )
     train_parser.add_argument(
         "--conditioning-text-field",
@@ -341,17 +341,10 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         conditioning_objective=args.conditioning_objective,
         conditioning_text_field=args.conditioning_text_field,
         trainable_component_groups=args.trainable_component_groups or [
-            "conditioning_bridge",
-            "cross_attention",
-            "transformer_text_conditioning",
+            "full_transformer",
         ],
         module_include_patterns=args.module_include_patterns or [
-            "transformer.*attn",
-            "transformer.*cross_attn",
-            "transformer.*context",
-            "transformer.*txt",
-            "context_embedder",
-            "conditioning_bridge",
+            "*",
         ],
         module_exclude_patterns=args.module_exclude_patterns or [
             "vae",
@@ -366,12 +359,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
             dropout=args.adapter_dropout,
             bias=args.adapter_bias,
             target_module_patterns=args.module_include_patterns or [
-                "transformer.*attn",
-                "transformer.*cross_attn",
-                "transformer.*context",
-                "transformer.*txt",
-                "context_embedder",
-                "conditioning_bridge",
+                "*",
             ],
             exclude_module_patterns=args.module_exclude_patterns or [
                 "vae",
@@ -581,12 +569,7 @@ def main() -> None:
 
     if args.command == "inspect-targets":
         include_patterns = args.module_include_patterns or [
-            "transformer.*attn",
-            "transformer.*cross_attn",
-            "transformer.*context",
-            "transformer.*txt",
-            "context_embedder",
-            "conditioning_bridge",
+            "*"
         ]
         exclude_patterns = args.module_exclude_patterns or [
             "vae",
