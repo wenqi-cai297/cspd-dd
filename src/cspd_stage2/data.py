@@ -358,7 +358,7 @@ def _build_pairing_summary(
     counts_by_match_strategy: dict[str, int] = {}
     counts_by_dataset_archetype: dict[str, int] = {}
     counts_by_render_archetype: dict[str, int] = {}
-    num_pairs_with_archetype_source_mismatch = 0
+    num_pairs_with_dataset_render_archetype_mismatch = 0
     for pair in pairs:
         counts_by_class[pair.class_name_raw] = counts_by_class.get(pair.class_name_raw, 0) + 1
         counts_by_archetype[pair.archetype] = counts_by_archetype.get(pair.archetype, 0) + 1
@@ -371,7 +371,7 @@ def _build_pairing_summary(
         counts_by_dataset_archetype[dataset_archetype] = counts_by_dataset_archetype.get(dataset_archetype, 0) + 1
         counts_by_render_archetype[render_archetype] = counts_by_render_archetype.get(render_archetype, 0) + 1
         if pair.dataset_archetype and render_archetype and pair.dataset_archetype != render_archetype:
-            num_pairs_with_archetype_source_mismatch += 1
+            num_pairs_with_dataset_render_archetype_mismatch += 1
 
     return {
         "dataset_root": str(Path(dataset_root).resolve()),
@@ -388,7 +388,9 @@ def _build_pairing_summary(
         "counts_by_dataset_archetype": counts_by_dataset_archetype,
         "counts_by_render_archetype": counts_by_render_archetype,
         "archetype_count_source": "matched_stage1_render_record",
-        "num_pairs_with_archetype_source_mismatch": num_pairs_with_archetype_source_mismatch,
+        "dataset_archetype_source": "imagefolder_sample_or_class_archetype_map",
+        "render_archetype_source": "matched_stage1_render_record.archetype_or_template_family",
+        "num_pairs_with_dataset_render_archetype_mismatch": num_pairs_with_dataset_render_archetype_mismatch,
         "counts_by_match_strategy": counts_by_match_strategy,
         "strict": strict,
         "verify_images": verify_images,

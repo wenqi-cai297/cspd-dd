@@ -249,7 +249,7 @@ def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str,
     trainable_groups = list(dict.fromkeys(config.trainable_component_groups))
     frozen_groups: list[str] = []
     if config.train_transformer_core_only:
-        frozen_groups.append("non_transformer_blocks")
+        frozen_groups.append("non_transformer_top_level_modules")
     if config.freeze_text_encoder:
         frozen_groups.append("text_encoder")
     if config.freeze_vae:
@@ -550,8 +550,8 @@ def _build_trainer_plan(
         "notes": [
             "This scaffold is intentionally conservative.",
             "Stage 2 no longer means render; render belongs to Stage 1.",
-            "Current code treats Stage 2 as generative-backbone adaptation with text-conditioning focus.",
-            "Current FLUX.1 Kontext references are assumption labels for planning, not proof that module surgery is implemented.",
+            "Current code records a default policy of freezing non-transformer top-level modules and fine-tuning the full transformer.",
+            "Current FLUX.1 Kontext references are assumption labels for planning, not proof that executable module surgery or real training is implemented.",
         ],
     }
 
@@ -563,7 +563,8 @@ def _infer_backbone_assumptions(backbone_name: str) -> dict[str, Any]:
             "family": "flux_kontext",
             "notes": [
                 "Current target family is experimental FLUX.1 Kontext [dev].",
-                "Text-conditioning-related module groups are represented conservatively as planning labels/patterns.",
+                "Default Stage 2 policy is to freeze non-transformer top-level modules and fine-tune the full FluxTransformer2DModel.",
+                "If memory is insufficient, the intended fallback is conditioning-related transformer submodules only.",
             ],
         }
     return {
