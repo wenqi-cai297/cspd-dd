@@ -24,6 +24,7 @@ class BackboneLoadResult:
     family: str
     implementation_status: str
     module: Any = None
+    root_module: Any = None
     loader_name: str | None = None
     notes: list[str] | None = None
     resolved_module_name: str | None = None
@@ -539,6 +540,7 @@ def _load_diffusers_backbone(
         family=family,
         implementation_status="loaded",
         module=resolved_module,
+        root_module=pipeline,
         loader_name=loader_name,
         notes=notes,
         resolved_module_name=resolved_module_name,

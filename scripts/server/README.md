@@ -265,6 +265,17 @@ cspd-stage2 inspect-targets \
 
 If the weights are not present in the local Hugging Face cache, the command now returns an explicit real-load failure instead of a fake loaded module.
 
+When you want to review the backbone's own module names before deciding what to fine-tune, use:
+
+```bash
+bash scripts/server/dump_stage2_backbone_modules.sh \
+  black-forest-labs/FLUX.1-Kontext-dev \
+  transformer \
+  --local-files-only
+```
+
+This writes run artifacts under `runs/stage2/inspect/<backbone_slug>/<timestamp>/`, including top-level pipeline children, the selected component's direct children, the full named-modules dump, keyword-filtered text files, and `dump_summary.json`.
+
 ## Dataset assumption
 
 All Stage 1 run scripts assume an ImageFolder-style dataset layout:

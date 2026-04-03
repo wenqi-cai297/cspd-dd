@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
+from typing import Any
 
+from cspd_stage2.backbone import load_module_from_reference, load_real_backbone_module
 from cspd_stage2.training import (
     AdapterPlan,
     Stage2TrainConfig,
@@ -242,6 +245,67 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--adapter-alpha", type=float, default=16.0, help="Adapter alpha for optional injection")
     inspect_parser.add_argument("--adapter-dropout", type=float, default=0.0, help="Adapter dropout for optional injection")
     inspect_parser.add_argument("--adapter-bias", default="none", help="Adapter bias label for metadata")
+
+    dump_parser = subparsers.add_parser(
+        "dump-modules",
+        help="Dump real loaded backbone module names to text files for later trainable-component review",
+    )
+    dump_parser.add_argument("--backbone-name", default="black-forest-labs/FLUX.1-Kontext-dev")
+    dump_parser.add_argument(
+        "--module-reference",
+        default=None,
+        help="Optional Python object reference in the form package.module:object_or_factory instead of loading a real backbone",
+    )
+    dump_parser.add_argument(
+        "--load-backbone",
+        action="store_true",
+        help="Load the real backbone through the Stage 2 loader instead of requiring --module-reference",
+    )
+    dump_parser.add_argument("--output-dir", required=True, help="Directory where dump text/json artifacts should be written")
+    dump_parser.add_argument(
+        "--torch-dtype",
+        default="bfloat16",
+        help="Torch dtype label used when attempting a real diffusers backbone load",
+    )
+    dump_parser.add_argument(
+        "--device",
+        default=None,
+        help="Optional device passed to pipeline.to(...) after a real load, e.g. cuda or cpu",
+    )
+    dump_parser.add_argument(
+        "--device-map",
+        default=None,
+        help="Optional device_map forwarded to diffusers from_pretrained when attempting a real load",
+    )
+    dump_parser.add_argument(
+        "--local-files-only",
+        action="store_true",
+        help="Require real backbone loads to use only the local Hugging Face cache",
+    )
+    dump_parser.add_argument(
+        "--component",
+        default=None,
+        help="Optional component name to inspect from a real loaded backbone, e.g. transformer or text_encoder",
+    )
+    dump_parser.add_argument(
+        "--keyword",
+        action="append",
+        dest="keywords",
+        default=None,
+        help="Keyword filter for a focused module-name text dump; may be repeated",
+    )
+    dump_parser.add_argument(
+        "--module-limit",
+        type=int,
+        default=None,
+        help="Optional limit for the full named_modules dump; defaults to all modules",
+    )
+    dump_parser.add_argument(
+        "--child-limit",
+        type=int,
+        default=None,
+        help="Optional limit for named_children dumps; defaults to all children",
+    )
     return parser
 
 
@@ -328,6 +392,128 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
     )
 
 
+def _named_children_lines(module: Any, *, limit: int | None = None) -> list[str]:
+    if not hasattr(module, "named_children"):
+        return []
+    lines: list[str] = []
+    for index, (name, child) in enumerate(module.named_children()):
+        if limit is not None and index >= limit:
+            break
+        lines.append(f"{name}\t{type(child).__name__}")
+    return lines
+
+
+def _named_modules_lines(module: Any, *, limit: int | None = None) -> list[str]:
+    if not hasattr(module, "named_modules"):
+        return []
+    lines: list[str] = []
+    for index, (name, child) in enumerate(module.named_modules()):
+        if limit is not None and index >= limit:
+            break
+        qualified_name = name or "<root>"
+        lines.append(f"{qualified_name}\t{type(child).__name__}")
+    return lines
+
+
+def _keyword_filtered_lines(lines: list[str], keywords: list[str]) -> dict[str, list[str]]:
+    lowered_pairs = [(keyword, keyword.lower()) for keyword in keywords]
+    result: dict[str, list[str]] = {}
+    for original_keyword, lowered_keyword in lowered_pairs:
+        result[original_keyword] = [line for line in lines if lowered_keyword in line.lower()]
+    return result
+
+
+def _write_lines(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = "\n".join(lines)
+    if content:
+        content += "\n"
+    path.write_text(content, encoding="utf-8")
+
+
+def _run_dump_modules(args: argparse.Namespace) -> dict[str, Any]:
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    keywords = args.keywords or ["context", "embed", "cond", "attn", "cross", "proj", "txt", "block"]
+
+    if args.load_backbone:
+        load_result = load_real_backbone_module(
+            args.backbone_name,
+            torch_dtype=args.torch_dtype,
+            device=args.device,
+            device_map=args.device_map,
+            local_files_only=args.local_files_only,
+            component=args.component,
+            allow_unimplemented=False,
+        )
+        root_module = load_result.root_module or load_result.module
+        focus_module = load_result.module
+        focus_module_name = load_result.resolved_module_name or args.component or "resolved_module"
+        load_summary = {
+            "loader": load_result.loader_name,
+            "loader_status": load_result.implementation_status,
+            "loader_notes": list(load_result.notes or []),
+            "resolved_module_name": load_result.resolved_module_name,
+            "resolved_module_type": load_result.resolved_module_type,
+            "local_files_only": args.local_files_only,
+            "torch_dtype": args.torch_dtype,
+            "device": args.device,
+            "device_map": args.device_map,
+            "component": args.component,
+        }
+        module_reference = None
+    else:
+        if not args.module_reference:
+            raise ValueError("module_reference is required unless load_backbone=True")
+        focus_module = load_module_from_reference(args.module_reference)
+        root_module = focus_module
+        focus_module_name = args.component or "module_reference"
+        load_summary = None
+        module_reference = args.module_reference
+
+    root_children_lines = _named_children_lines(root_module, limit=args.child_limit)
+    focus_children_lines = _named_children_lines(focus_module, limit=args.child_limit)
+    focus_module_lines = _named_modules_lines(focus_module, limit=args.module_limit)
+    filtered = _keyword_filtered_lines(focus_module_lines, keywords)
+
+    _write_lines(output_dir / "pipeline_named_children.txt", root_children_lines)
+    _write_lines(output_dir / f"{focus_module_name}_named_children.txt", focus_children_lines)
+    _write_lines(output_dir / f"{focus_module_name}_named_modules.txt", focus_module_lines)
+    for keyword, matched_lines in filtered.items():
+        safe_keyword = keyword.replace("/", "_").replace("\\", "_").replace(" ", "_")
+        _write_lines(output_dir / "filtered" / f"keyword_{safe_keyword}.txt", matched_lines)
+
+    summary = {
+        "backbone_name": args.backbone_name,
+        "module_reference": module_reference,
+        "loaded_backbone": bool(args.load_backbone),
+        "load_summary": load_summary,
+        "output_dir": str(output_dir.resolve()),
+        "focus_module_name": focus_module_name,
+        "focus_module_type": type(focus_module).__name__,
+        "root_module_type": type(root_module).__name__,
+        "keywords": list(keywords),
+        "artifacts": {
+            "pipeline_named_children": str((output_dir / "pipeline_named_children.txt").resolve()),
+            "focus_named_children": str((output_dir / f"{focus_module_name}_named_children.txt").resolve()),
+            "focus_named_modules": str((output_dir / f"{focus_module_name}_named_modules.txt").resolve()),
+            "filtered_dir": str((output_dir / "filtered").resolve()),
+        },
+        "counts": {
+            "pipeline_named_children": len(root_children_lines),
+            "focus_named_children": len(focus_children_lines),
+            "focus_named_modules": len(focus_module_lines),
+            "filtered_matches": {keyword: len(lines) for keyword, lines in filtered.items()},
+        },
+        "notes": [
+            "Use pipeline_named_children.txt to see large functional components exposed by the loaded model.",
+            "Use the focus-module named_modules dump plus filtered keyword files to decide which conditioning-related modules to tune.",
+        ],
+    }
+    (output_dir / "dump_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return summary
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -376,6 +562,11 @@ def main() -> None:
             local_files_only=args.local_files_only,
             component=args.component,
         )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "dump-modules":
+        summary = _run_dump_modules(args)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
 

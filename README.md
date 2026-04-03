@@ -163,6 +163,24 @@ cspd-stage2 inspect-targets \
 
 If the model weights are not cached locally, or Hugging Face access/downloads are unavailable, the command reports the real runtime failure instead of pretending the backbone was loaded.
 
+When you want to inspect the model's own module names before choosing trainable component groups, use the new dump command:
+
+```bash
+cspd-stage2 dump-modules \
+  --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
+  --load-backbone \
+  --component transformer \
+  --output-dir runs/stage2/inspect/flux_dev/manual_dump \
+  --local-files-only
+```
+
+This writes:
+- `pipeline_named_children.txt` for large top-level functional components
+- `<component>_named_children.txt` for the selected focus module's direct children
+- `<component>_named_modules.txt` for the full focus-module tree
+- `filtered/keyword_*.txt` for quick keyword-focused review (for example `context`, `embed`, `attn`, `proj`)
+- `dump_summary.json` for the artifact index and counts
+
 If you use the provided shell helpers, the workflow can be driven end-to-end from prep through final Stage 1 canonical render, then into Stage 2 run scaffolding. The full workflow script uses only a small mock smoke subset by default (first 3 classes, first 10 images per class), and also supports `--skip-smoke`.
 
 For routine ImageNet-1k / Imagenette reruns, you usually do not need to rerun Prep if you are happy using the repo-bundled `classes.json` plus `configs/stage1/class_to_archetype_imagenet1k_manual.json`.
