@@ -175,7 +175,8 @@ cspd-stage2 dump-modules \
 ```
 
 This writes:
-- `pipeline_named_children.txt` for large top-level functional components
+- `pipeline_top_level_components.txt` for explicit pipeline-level components (for example `transformer`, `vae`, `text_encoder` when exposed)
+- `pipeline_named_children.txt` for the raw pipeline `named_children()` view
 - `<component>_named_children.txt` for the selected focus module's direct children
 - `<component>_named_modules.txt` for the full focus-module tree
 - `filtered/keyword_*.txt` for quick keyword-focused review (for example `context`, `embed`, `attn`, `proj`)

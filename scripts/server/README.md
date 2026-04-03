@@ -274,7 +274,7 @@ bash scripts/server/dump_stage2_backbone_modules.sh \
   --local-files-only
 ```
 
-This writes run artifacts under `runs/stage2/inspect/<backbone_slug>/<timestamp>/`, including top-level pipeline children, the selected component's direct children, the full named-modules dump, keyword-filtered text files, and `dump_summary.json`.
+This writes run artifacts under `runs/stage2/inspect/<backbone_slug>/<timestamp>/`, including `pipeline_top_level_components.txt` for explicit pipeline-level components, `pipeline_named_children.txt` for the raw top-level child view, the selected component's direct children, the full named-modules dump, keyword-filtered text files, and `dump_summary.json`.
 
 ## Dataset assumption
 

@@ -403,6 +403,57 @@ def _named_children_lines(module: Any, *, limit: int | None = None) -> list[str]
     return lines
 
 
+def _top_level_component_lines(module: Any, *, limit: int | None = None) -> list[str]:
+    common_component_names = [
+        "transformer",
+        "transformer_2d",
+        "unet",
+        "vae",
+        "text_encoder",
+        "text_encoder_2",
+        "image_encoder",
+        "safety_checker",
+        "scheduler",
+        "tokenizer",
+        "tokenizer_2",
+        "feature_extractor",
+    ]
+
+    seen: set[str] = set()
+    lines: list[str] = []
+
+    def maybe_add(name: str, value: Any) -> None:
+        if name in seen or value is None:
+            return
+        seen.add(name)
+        lines.append(f"{name}\t{type(value).__name__}")
+
+    for name in common_component_names:
+        maybe_add(name, getattr(module, name, None))
+        if limit is not None and len(lines) >= limit:
+            return lines[:limit]
+
+    children = _named_children_lines(module, limit=None)
+    for line in children:
+        name = line.split("\t", 1)[0]
+        if name in seen:
+            continue
+        lines.append(line)
+        seen.add(name)
+        if limit is not None and len(lines) >= limit:
+            return lines[:limit]
+
+    if not lines and hasattr(module, "components"):
+        components = getattr(module, "components")
+        if isinstance(components, dict):
+            for name, value in components.items():
+                maybe_add(str(name), value)
+                if limit is not None and len(lines) >= limit:
+                    return lines[:limit]
+
+    return lines
+
+
 def _named_modules_lines(module: Any, *, limit: int | None = None) -> list[str]:
     if not hasattr(module, "named_modules"):
         return []
@@ -471,11 +522,13 @@ def _run_dump_modules(args: argparse.Namespace) -> dict[str, Any]:
         load_summary = None
         module_reference = args.module_reference
 
+    pipeline_top_level_lines = _top_level_component_lines(root_module, limit=args.child_limit)
     root_children_lines = _named_children_lines(root_module, limit=args.child_limit)
     focus_children_lines = _named_children_lines(focus_module, limit=args.child_limit)
     focus_module_lines = _named_modules_lines(focus_module, limit=args.module_limit)
     filtered = _keyword_filtered_lines(focus_module_lines, keywords)
 
+    _write_lines(output_dir / "pipeline_top_level_components.txt", pipeline_top_level_lines)
     _write_lines(output_dir / "pipeline_named_children.txt", root_children_lines)
     _write_lines(output_dir / f"{focus_module_name}_named_children.txt", focus_children_lines)
     _write_lines(output_dir / f"{focus_module_name}_named_modules.txt", focus_module_lines)
@@ -494,19 +547,22 @@ def _run_dump_modules(args: argparse.Namespace) -> dict[str, Any]:
         "root_module_type": type(root_module).__name__,
         "keywords": list(keywords),
         "artifacts": {
+            "pipeline_top_level_components": str((output_dir / "pipeline_top_level_components.txt").resolve()),
             "pipeline_named_children": str((output_dir / "pipeline_named_children.txt").resolve()),
             "focus_named_children": str((output_dir / f"{focus_module_name}_named_children.txt").resolve()),
             "focus_named_modules": str((output_dir / f"{focus_module_name}_named_modules.txt").resolve()),
             "filtered_dir": str((output_dir / "filtered").resolve()),
         },
         "counts": {
+            "pipeline_top_level_components": len(pipeline_top_level_lines),
             "pipeline_named_children": len(root_children_lines),
             "focus_named_children": len(focus_children_lines),
             "focus_named_modules": len(focus_module_lines),
             "filtered_matches": {keyword: len(lines) for keyword, lines in filtered.items()},
         },
         "notes": [
-            "Use pipeline_named_children.txt to see large functional components exposed by the loaded model.",
+            "Use pipeline_top_level_components.txt to see large functional components exposed by the loaded pipeline.",
+            "Use pipeline_named_children.txt as the raw named_children view when the pipeline exposes it.",
             "Use the focus-module named_modules dump plus filtered keyword files to decide which conditioning-related modules to tune.",
         ],
     }
