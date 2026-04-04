@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+import numpy as np
 from PIL import Image
 
 from cspd_stage1.io_utils import write_json, write_jsonl
@@ -98,12 +99,14 @@ class ManifestPaths:
 class Stage2PairedDataset:
     """Minimal dataset wrapper for downstream Stage 2 trainers.
 
-    This intentionally returns plain Python dicts and PIL images rather than
-    pretending a specific FLUX Kontext pipeline is wired up in this repo.
+    This returns real image/caption pairs from Stage 1 render outputs.
+    When a resolution is provided, images are resized/cropped into a tensor
+    suitable for a real Stage 2 training loop.
     """
 
-    def __init__(self, pairs: Iterable[Stage2PairRecord]):
+    def __init__(self, pairs: Iterable[Stage2PairRecord], *, resolution: int | None = None):
         self._pairs = list(pairs)
+        self._resolution = resolution
 
     def __len__(self) -> int:
         return len(self._pairs)
@@ -111,7 +114,7 @@ class Stage2PairedDataset:
     def __getitem__(self, index: int) -> dict[str, Any]:
         pair = self._pairs[index]
         image = Image.open(pair.image_path).convert("RGB")
-        return {
+        item = {
             "pair_id": pair.pair_id,
             "record_id": pair.record_id,
             "sample_id": pair.sample_id,
@@ -128,6 +131,9 @@ class Stage2PairedDataset:
             "class_name_raw": pair.class_name_raw,
             "archetype": pair.archetype,
         }
+        if self._resolution is not None:
+            item["pixel_values"] = pil_to_normalized_tensor(image, self._resolution)
+        return item
 
 
 def build_stage2_pairs(
@@ -425,6 +431,69 @@ def _normalize_relpath(value: str | None) -> str | None:
     if not value:
         return None
     return value.replace('\\', '/').lstrip('./')
+
+
+def make_stage2_dataloader(
+    pairs: Iterable[Stage2PairRecord],
+    *,
+    resolution: int,
+    batch_size: int,
+    num_workers: int = 0,
+    shuffle: bool = True,
+) -> Any:
+    import torch
+    from torch.utils.data import DataLoader
+
+    dataset = Stage2PairedDataset(pairs, resolution=resolution)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=_collate_stage2_batch,
+    )
+
+
+def pil_to_normalized_tensor(image: Image.Image, resolution: int) -> Any:
+    image = image.convert("RGB")
+    width, height = image.size
+    scale = float(resolution) / float(min(width, height))
+    resized_width = max(int(round(width * scale)), resolution)
+    resized_height = max(int(round(height * scale)), resolution)
+    image = image.resize((resized_width, resized_height), Image.BICUBIC)
+
+    left = max((resized_width - resolution) // 2, 0)
+    top = max((resized_height - resolution) // 2, 0)
+    image = image.crop((left, top, left + resolution, top + resolution))
+
+    array = np.asarray(image, dtype=np.float32) / 255.0
+    array = (array * 2.0) - 1.0
+    array = np.transpose(array, (2, 0, 1))
+
+    import torch
+
+    return torch.from_numpy(array)
+
+
+
+def _collate_stage2_batch(items: list[dict[str, Any]]) -> dict[str, Any]:
+    import torch
+
+    batch = {
+        "pair_id": [item["pair_id"] for item in items],
+        "record_id": [item["record_id"] for item in items],
+        "sample_id": [item["sample_id"] for item in items],
+        "image_path": [item["image_path"] for item in items],
+        "caption": [item["caption"] for item in items],
+        "conditioning_text": [item["conditioning_text"] for item in items],
+        "class_name": [item["class_name"] for item in items],
+        "archetype": [item["archetype"] for item in items],
+    }
+    pixel_values = [item.get("pixel_values") for item in items if item.get("pixel_values") is not None]
+    if len(pixel_values) == len(items):
+        batch["pixel_values"] = torch.stack(pixel_values, dim=0)
+    return batch
+
 
 
 def _probe_image_size(path: str | Path) -> tuple[int | None, int | None]:
