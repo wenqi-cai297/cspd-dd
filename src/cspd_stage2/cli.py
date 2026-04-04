@@ -181,6 +181,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Drop the last incomplete batch when building the Stage 2 dataloader",
     )
     train_parser.add_argument(
+        "--disable-gradient-checkpointing",
+        action="store_true",
+        help="Disable the default attempt to enable gradient checkpointing on the loaded FLUX transformer when supported",
+    )
+    train_parser.add_argument(
+        "--disable-keep-frozen-modules-on-cpu-until-needed",
+        action="store_true",
+        help="Disable the default memory-saving policy that keeps frozen VAE/text components on CPU until their encode step",
+    )
+    train_parser.add_argument(
+        "--disable-offload-frozen-modules-after-step",
+        action="store_true",
+        help="Disable the default policy that offloads frozen VAE/text components back to CPU after their no-grad encode step",
+    )
+    train_parser.add_argument(
         "--inspect-limit",
         type=int,
         default=200,
@@ -395,6 +410,9 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         use_accelerate=not args.disable_accelerate,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         dataloader_drop_last=args.dataloader_drop_last,
+        enable_gradient_checkpointing=not args.disable_gradient_checkpointing,
+        keep_frozen_modules_on_cpu_until_needed=not args.disable_keep_frozen_modules_on_cpu_until_needed,
+        offload_frozen_modules_after_step=not args.disable_offload_frozen_modules_after_step,
     )
     config.adapter_plan.target_module_patterns = (
         config.adapter_plan.target_module_patterns or resolve_effective_module_selection(config)["effective_include_patterns"]

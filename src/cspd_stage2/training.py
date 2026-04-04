@@ -145,6 +145,9 @@ class Stage2TrainConfig:
     use_accelerate: bool = True
     gradient_accumulation_steps: int = 1
     dataloader_drop_last: bool = False
+    enable_gradient_checkpointing: bool = True
+    keep_frozen_modules_on_cpu_until_needed: bool = True
+    offload_frozen_modules_after_step: bool = True
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
@@ -422,7 +425,37 @@ def run_real_stage2_flux_training(
     )
     transformer = pipeline.transformer
     transformer.train()
-    _move_stage2_nontransformer_modules_to_device(pipeline, device=device, train_dtype=train_dtype)
+    gradient_checkpointing = {
+        "enabled": False,
+        "method": None,
+        "attempted_methods": [],
+        "reason": "disabled_by_config",
+    }
+    if config.enable_gradient_checkpointing:
+        gradient_checkpointing = _enable_transformer_gradient_checkpointing(transformer)
+    _set_module_mode(getattr(pipeline, "vae", None), training=False)
+    _set_module_mode(getattr(pipeline, "text_encoder", None), training=False)
+    _set_module_mode(getattr(pipeline, "text_encoder_2", None), training=False)
+    _set_module_mode(getattr(pipeline, "image_encoder", None), training=False)
+    if config.keep_frozen_modules_on_cpu_until_needed:
+        _move_named_pipeline_components(
+            pipeline,
+            component_names=["vae", "text_encoder", "text_encoder_2", "image_encoder"],
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+    _append_memory_event(
+        artifact_path=memory_log_path,
+        accelerator=accelerator,
+        device=device,
+        phase="after_gradient_checkpointing_setup",
+        torch_module=torch,
+        extra={
+            "gradient_checkpointing": gradient_checkpointing,
+            "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
+            "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step,
+        },
+    )
 
     optimizer = torch.optim.AdamW(
         (parameter for parameter in transformer.parameters() if parameter.requires_grad),
@@ -452,6 +485,8 @@ def run_real_stage2_flux_training(
             "num_workers": config.num_workers,
             "gradient_accumulation_steps": max(config.gradient_accumulation_steps, 1),
             "dataloader_batches_per_epoch": len(dataloader) if hasattr(dataloader, "__len__") else None,
+            "gradient_checkpointing": gradient_checkpointing,
+            "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
         },
     )
 
@@ -496,6 +531,8 @@ def run_real_stage2_flux_training(
                 epoch=epoch + 1,
                 global_step=global_step + 1,
                 optimizer_step=optimizer_step_count + 1,
+                keep_frozen_modules_on_cpu_until_needed=config.keep_frozen_modules_on_cpu_until_needed,
+                offload_frozen_modules_after_step=config.offload_frozen_modules_after_step,
             )
             global_step += 1
             sync_gradients = accelerator.sync_gradients if accelerator is not None else True
@@ -563,6 +600,11 @@ def run_real_stage2_flux_training(
             "distributed_type": str(getattr(getattr(accelerator, "state", None), "distributed_type", "no")) if accelerator is not None else "no",
             "requested_device_map_ignored": bool(config.backbone_device_map),
         },
+        "gradient_checkpointing": gradient_checkpointing,
+        "memory_strategy": {
+            "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
+            "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step,
+        },
         "dataloader_batches_per_epoch": steps_per_epoch,
         "forward_steps": global_step,
         "optimizer_steps": optimizer_step_count,
@@ -597,6 +639,8 @@ def _run_real_flux_train_step(
     epoch: int,
     global_step: int,
     optimizer_step: int,
+    keep_frozen_modules_on_cpu_until_needed: bool,
+    offload_frozen_modules_after_step: bool,
 ) -> Any:
     import torch
 
@@ -617,9 +661,22 @@ def _run_real_flux_train_step(
             extra={
                 "pixel_values_shape": list(pixel_values.shape),
                 "conditioning_batch_size": len(batch.get("conditioning_text", [])),
+                "keep_frozen_modules_on_cpu_until_needed": keep_frozen_modules_on_cpu_until_needed,
             },
         )
         with torch.no_grad():
+            if keep_frozen_modules_on_cpu_until_needed:
+                _move_named_pipeline_components(pipeline, component_names=["vae"], device=device, dtype=train_dtype)
+                _append_memory_event(
+                    artifact_path=memory_log_path,
+                    accelerator=accelerator,
+                    device=device,
+                    phase="after_vae_move_to_device",
+                    torch_module=torch,
+                    epoch=epoch,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                )
             vae_dtype = next(pipeline.vae.parameters()).dtype
             vae_device = next(pipeline.vae.parameters()).device
             latents = pipeline.vae.encode(pixel_values.to(device=vae_device, dtype=vae_dtype)).latent_dist.sample()
@@ -636,6 +693,35 @@ def _run_real_flux_train_step(
                 optimizer_step=optimizer_step,
                 extra={"latents_shape": list(latents.shape)},
             )
+            if keep_frozen_modules_on_cpu_until_needed and offload_frozen_modules_after_step:
+                _move_named_pipeline_components(pipeline, component_names=["vae"], device=torch.device("cpu"), dtype=torch.float32)
+                _append_memory_event(
+                    artifact_path=memory_log_path,
+                    accelerator=accelerator,
+                    device=device,
+                    phase="after_vae_offload_to_cpu",
+                    torch_module=torch,
+                    epoch=epoch,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                )
+            if keep_frozen_modules_on_cpu_until_needed:
+                _move_named_pipeline_components(
+                    pipeline,
+                    component_names=["text_encoder", "text_encoder_2", "image_encoder"],
+                    device=device,
+                    dtype=train_dtype,
+                )
+                _append_memory_event(
+                    artifact_path=memory_log_path,
+                    accelerator=accelerator,
+                    device=device,
+                    phase="after_prompt_modules_move_to_device",
+                    torch_module=torch,
+                    epoch=epoch,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                )
             _append_memory_event(
                 artifact_path=memory_log_path,
                 accelerator=accelerator,
@@ -672,6 +758,23 @@ def _run_real_flux_train_step(
                     "text_ids_shape": list(text_ids.shape),
                 },
             )
+            if keep_frozen_modules_on_cpu_until_needed and offload_frozen_modules_after_step:
+                _move_named_pipeline_components(
+                    pipeline,
+                    component_names=["text_encoder", "text_encoder_2", "image_encoder"],
+                    device=torch.device("cpu"),
+                    dtype=torch.float32,
+                )
+                _append_memory_event(
+                    artifact_path=memory_log_path,
+                    accelerator=accelerator,
+                    device=device,
+                    phase="after_prompt_modules_offload_to_cpu",
+                    torch_module=torch,
+                    epoch=epoch,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                )
 
         packed_latents = pipeline._pack_latents(
             latents,
@@ -792,6 +895,67 @@ def _move_stage2_nontransformer_modules_to_device(pipeline: Any, *, device: Any,
         if component_name != "image_encoder":
             kwargs["dtype"] = train_dtype
         component.to(**kwargs)
+
+
+
+def _set_module_mode(module: Any, *, training: bool) -> None:
+    if module is None or not hasattr(module, "train"):
+        return
+    module.train(training)
+
+
+
+def _move_named_pipeline_components(
+    pipeline: Any,
+    *,
+    component_names: list[str],
+    device: Any,
+    dtype: Any | None,
+) -> None:
+    for component_name in component_names:
+        component = getattr(pipeline, component_name, None)
+        if component is None or not hasattr(component, "to"):
+            continue
+        kwargs: dict[str, Any] = {"device": device}
+        if dtype is not None and component_name != "image_encoder":
+            kwargs["dtype"] = dtype
+        component.to(**kwargs)
+
+
+
+def _enable_transformer_gradient_checkpointing(transformer: Any) -> dict[str, Any]:
+    methods = [
+        "enable_gradient_checkpointing",
+        "gradient_checkpointing_enable",
+    ]
+    attempted_methods: list[str] = []
+    for method_name in methods:
+        method = getattr(transformer, method_name, None)
+        if callable(method):
+            attempted_methods.append(method_name)
+            method()
+            return {
+                "enabled": True,
+                "method": method_name,
+                "attempted_methods": attempted_methods,
+            }
+    if hasattr(transformer, "gradient_checkpointing"):
+        attempted_methods.append("gradient_checkpointing_attr")
+        try:
+            setattr(transformer, "gradient_checkpointing", True)
+            return {
+                "enabled": True,
+                "method": "gradient_checkpointing_attr",
+                "attempted_methods": attempted_methods,
+            }
+        except Exception:
+            pass
+    return {
+        "enabled": False,
+        "method": None,
+        "attempted_methods": attempted_methods,
+        "reason": "transformer_exposes_no_supported_gradient_checkpointing_interface",
+    }
 
 
 
@@ -1023,6 +1187,11 @@ def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str,
             "and the real training path applies those selectors to requires_grad when using the conditioning-focused "
             "submodule path instead of full-transformer training."
         ),
+        "memory_strategy": {
+            "enable_gradient_checkpointing": config.enable_gradient_checkpointing,
+            "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
+            "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step,
+        },
     }
 
 
@@ -1306,7 +1475,10 @@ def _build_trainer_plan(
             "Stage 2 no longer means render; render belongs to Stage 1.",
             "Current code records a default policy of freezing non-transformer top-level modules and fine-tuning the full transformer.",
             "When a conditioning-focused transformer submodule group is selected, the real training path now applies that selection to requires_grad before optimization.",
+            "The real training path now attempts transformer gradient checkpointing when the loaded FLUX transformer exposes a supported interface.",
+            "Frozen VAE/text components are kept on CPU until first use by default, then optionally offloaded back to CPU after encode so accelerate.prepare does not inherit their device residency up front.",
             "Real accelerate-based diffusers-backed FLUX-family training is wired conservatively around packed VAE latents and canonical-caption prompt encoding, but successful execution still depends on the local runtime actually loading the requested backbone.",
+            "Heavier optimizer/state sharding or FSDP-style offload is still not implemented here.",
         ],
     }
 
