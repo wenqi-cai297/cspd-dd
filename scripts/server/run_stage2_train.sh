@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Run CSPD Stage 2 v1 training scaffold.
 # Usage:
-#   bash scripts/server/run_stage2_train.sh <dataset_root> <stage1_render_records_jsonl> [backbone_name] [batch_size] [epochs]
+#   bash scripts/server/run_stage2_train.sh <dataset_root> <stage1_render_records_jsonl> [backbone_name] [batch_size] [epochs] [extra args...]
 # Example:
 #   bash scripts/server/run_stage2_train.sh /data/imagenette/train runs/stage1/render/imagenette/qwen_local/2026-04-02_010203/records.jsonl
 #
@@ -20,12 +20,30 @@ fi
 
 DATASET_ROOT="$1"
 RENDER_INPUT="$2"
-BACKBONE_NAME="${3:-black-forest-labs/FLUX.1-Kontext-dev}"
-BATCH_SIZE="${4:-4}"
-EPOCHS="${5:-1}"
-shift $(( $# >= 5 ? 5 : $# )) || true
-EXTRA_ARGS=("$@")
+shift 2
+
+BACKBONE_NAME="black-forest-labs/FLUX.1-Kontext-dev"
+BATCH_SIZE="4"
+EPOCHS="1"
+EXTRA_ARGS=()
 ENV_NAME="cspd-dd"
+
+if [[ $# -gt 0 && "$1" != -* ]]; then
+  BACKBONE_NAME="$1"
+  shift
+fi
+
+if [[ $# -gt 0 && "$1" != -* ]]; then
+  BATCH_SIZE="$1"
+  shift
+fi
+
+if [[ $# -gt 0 && "$1" != -* ]]; then
+  EPOCHS="$1"
+  shift
+fi
+
+EXTRA_ARGS=("$@")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
