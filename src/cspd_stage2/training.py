@@ -463,6 +463,7 @@ def _build_stage2_run_summary(
             "trainer_plan": str((run_dir / "trainer_plan.json").resolve()),
             "run_summary": str((run_dir / "stage2_run_summary.json").resolve()),
             "memory_log_pattern": str((run_dir / f"rank*_{config.memory_log_artifact_name}").resolve()),
+            "component_move_diagnostics_pattern": str((run_dir / "rank*_component_move_diagnostics.jsonl").resolve()),
         },
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
@@ -555,6 +556,107 @@ def _append_memory_event(
 
 
 
+def _append_jsonl_event(artifact_path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_payload = _safe_jsonable(payload)
+    with artifact_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(safe_payload, ensure_ascii=False) + "\n")
+    return safe_payload
+
+
+
+def _move_diagnostic_target_label(device: Any, dtype: Any | None) -> str:
+    if dtype is None:
+        return str(device)
+    return f"{device} ({dtype})"
+
+
+
+def _move_component_with_diagnostics(
+    *,
+    component: Any,
+    component_name: str,
+    action: str,
+    device: Any,
+    dtype: Any | None,
+    torch_module: Any,
+    accelerator: Any | None = None,
+    runtime_device: Any | None = None,
+    memory_log_path: Path | None = None,
+    component_move_log_path: Path | None = None,
+    epoch: int | None = None,
+    global_step: int | None = None,
+    optimizer_step: int | None = None,
+    move_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    diagnostic_device = device if getattr(device, "type", None) == "cuda" else runtime_device
+    event: dict[str, Any] = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "component_name": component_name,
+        "action": action,
+        "target_device": str(device),
+        "target_dtype": str(dtype) if dtype is not None else None,
+        "target": _move_diagnostic_target_label(device, dtype),
+        "memory_before": _collect_cuda_memory_stats(torch_module, diagnostic_device),
+    }
+    if move_state is not None:
+        move_state["last_component_move_attempt"] = event
+    kwargs: dict[str, Any] = {"device": device}
+    if dtype is not None and component_name != "image_encoder":
+        kwargs["dtype"] = dtype
+    try:
+        component.to(**kwargs)
+        event["status"] = "ok"
+        event["memory_after"] = _collect_cuda_memory_stats(torch_module, diagnostic_device)
+    except Exception as exc:
+        event["status"] = "failed"
+        event["memory_after"] = _collect_cuda_memory_stats(torch_module, diagnostic_device)
+        event["error"] = {
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+        if move_state is not None:
+            move_state["last_component_move_attempt"] = event
+            move_state.setdefault("component_move_failures", []).append(event)
+        if memory_log_path is not None and runtime_device is not None:
+            _append_memory_event(
+                artifact_path=memory_log_path,
+                accelerator=accelerator,
+                device=runtime_device,
+                phase=f"component_move_failed:{component_name}:{action}",
+                torch_module=torch_module,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                extra={"component_move": event},
+            )
+        if component_move_log_path is not None:
+            _append_jsonl_event(component_move_log_path, event)
+        raise RuntimeError(
+            f"Failed during pipeline component move: component={component_name}, action={action}, target={event['target']}. Original error: {exc}"
+        ) from exc
+    if move_state is not None:
+        move_state["last_component_move_attempt"] = event
+        move_state.setdefault("component_move_events", []).append(event)
+    if memory_log_path is not None and runtime_device is not None:
+        _append_memory_event(
+            artifact_path=memory_log_path,
+            accelerator=accelerator,
+            device=runtime_device,
+            phase=f"component_move_ok:{component_name}:{action}",
+            torch_module=torch_module,
+            epoch=epoch,
+            global_step=global_step,
+            optimizer_step=optimizer_step,
+            extra={"component_move": event},
+        )
+    if component_move_log_path is not None:
+        _append_jsonl_event(component_move_log_path, event)
+    return event
+
+
+
 def run_real_stage2_flux_training(
     *,
     config: Stage2TrainConfig,
@@ -587,6 +689,7 @@ def run_real_stage2_flux_training(
     total_optimizer_steps = None
     last_known_phase = "preflight"
     phase_history: list[str] = []
+    component_move_state: dict[str, Any] = {"component_move_events": [], "component_move_failures": [], "last_component_move_attempt": None}
 
     def mark_phase(phase: str, *, extra: dict[str, Any] | None = None, epoch: int | None = None, global_step_value: int | None = None, optimizer_step_value: int | None = None) -> None:
         nonlocal last_known_phase
@@ -637,6 +740,7 @@ def run_real_stage2_flux_training(
         train_dtype_label = _torch_dtype_label(train_dtype)
         rank_info = _accelerator_rank_info(accelerator, device)
         memory_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_{config.memory_log_artifact_name}"
+        component_move_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_component_move_diagnostics.jsonl"
         if accelerator is not None:
             accelerator.wait_for_everyone()
         mark_phase(
@@ -707,6 +811,12 @@ def run_real_stage2_flux_training(
                 component_names=["vae", "text_encoder", "text_encoder_2", "image_encoder"],
                 device=torch.device("cpu"),
                 dtype=torch.float32,
+                torch_module=torch,
+                accelerator=accelerator,
+                runtime_device=device,
+                memory_log_path=memory_log_path,
+                component_move_log_path=component_move_log_path,
+                move_state=component_move_state,
             )
         mark_phase(
             "after_gradient_checkpointing_setup",
@@ -801,12 +911,14 @@ def run_real_stage2_flux_training(
                     train_dtype=train_dtype,
                     resolution=config.resolution,
                     memory_log_path=memory_log_path,
+                    component_move_log_path=component_move_log_path,
                     epoch=epoch + 1,
                     global_step=global_step + 1,
                     optimizer_step=optimizer_step_count + 1,
                     keep_frozen_modules_on_cpu_until_needed=config.keep_frozen_modules_on_cpu_until_needed,
                     offload_frozen_modules_after_step=config.offload_frozen_modules_after_step,
                     use_cached_prompt_embeddings=bool(config.prompt_cache_dir),
+                    move_state=component_move_state,
                 )
                 global_step += 1
                 sync_gradients = accelerator.sync_gradients if accelerator is not None else True
@@ -888,6 +1000,9 @@ def run_real_stage2_flux_training(
             "estimated_total_optimizer_steps": total_optimizer_steps,
             "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
             "memory_log_path": str(memory_log_path.resolve()) if memory_log_path is not None else None,
+            "component_move_log_path": str(component_move_log_path.resolve()) if component_move_log_path is not None else None,
+            "last_component_move_attempt": component_move_state.get("last_component_move_attempt"),
+            "component_move_failures": component_move_state.get("component_move_failures", []),
             "last_known_phase": last_known_phase,
             "phase_history": phase_history,
             "launch_notes": launch_notes,
@@ -928,6 +1043,9 @@ def run_real_stage2_flux_training(
             "estimated_total_optimizer_steps": total_optimizer_steps,
             "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
             "memory_log_path": str(memory_log_path.resolve()) if memory_log_path is not None else None,
+            "component_move_log_path": str(component_move_log_path.resolve()) if component_move_log_path is not None else None,
+            "last_component_move_attempt": component_move_state.get("last_component_move_attempt"),
+            "component_move_failures": component_move_state.get("component_move_failures", []),
             "last_known_phase": last_known_phase,
             "phase_history": phase_history,
             "failure": {
@@ -953,12 +1071,14 @@ def _run_real_flux_train_step(
     train_dtype: Any,
     resolution: int,
     memory_log_path: Path,
+    component_move_log_path: Path | None,
     epoch: int,
     global_step: int,
     optimizer_step: int,
     keep_frozen_modules_on_cpu_until_needed: bool,
     offload_frozen_modules_after_step: bool,
     use_cached_prompt_embeddings: bool,
+    move_state: dict[str, Any] | None,
 ) -> Any:
     import torch
 
@@ -984,7 +1104,21 @@ def _run_real_flux_train_step(
         )
         with torch.no_grad():
             if keep_frozen_modules_on_cpu_until_needed:
-                _move_named_pipeline_components(pipeline, component_names=["vae"], device=device, dtype=train_dtype)
+                _move_named_pipeline_components(
+                    pipeline,
+                    component_names=["vae"],
+                    device=device,
+                    dtype=train_dtype,
+                    torch_module=torch,
+                    accelerator=accelerator,
+                    runtime_device=device,
+                    memory_log_path=memory_log_path,
+                    component_move_log_path=component_move_log_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                    move_state=move_state,
+                )
                 _append_memory_event(
                     artifact_path=memory_log_path,
                     accelerator=accelerator,
@@ -1012,7 +1146,21 @@ def _run_real_flux_train_step(
                 extra={"latents_shape": list(latents.shape)},
             )
             if keep_frozen_modules_on_cpu_until_needed and offload_frozen_modules_after_step:
-                _move_named_pipeline_components(pipeline, component_names=["vae"], device=torch.device("cpu"), dtype=torch.float32)
+                _move_named_pipeline_components(
+                    pipeline,
+                    component_names=["vae"],
+                    device=torch.device("cpu"),
+                    dtype=torch.float32,
+                    torch_module=torch,
+                    accelerator=accelerator,
+                    runtime_device=device,
+                    memory_log_path=memory_log_path,
+                    component_move_log_path=component_move_log_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                    move_state=move_state,
+                )
                 _append_memory_event(
                     artifact_path=memory_log_path,
                     accelerator=accelerator,
@@ -1060,6 +1208,15 @@ def _run_real_flux_train_step(
                         component_names=["text_encoder", "text_encoder_2", "image_encoder"],
                         device=device,
                         dtype=train_dtype,
+                        torch_module=torch,
+                        accelerator=accelerator,
+                        runtime_device=device,
+                        memory_log_path=memory_log_path,
+                        component_move_log_path=component_move_log_path,
+                        epoch=epoch,
+                        global_step=global_step,
+                        optimizer_step=optimizer_step,
+                        move_state=move_state,
                     )
                     _append_memory_event(
                         artifact_path=memory_log_path,
@@ -1113,6 +1270,15 @@ def _run_real_flux_train_step(
                         component_names=["text_encoder", "text_encoder_2", "image_encoder"],
                         device=torch.device("cpu"),
                         dtype=torch.float32,
+                        torch_module=torch,
+                        accelerator=accelerator,
+                        runtime_device=device,
+                        memory_log_path=memory_log_path,
+                        component_move_log_path=component_move_log_path,
+                        epoch=epoch,
+                        global_step=global_step,
+                        optimizer_step=optimizer_step,
+                        move_state=move_state,
                     )
                     _append_memory_event(
                         artifact_path=memory_log_path,
@@ -1260,15 +1426,43 @@ def _move_named_pipeline_components(
     component_names: list[str],
     device: Any,
     dtype: Any | None,
+    torch_module: Any | None = None,
+    accelerator: Any | None = None,
+    runtime_device: Any | None = None,
+    memory_log_path: Path | None = None,
+    component_move_log_path: Path | None = None,
+    epoch: int | None = None,
+    global_step: int | None = None,
+    optimizer_step: int | None = None,
+    move_state: dict[str, Any] | None = None,
 ) -> None:
     for component_name in component_names:
         component = getattr(pipeline, component_name, None)
         if component is None or not hasattr(component, "to"):
             continue
-        kwargs: dict[str, Any] = {"device": device}
-        if dtype is not None and component_name != "image_encoder":
-            kwargs["dtype"] = dtype
-        component.to(**kwargs)
+        if torch_module is None:
+            kwargs: dict[str, Any] = {"device": device}
+            if dtype is not None and component_name != "image_encoder":
+                kwargs["dtype"] = dtype
+            component.to(**kwargs)
+            continue
+        action = "offload_to_cpu" if str(device).startswith("cpu") else "move_to_device"
+        _move_component_with_diagnostics(
+            component=component,
+            component_name=component_name,
+            action=action,
+            device=device,
+            dtype=dtype,
+            torch_module=torch_module,
+            accelerator=accelerator,
+            runtime_device=runtime_device,
+            memory_log_path=memory_log_path,
+            component_move_log_path=component_move_log_path,
+            epoch=epoch,
+            global_step=global_step,
+            optimizer_step=optimizer_step,
+            move_state=move_state,
+        )
 
 
 
