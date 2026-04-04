@@ -38,6 +38,10 @@ DEFAULT_TEXT_CONDITIONING_GROUPS = [
     "full_transformer",
 ]
 
+DEFAULT_LORA_TARGET_GROUPS = [
+    "conditioning_transformer",
+]
+
 DEFAULT_EXCLUDE_PATTERNS = [
     "vae",
     "autoencoder",
@@ -132,6 +136,7 @@ class Stage2TrainConfig:
     trainable_component_groups: list[str] = field(default_factory=lambda: list(DEFAULT_TEXT_CONDITIONING_GROUPS))
     module_include_patterns: list[str] = field(default_factory=list)
     module_exclude_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE_PATTERNS))
+    training_parameterization: str = "full"
     adapter_plan: AdapterPlan = field(default_factory=AdapterPlan)
     inspect_module_reference: str | None = None
     inspect_limit: int = 200
@@ -421,7 +426,12 @@ def run_real_stage2_flux_training(
         device=device,
         phase="after_freeze_selection",
         torch_module=torch,
-        extra={"applied_transformer_module_selection": selection_result.to_dict()},
+        extra={
+            "applied_transformer_module_selection": selection_result["selection"].to_dict(),
+            "training_parameterization": config.training_parameterization,
+            "adapter_injection": selection_result["adapter_injection"].to_dict() if selection_result["adapter_injection"] is not None else None,
+            "trainable_parameter_summary": selection_result["trainable_parameter_summary"],
+        },
     )
     transformer = pipeline.transformer
     transformer.train()
@@ -592,7 +602,10 @@ def run_real_stage2_flux_training(
         "device": str(device),
         "load_dtype": _torch_dtype_label(load_dtype),
         "train_dtype": _torch_dtype_label(train_dtype),
-        "applied_transformer_module_selection": selection_result.to_dict(),
+        "training_parameterization": config.training_parameterization,
+        "applied_transformer_module_selection": selection_result["selection"].to_dict(),
+        "adapter_injection": selection_result["adapter_injection"].to_dict() if selection_result["adapter_injection"] is not None else None,
+        "trainable_parameter_summary": selection_result["trainable_parameter_summary"],
         "accelerate": {
             "enabled": True,
             "num_processes": world_size,
@@ -1001,7 +1014,7 @@ def resolve_effective_module_selection(config: Stage2TrainConfig) -> dict[str, A
 
 
 
-def _freeze_stage2_modules(pipeline: Any, config: Stage2TrainConfig) -> Any:
+def _freeze_stage2_modules(pipeline: Any, config: Stage2TrainConfig) -> dict[str, Any]:
     for component_name in ["transformer", "text_encoder", "text_encoder_2", "vae", "image_encoder"]:
         component = getattr(pipeline, component_name, None)
         if component is None or not hasattr(component, "parameters"):
@@ -1014,33 +1027,96 @@ def _freeze_stage2_modules(pipeline: Any, config: Stage2TrainConfig) -> Any:
 
     transformer = pipeline.transformer
     selection = resolve_effective_module_selection(config)
-    if config.train_transformer_core_only:
-        for parameter in transformer.parameters():
-            parameter.requires_grad = True
-    if selection["should_apply_real_transformer_selection"]:
-        targeting = apply_trainable_parameter_selection(
+    parameterization = str(getattr(config, "training_parameterization", "full")).strip().lower()
+    adapter_injection = None
+
+    if parameterization not in {"full", "lora"}:
+        raise ValueError(f"Unsupported training_parameterization: {config.training_parameterization}")
+
+    if parameterization == "lora":
+        if str(config.adapter_plan.adapter_type).lower() != "lora":
+            raise ValueError("LoRA training_parameterization currently requires adapter_plan.adapter_type='lora'")
+        adapter_plan = config.adapter_plan
+        target_patterns = adapter_plan.target_module_patterns or selection["effective_include_patterns"]
+        adapter_injection = inject_lora_adapters(
             transformer,
-            include_patterns=selection["effective_include_patterns"],
-            exclude_patterns=selection["effective_exclude_patterns"],
+            include_patterns=target_patterns,
+            exclude_patterns=adapter_plan.exclude_module_patterns,
+            rank=adapter_plan.rank,
+            alpha=adapter_plan.alpha,
+            dropout=adapter_plan.dropout,
         )
-    else:
         targeting = inspect_target_modules(
             transformer,
-            include_patterns=selection["effective_include_patterns"],
-            exclude_patterns=selection["effective_exclude_patterns"],
+            include_patterns=target_patterns,
+            exclude_patterns=adapter_plan.exclude_module_patterns,
             limit=None,
         )
+    else:
+        if config.train_transformer_core_only:
+            for parameter in transformer.parameters():
+                parameter.requires_grad = True
+        if selection["should_apply_real_transformer_selection"]:
+            targeting = apply_trainable_parameter_selection(
+                transformer,
+                include_patterns=selection["effective_include_patterns"],
+                exclude_patterns=selection["effective_exclude_patterns"],
+            )
+        else:
+            targeting = inspect_target_modules(
+                transformer,
+                include_patterns=selection["effective_include_patterns"],
+                exclude_patterns=selection["effective_exclude_patterns"],
+                limit=None,
+            )
 
-    if not config.freeze_text_encoder:
-        for component_name in ["text_encoder", "text_encoder_2"]:
-            component = getattr(pipeline, component_name, None)
-            if component is not None and hasattr(component, "parameters"):
-                for parameter in component.parameters():
-                    parameter.requires_grad = True
-    if not config.freeze_vae and getattr(pipeline, "vae", None) is not None:
-        for parameter in pipeline.vae.parameters():
-            parameter.requires_grad = True
-    return targeting
+        if not config.freeze_text_encoder:
+            for component_name in ["text_encoder", "text_encoder_2"]:
+                component = getattr(pipeline, component_name, None)
+                if component is not None and hasattr(component, "parameters"):
+                    for parameter in component.parameters():
+                        parameter.requires_grad = True
+        if not config.freeze_vae and getattr(pipeline, "vae", None) is not None:
+            for parameter in pipeline.vae.parameters():
+                parameter.requires_grad = True
+
+    return {
+        "parameterization": parameterization,
+        "selection": targeting,
+        "adapter_injection": adapter_injection,
+        "trainable_parameter_summary": _summarize_trainable_parameters(pipeline),
+    }
+
+
+def _summarize_trainable_parameters(module: Any) -> dict[str, Any]:
+    trainable_names: list[str] = []
+    frozen_names: list[str] = []
+    lora_parameter_names: list[str] = []
+    trainable_parameter_count = 0
+    frozen_parameter_count = 0
+    lora_parameter_count = 0
+    for name, parameter in module.named_parameters():
+        count = int(parameter.numel())
+        if parameter.requires_grad:
+            trainable_names.append(name)
+            trainable_parameter_count += count
+        else:
+            frozen_names.append(name)
+            frozen_parameter_count += count
+        if ".lora_" in name or name.startswith("lora_"):
+            lora_parameter_names.append(name)
+            lora_parameter_count += count
+    non_lora_trainable_names = [name for name in trainable_names if ".lora_" not in name and not name.startswith("lora_")]
+    return {
+        "trainable_parameter_count": trainable_parameter_count,
+        "frozen_parameter_count": frozen_parameter_count,
+        "trainable_parameter_names": trainable_names,
+        "frozen_parameter_names": frozen_names,
+        "lora_parameter_count": lora_parameter_count,
+        "lora_parameter_names": lora_parameter_names,
+        "non_lora_trainable_parameter_names": non_lora_trainable_names,
+        "only_lora_parameters_trainable": bool(trainable_names) and not non_lora_trainable_names,
+    }
 
 
 
@@ -1154,6 +1230,9 @@ def _config_to_dict(config: Stage2TrainConfig) -> dict[str, Any]:
 def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str, Any]) -> dict[str, Any]:
     selection = resolve_effective_module_selection(config)
     trainable_groups = selection["trainable_component_groups"]
+    if str(config.training_parameterization).lower() == "lora" and config.trainable_component_groups == list(DEFAULT_TEXT_CONDITIONING_GROUPS):
+        trainable_groups = list(DEFAULT_LORA_TARGET_GROUPS)
+        selection = resolve_effective_module_selection(Stage2TrainConfig(**{**asdict(config), "trainable_component_groups": trainable_groups}))
     frozen_groups: list[str] = []
     if config.train_transformer_core_only:
         frozen_groups.append("non_transformer_top_level_modules")
@@ -1183,9 +1262,9 @@ def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str,
         "backbone_assumptions": _infer_backbone_assumptions(config.backbone_name),
         "backbone_runtime": backbone_runtime,
         "implementation_boundary": (
-            "Pattern selectors now resolve trainable component groups into real transformer-internal module patterns, "
-            "and the real training path applies those selectors to requires_grad when using the conditioning-focused "
-            "submodule path instead of full-transformer training."
+            "Pattern selectors now resolve trainable component groups into real transformer-internal module patterns. "
+            "The real training path supports both full real-parameter transformer updates and a conservative LoRA mode "
+            "that injects adapters into selected conditioning-related linear sites while freezing base weights."
         ),
         "memory_strategy": {
             "enable_gradient_checkpointing": config.enable_gradient_checkpointing,

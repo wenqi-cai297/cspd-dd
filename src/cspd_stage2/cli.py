@@ -122,9 +122,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Module-name exclude pattern; may be repeated",
     )
     train_parser.add_argument(
+        "--training-parameterization",
+        choices=["full", "lora"],
+        default="full",
+        help="Choose full real-parameter transformer updates or injected LoRA-only adapter training",
+    )
+    train_parser.add_argument(
         "--adapter-type",
         default="lora",
-        help="Adapter strategy label recorded in the Stage 2 plan metadata",
+        help="Adapter strategy label recorded in the Stage 2 plan metadata; real training currently supports only LoRA",
     )
     train_parser.add_argument("--adapter-rank", type=int, default=16, help="Adapter rank placeholder")
     train_parser.add_argument("--adapter-alpha", type=float, default=16.0, help="Adapter alpha placeholder")
@@ -376,7 +382,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         stage2_focus=args.stage2_focus,
         conditioning_objective=args.conditioning_objective,
         conditioning_text_field=args.conditioning_text_field,
-        trainable_component_groups=args.trainable_component_groups or ["full_transformer"],
+        trainable_component_groups=args.trainable_component_groups or (["conditioning_transformer"] if args.training_parameterization == "lora" else ["full_transformer"]),
         module_include_patterns=args.module_include_patterns or [],
         module_exclude_patterns=args.module_exclude_patterns or [
             "vae",
@@ -384,6 +390,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
             "decoder",
             "image_encoder",
         ],
+        training_parameterization=args.training_parameterization,
         adapter_plan=AdapterPlan(
             adapter_type=args.adapter_type,
             rank=args.adapter_rank,

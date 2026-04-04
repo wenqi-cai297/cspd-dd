@@ -161,7 +161,7 @@ accelerate launch --num_processes 2 \
   --gradient-accumulation-steps 1
 ```
 
-If you hit memory pressure, keep the same top-level interface but switch to the new conditioning-focused transformer-internal path:
+If you hit memory pressure, you now have two honest fallback levels while keeping the same top-level/fine-grained selector interface. First, you can stay in real-parameter mode but restrict training to conditioning-focused transformer internals:
 
 ```bash
 accelerate launch --num_processes 2 \
@@ -176,9 +176,27 @@ accelerate launch --num_processes 2 \
   --gradient-accumulation-steps 1
 ```
 
-`conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also combine finer groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`.
+Or switch to the new real LoRA path, which injects trainable adapters into the selected conditioning-related transformer linear layers while freezing the base weights:
 
-This Stage 2 CLI now implements pairing / manifest generation / run-directory setup plus a minimal `accelerate`-managed real FLUX training path on the current experimental FLUX.1 Kontext target. The current default policy is to freeze non-transformer top-level modules and train the full `FluxTransformer2DModel`; if memory is insufficient, the intended fallback is to reduce training to conditioning-related transformer submodules. To reduce memory pressure before and around `accelerate.prepare`, the current default runtime now also (1) attempts transformer gradient checkpointing when the loaded FLUX transformer supports it, and (2) keeps frozen VAE/text components on CPU until their encode step, with optional offload back to CPU immediately after use. The current implementation honestly remains limited: it uses `Accelerator` for process setup / dataloader sharding / backward / unwrap-model checkpointing, but it is still a conservative first version rather than a fully optimized production trainer, and it still does **not** implement heavier state-sharding/FSDP-style offload.
+```bash
+accelerate launch --num_processes 2 \
+  -m cspd_stage2.cli train \
+  --dataset-root /path/to/imagefolder_dataset \
+  --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
+  --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000_lora \
+  --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
+  --training-parameterization lora \
+  --trainable-component-group conditioning_transformer \
+  --adapter-rank 16 \
+  --adapter-alpha 16 \
+  --batch-size 4 \
+  --epochs 1 \
+  --gradient-accumulation-steps 1
+```
+
+`conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also combine finer groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`. In LoRA mode, these selectors define where adapters are injected; in full mode, they define which real parameters stay trainable.
+
+This Stage 2 CLI now implements pairing / manifest generation / run-directory setup plus a minimal `accelerate`-managed real FLUX training path on the current experimental FLUX.1 Kontext target. The current default policy is to freeze non-transformer top-level modules and train the full `FluxTransformer2DModel`; if memory is insufficient, the first fallback is conditioning-focused real-parameter training and the second fallback is the conservative LoRA path above. To reduce memory pressure before and around `accelerate.prepare`, the current default runtime now also (1) attempts transformer gradient checkpointing when the loaded FLUX transformer supports it, and (2) keeps frozen VAE/text components on CPU until their encode step, with optional offload back to CPU immediately after use. The current implementation honestly remains limited: it uses `Accelerator` for process setup / dataloader sharding / backward / unwrap-model checkpointing, and the LoRA path is a conservative linear-layer injection path rather than a full PEFT feature-complete stack; it still does **not** implement heavier state-sharding/FSDP-style offload.
 
 During real Stage 2 training, each process now also writes a per-rank GPU memory diagnostics artifact under the run directory, named like `rank00_memory_diagnostics.jsonl`. These JSONL events log rank / device identity plus current and peak CUDA allocated/reserved memory around key phases such as backbone load, module freeze/selection, gradient-checkpointing setup, accelerate prepare, VAE movement/offload, prompt-module movement/offload, VAE encode, prompt encode, transformer forward, loss, and backward.
 
