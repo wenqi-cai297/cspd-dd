@@ -409,6 +409,8 @@ def _encode_and_store_prompt_cache(*, backbone_name: str, captions: list[str], p
             }
             torch.save(payload, prompt_cache_dir / f"{cache_key}.pt")
             built_count += 1
+        del prompt_embeds, pooled_prompt_embeds, text_ids
+    del pipeline, backbone
     return built_count
 
 def _safe_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -1134,6 +1136,7 @@ def _run_real_flux_train_step(
             latents = pipeline.vae.encode(pixel_values.to(device=vae_device, dtype=vae_dtype)).latent_dist.sample()
             latents = (latents - pipeline.vae.config.shift_factor) * pipeline.vae.config.scaling_factor
             latents = latents.to(device=device, dtype=train_dtype)
+            del pixel_values
             _append_memory_event(
                 artifact_path=memory_log_path,
                 accelerator=accelerator,
@@ -1305,6 +1308,7 @@ def _run_real_flux_train_step(
             device,
             train_dtype,
         )
+        del latents
 
         noise = torch.randn_like(packed_latents)
         timesteps, sigmas = _sample_flux_flow_matching_timesteps(
@@ -1347,7 +1351,9 @@ def _run_real_flux_train_step(
             return_dict=True,
         )
         prediction = model_output.sample if hasattr(model_output, "sample") else model_output[0]
+        del model_output, prompt_embeds, pooled_prompt_embeds, text_ids
         loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+        del prediction, target, noisy_latents, noise, packed_latents, latent_image_ids, timesteps, sigmas, guidance
         _append_memory_event(
             artifact_path=memory_log_path,
             accelerator=accelerator,
