@@ -14,6 +14,7 @@ This module is deliberately honest about scope:
 import importlib.util
 import json
 import os
+import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -31,7 +32,7 @@ from cspd_stage2.backbone import (
     load_module_from_reference,
     load_real_backbone_module,
 )
-from cspd_stage2.data import build_stage2_pairs, make_stage2_dataloader, write_pairing_artifacts
+from cspd_stage2.data import ManifestPaths, build_stage2_pairs, make_stage2_dataloader, write_pairing_artifacts
 
 
 DEFAULT_TEXT_CONDITIONING_GROUPS = [
@@ -160,29 +161,13 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
     run_dir = Path(config.output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    pairing = build_stage2_pairs(
-        dataset_root=config.dataset_root,
-        render_input=config.render_input,
-        class_name_map=config.class_name_map,
-        class_archetype_map=config.class_archetype_map,
-        verify_images=config.verify_images,
-        strict=config.strict_pairing,
-    )
-
-    if config.max_train_samples is not None:
-        pairing.pairs = pairing.pairs[: max(config.max_train_samples, 0)]
-        pairing.summary["max_train_samples_applied"] = config.max_train_samples
-        pairing.summary["num_pairs_after_limit"] = len(pairing.pairs)
-    else:
-        pairing.summary["num_pairs_after_limit"] = len(pairing.pairs)
-
-    manifest_paths = write_pairing_artifacts(pairing, run_dir)
-    backbone_runtime = _build_backbone_runtime_summary(config)
-    component_plan = _build_component_plan(config, backbone_runtime)
-    trainer_plan = _build_trainer_plan(config, manifest_paths.manifest_path, len(pairing.pairs), component_plan)
-    write_json(run_dir / "stage2_config_snapshot.json", _config_to_dict(config))
-    write_json(run_dir / "trainer_plan.json", trainer_plan)
-
+    manifest_paths: ManifestPaths | None = None
+    pairing_summary: dict[str, Any] | None = None
+    num_pairs = 0
+    component_plan: dict[str, Any] | None = None
+    backbone_runtime: dict[str, Any] | None = None
+    last_known_phase = "run_dir_ready"
+    top_level_failure: dict[str, Any] | None = None
     training_result: dict[str, Any] = {
         "status": "manifest_ready",
         "implemented_training": False,
@@ -191,35 +176,139 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         "component_plan_status": "implemented_metadata_only",
     }
 
-    if not config.generate_manifest_only and not config.dry_run:
-        try:
-            training_result = run_real_stage2_flux_training(
-                config=config,
-                pairs=pairing.pairs,
-                run_dir=run_dir,
-                manifest_path=manifest_paths.manifest_path,
-            )
-        except Exception as exc:  # noqa: BLE001
-            if config.allow_placeholder_loop:
-                training_result = run_placeholder_transformer_core_loop(config, manifest_paths.manifest_path)
-                training_result["real_training_error"] = str(exc)
-                training_result["message"] = (
-                    "Real Stage 2 FLUX training could not run in this environment; fell back to the explicit placeholder loop."
-                )
-            else:
-                training_result = {
-                    "status": "failed_before_training",
-                    "implemented_training": False,
-                    "placeholder_training": False,
-                    "message": (
-                        "Real Stage 2 FLUX training was attempted but could not start or complete in this environment. "
-                        "See training_error for the real runtime failure."
-                    ),
-                    "training_error": str(exc),
-                    "component_plan_status": "real_training_attempted",
-                }
+    try:
+        last_known_phase = "before_pairing"
+        pairing = build_stage2_pairs(
+            dataset_root=config.dataset_root,
+            render_input=config.render_input,
+            class_name_map=config.class_name_map,
+            class_archetype_map=config.class_archetype_map,
+            verify_images=config.verify_images,
+            strict=config.strict_pairing,
+        )
+        last_known_phase = "after_pairing"
 
-    summary = {
+        if config.max_train_samples is not None:
+            pairing.pairs = pairing.pairs[: max(config.max_train_samples, 0)]
+            pairing.summary["max_train_samples_applied"] = config.max_train_samples
+            pairing.summary["num_pairs_after_limit"] = len(pairing.pairs)
+        else:
+            pairing.summary["num_pairs_after_limit"] = len(pairing.pairs)
+
+        pairing_summary = pairing.summary
+        num_pairs = len(pairing.pairs)
+
+        last_known_phase = "before_write_pairing_artifacts"
+        manifest_paths = write_pairing_artifacts(pairing, run_dir)
+        last_known_phase = "after_write_pairing_artifacts"
+
+        last_known_phase = "before_backbone_runtime_summary"
+        backbone_runtime = _build_backbone_runtime_summary(config)
+        last_known_phase = "after_backbone_runtime_summary"
+
+        last_known_phase = "before_component_plan"
+        component_plan = _build_component_plan(config, backbone_runtime)
+        last_known_phase = "after_component_plan"
+
+        last_known_phase = "before_write_config_snapshot"
+        write_json(run_dir / "stage2_config_snapshot.json", _config_to_dict(config))
+        last_known_phase = "after_write_config_snapshot"
+
+        trainer_plan = _build_trainer_plan(config, manifest_paths.manifest_path, len(pairing.pairs), component_plan)
+        last_known_phase = "before_write_trainer_plan"
+        write_json(run_dir / "trainer_plan.json", trainer_plan)
+        last_known_phase = "after_write_trainer_plan"
+
+        if not config.generate_manifest_only and not config.dry_run:
+            try:
+                last_known_phase = "before_real_training"
+                training_result = run_real_stage2_flux_training(
+                    config=config,
+                    pairs=pairing.pairs,
+                    run_dir=run_dir,
+                    manifest_path=manifest_paths.manifest_path,
+                )
+                last_known_phase = training_result.get("last_known_phase", "after_real_training")
+            except Exception as exc:  # noqa: BLE001
+                last_known_phase = "real_training_exception"
+                if config.allow_placeholder_loop:
+                    training_result = run_placeholder_transformer_core_loop(config, manifest_paths.manifest_path)
+                    training_result["real_training_error"] = str(exc)
+                    training_result["real_training_traceback"] = traceback.format_exc()
+                    training_result["last_known_phase"] = training_result.get("last_known_phase") or last_known_phase
+                    training_result["message"] = (
+                        "Real Stage 2 FLUX training could not run in this environment; fell back to the explicit placeholder loop."
+                    )
+                else:
+                    training_result = {
+                        "status": "failed_before_training",
+                        "implemented_training": False,
+                        "placeholder_training": False,
+                        "message": (
+                            "Real Stage 2 FLUX training was attempted but could not start or complete in this environment. "
+                            "See training_error for the real runtime failure."
+                        ),
+                        "training_error": str(exc),
+                        "training_traceback": traceback.format_exc(),
+                        "component_plan_status": "real_training_attempted",
+                        "last_known_phase": last_known_phase,
+                    }
+    except Exception as exc:  # noqa: BLE001
+        top_level_failure = {
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+            "last_known_phase": last_known_phase,
+        }
+        training_result = {
+            "status": "failed_before_training_setup_complete",
+            "implemented_training": False,
+            "placeholder_training": False,
+            "message": "Stage 2 setup failed before training could start cleanly. See top_level_failure for traceback and last phase.",
+            "component_plan_status": "setup_failed",
+            "last_known_phase": last_known_phase,
+        }
+
+    summary = _build_stage2_run_summary(
+        config=config,
+        run_dir=run_dir,
+        manifest_paths=manifest_paths,
+        num_pairs=num_pairs,
+        pairing_summary=pairing_summary,
+        component_plan=component_plan,
+        backbone_runtime=backbone_runtime,
+        training_result=training_result,
+        last_known_phase=training_result.get("last_known_phase", last_known_phase),
+        top_level_failure=top_level_failure,
+    )
+    _safe_write_json(run_dir / "stage2_run_summary.json", summary)
+    return summary
+
+
+def _safe_write_json(path: Path, payload: dict[str, Any]) -> None:
+    try:
+        write_json(path, payload)
+    except Exception:
+        fallback = _safe_jsonable(payload)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(fallback, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+
+def _build_stage2_run_summary(
+    *,
+    config: Stage2TrainConfig,
+    run_dir: Path,
+    manifest_paths: ManifestPaths | None,
+    num_pairs: int,
+    pairing_summary: dict[str, Any] | None,
+    component_plan: dict[str, Any] | None,
+    backbone_runtime: dict[str, Any] | None,
+    training_result: dict[str, Any],
+    last_known_phase: str,
+    top_level_failure: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
         "stage": "stage2_v1",
         "definition": "full-transformer fine-tuning of the selected generative backbone with Stage 1 canonical-caption conditioning",
         "backbone_name": config.backbone_name,
@@ -230,15 +319,17 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         "train_transformer_core_only": config.train_transformer_core_only,
         "freeze_text_encoder": config.freeze_text_encoder,
         "freeze_vae": config.freeze_vae,
+        "last_known_phase": last_known_phase,
         "component_plan": component_plan,
         "backbone_runtime": backbone_runtime,
-        "manifest": manifest_paths.manifest_path,
-        "manifest_summary": manifest_paths.summary_path,
-        "unmatched_images": manifest_paths.unmatched_images_path,
-        "unmatched_render_records": manifest_paths.unmatched_render_records_path,
-        "num_pairs": len(pairing.pairs),
-        "pairing_summary": pairing.summary,
+        "manifest": manifest_paths.manifest_path if manifest_paths is not None else None,
+        "manifest_summary": manifest_paths.summary_path if manifest_paths is not None else None,
+        "unmatched_images": manifest_paths.unmatched_images_path if manifest_paths is not None else None,
+        "unmatched_render_records": manifest_paths.unmatched_render_records_path if manifest_paths is not None else None,
+        "num_pairs": num_pairs,
+        "pairing_summary": pairing_summary,
         "training": training_result,
+        "top_level_failure": top_level_failure,
         "artifacts": {
             "config": str((run_dir / "stage2_config_snapshot.json").resolve()),
             "trainer_plan": str((run_dir / "trainer_plan.json").resolve()),
@@ -247,8 +338,7 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         },
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
-    write_json(run_dir / "stage2_run_summary.json", summary)
-    return summary
+
 
 
 def _safe_jsonable(value: Any) -> Any:
@@ -344,298 +434,382 @@ def run_real_stage2_flux_training(
     run_dir: Path,
     manifest_path: str,
 ) -> dict[str, Any]:
-    if importlib.util.find_spec("torch") is None:
-        raise RuntimeError("PyTorch is not installed")
-    if importlib.util.find_spec("diffusers") is None:
-        raise RuntimeError("diffusers is not installed")
-    if config.use_accelerate and importlib.util.find_spec("accelerate") is None:
-        raise RuntimeError("accelerate is not installed")
-
-    import torch
-    if config.use_accelerate:
-        from accelerate import Accelerator
-        from accelerate.utils import set_seed
-
-    if not pairs:
-        raise ValueError("No paired training samples were available after manifest generation")
-
     accelerator = None
-    if config.use_accelerate:
-        accelerator = Accelerator(
-            gradient_accumulation_steps=max(config.gradient_accumulation_steps, 1),
-        )
-        set_seed(config.seed)
-        device = accelerator.device
-    else:
-        torch.manual_seed(config.seed)
-        device = _resolve_training_device(config)
-    load_dtype = _resolve_training_dtype(config, device)
-    train_dtype = torch.float32 if device.type == "cpu" else load_dtype
-    rank_info = _accelerator_rank_info(accelerator, device)
-    memory_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_{config.memory_log_artifact_name}"
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    _append_memory_event(
-        artifact_path=memory_log_path,
-        accelerator=accelerator,
-        device=device,
-        phase="training_start",
-        torch_module=torch,
-        extra={
-            "backbone_name": config.backbone_name,
-            "manifest_path": str(Path(manifest_path).resolve()),
-            "num_pairs": len(pairs),
-            "load_dtype": _torch_dtype_label(load_dtype),
-            "train_dtype": _torch_dtype_label(train_dtype),
-        },
-    )
-
-    requested_device_for_load = None if config.use_accelerate else str(device)
-    requested_device_map = None if config.use_accelerate else config.backbone_device_map
-
-    backbone = load_real_backbone_module(
-        config.backbone_name,
-        torch_dtype=_torch_dtype_label(load_dtype),
-        device=requested_device_for_load,
-        device_map=requested_device_map,
-        local_files_only=config.backbone_local_files_only,
-        component=None,
-        allow_unimplemented=False,
-    )
-    pipeline = backbone.root_module
-    if pipeline is None:
-        raise RuntimeError("Real backbone load did not return a pipeline root module")
-    _append_memory_event(
-        artifact_path=memory_log_path,
-        accelerator=accelerator,
-        device=device,
-        phase="after_backbone_load",
-        torch_module=torch,
-        extra={
-            "resolved_module_name": backbone.resolved_module_name,
-            "resolved_module_type": backbone.resolved_module_type,
-            "loader": backbone.loader_name,
-            "loader_status": backbone.implementation_status,
-        },
-    )
-
-    selection_result = _freeze_stage2_modules(pipeline, config)
-    _append_memory_event(
-        artifact_path=memory_log_path,
-        accelerator=accelerator,
-        device=device,
-        phase="after_freeze_selection",
-        torch_module=torch,
-        extra={
-            "applied_transformer_module_selection": selection_result["selection"].to_dict(),
-            "training_parameterization": config.training_parameterization,
-            "adapter_injection": selection_result["adapter_injection"].to_dict() if selection_result["adapter_injection"] is not None else None,
-            "trainable_parameter_summary": selection_result["trainable_parameter_summary"],
-        },
-    )
-    transformer = pipeline.transformer
-    transformer.train()
-    gradient_checkpointing = {
+    device = "unknown"
+    memory_log_path: Path | None = None
+    torch = None
+    transformer = None
+    checkpoint_dir = run_dir / "checkpoints"
+    final_checkpoint_dir = checkpoint_dir / "final_transformer"
+    is_main_process = True
+    load_dtype_label: str | None = None
+    train_dtype_label: str | None = None
+    selection_result: dict[str, Any] | None = None
+    gradient_checkpointing: dict[str, Any] = {
         "enabled": False,
         "method": None,
         "attempted_methods": [],
-        "reason": "disabled_by_config",
+        "reason": "not_initialized",
     }
-    if config.enable_gradient_checkpointing:
-        gradient_checkpointing = _enable_transformer_gradient_checkpointing(transformer)
-    _set_module_mode(getattr(pipeline, "vae", None), training=False)
-    _set_module_mode(getattr(pipeline, "text_encoder", None), training=False)
-    _set_module_mode(getattr(pipeline, "text_encoder_2", None), training=False)
-    _set_module_mode(getattr(pipeline, "image_encoder", None), training=False)
-    if config.keep_frozen_modules_on_cpu_until_needed:
-        _move_named_pipeline_components(
-            pipeline,
-            component_names=["vae", "text_encoder", "text_encoder_2", "image_encoder"],
-            device=torch.device("cpu"),
-            dtype=torch.float32,
-        )
-    _append_memory_event(
-        artifact_path=memory_log_path,
-        accelerator=accelerator,
-        device=device,
-        phase="after_gradient_checkpointing_setup",
-        torch_module=torch,
-        extra={
-            "gradient_checkpointing": gradient_checkpointing,
-            "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
-            "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step,
-        },
-    )
-
-    optimizer = torch.optim.AdamW(
-        (parameter for parameter in transformer.parameters() if parameter.requires_grad),
-        lr=config.learning_rate,
-    )
-
-    dataloader = make_stage2_dataloader(
-        pairs,
-        resolution=config.resolution,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
-        shuffle=True,
-        drop_last=config.dataloader_drop_last,
-    )
-
-    if accelerator is not None:
-        transformer, optimizer, dataloader = accelerator.prepare(transformer, optimizer, dataloader)
-        pipeline.transformer = transformer
-    _append_memory_event(
-        artifact_path=memory_log_path,
-        accelerator=accelerator,
-        device=device,
-        phase="after_dataloader_accelerate_prepare",
-        torch_module=torch,
-        extra={
-            "batch_size": config.batch_size,
-            "num_workers": config.num_workers,
-            "gradient_accumulation_steps": max(config.gradient_accumulation_steps, 1),
-            "dataloader_batches_per_epoch": len(dataloader) if hasattr(dataloader, "__len__") else None,
-            "gradient_checkpointing": gradient_checkpointing,
-            "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
-        },
-    )
-
-    checkpoint_dir = run_dir / "checkpoints"
-    is_main_process = accelerator.is_main_process if accelerator is not None else True
-    if is_main_process:
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-
     logs: list[dict[str, Any]] = []
     losses: list[float] = []
     global_step = 0
     optimizer_step_count = 0
-    stop_after = config.max_steps if config.max_steps is not None else None
-    steps_per_epoch = len(dataloader) if hasattr(dataloader, "__len__") else None
-    if steps_per_epoch in (0, None):
-        total_optimizer_steps = None
-    else:
-        optimizer_updates_per_epoch = max(
-            math.ceil(steps_per_epoch / max(config.gradient_accumulation_steps, 1)),
-            1,
-        )
-        total_optimizer_steps = optimizer_updates_per_epoch * max(config.epochs, 1)
-        if stop_after is not None:
-            total_optimizer_steps = min(total_optimizer_steps, stop_after)
+    steps_per_epoch = None
+    total_optimizer_steps = None
+    last_known_phase = "preflight"
+    phase_history: list[str] = []
 
-    for epoch in range(max(config.epochs, 1)):
-        for batch in dataloader:
-            if stop_after is not None and optimizer_step_count >= stop_after:
-                break
-            loss = _run_real_flux_train_step(
-                pipeline=pipeline,
-                transformer=transformer,
-                batch=batch,
-                optimizer=optimizer,
+    def mark_phase(phase: str, *, extra: dict[str, Any] | None = None, epoch: int | None = None, global_step_value: int | None = None, optimizer_step_value: int | None = None) -> None:
+        nonlocal last_known_phase
+        last_known_phase = phase
+        phase_history.append(phase)
+        if torch is not None and memory_log_path is not None:
+            _append_memory_event(
+                artifact_path=memory_log_path,
                 accelerator=accelerator,
                 device=device,
-                train_dtype=train_dtype,
-                resolution=config.resolution,
-                memory_log_path=memory_log_path,
-                epoch=epoch + 1,
-                global_step=global_step + 1,
-                optimizer_step=optimizer_step_count + 1,
-                keep_frozen_modules_on_cpu_until_needed=config.keep_frozen_modules_on_cpu_until_needed,
-                offload_frozen_modules_after_step=config.offload_frozen_modules_after_step,
+                phase=phase,
+                torch_module=torch,
+                epoch=epoch,
+                global_step=global_step_value,
+                optimizer_step=optimizer_step_value,
+                extra=extra,
             )
-            global_step += 1
-            sync_gradients = accelerator.sync_gradients if accelerator is not None else True
-            if sync_gradients:
-                optimizer_step_count += 1
-                if accelerator is not None:
-                    loss_value = float(accelerator.gather_for_metrics(loss.detach().reshape(1)).mean().item())
-                else:
-                    loss_value = float(loss.detach().cpu().item())
-                losses.append(loss_value)
-                if optimizer_step_count == 1 or optimizer_step_count % max(config.log_every, 1) == 0:
-                    logs.append({"step": optimizer_step_count, "epoch": epoch + 1, "loss": loss_value})
-                if is_main_process and optimizer_step_count % max(config.save_every, 1) == 0:
-                    checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
-                    _save_transformer_checkpoint(
-                        checkpoint_model,
-                        checkpoint_dir / f"step_{optimizer_step_count:06d}",
-                    )
-        if stop_after is not None and optimizer_step_count >= stop_after:
-            break
 
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    _append_memory_event(
-        artifact_path=memory_log_path,
-        accelerator=accelerator,
-        device=device,
-        phase="training_loop_complete",
-        torch_module=torch,
-        epoch=max(config.epochs, 1),
-        global_step=global_step,
-        optimizer_step=optimizer_step_count,
-        extra={"loss_count": len(losses)},
-    )
-    final_checkpoint_dir = checkpoint_dir / "final_transformer"
-    if is_main_process:
-        checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
-        _save_transformer_checkpoint(checkpoint_model, final_checkpoint_dir)
+    try:
+        if importlib.util.find_spec("torch") is None:
+            raise RuntimeError("PyTorch is not installed")
+        if importlib.util.find_spec("diffusers") is None:
+            raise RuntimeError("diffusers is not installed")
+        if config.use_accelerate and importlib.util.find_spec("accelerate") is None:
+            raise RuntimeError("accelerate is not installed")
 
-    world_size = accelerator.num_processes if accelerator is not None else 1
-    launch_notes = [
-        "Uses Hugging Face Accelerate for process setup, dataloader sharding, backward, and main-process-only checkpoint writes.",
-        "Recommended launch is via: accelerate launch ... cspd-stage2 train ...",
-    ]
-    if config.backbone_device_map:
-        launch_notes.append(
-            "backbone_device_map is ignored during accelerate-managed training to avoid conflicting with multi-process device placement."
+        import torch as torch_module
+        torch = torch_module
+        if config.use_accelerate:
+            from accelerate import Accelerator
+            from accelerate.utils import set_seed
+
+        if not pairs:
+            raise ValueError("No paired training samples were available after manifest generation")
+
+        if config.use_accelerate:
+            accelerator = Accelerator(
+                gradient_accumulation_steps=max(config.gradient_accumulation_steps, 1),
+            )
+            set_seed(config.seed)
+            device = accelerator.device
+        else:
+            torch.manual_seed(config.seed)
+            device = _resolve_training_device(config)
+        load_dtype = _resolve_training_dtype(config, device)
+        train_dtype = torch.float32 if device.type == "cpu" else load_dtype
+        load_dtype_label = _torch_dtype_label(load_dtype)
+        train_dtype_label = _torch_dtype_label(train_dtype)
+        rank_info = _accelerator_rank_info(accelerator, device)
+        memory_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_{config.memory_log_artifact_name}"
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        mark_phase(
+            "training_start",
+            extra={
+                "backbone_name": config.backbone_name,
+                "manifest_path": str(Path(manifest_path).resolve()),
+                "num_pairs": len(pairs),
+                "load_dtype": load_dtype_label,
+                "train_dtype": train_dtype_label,
+            },
         )
 
-    summary = {
-        "status": "completed",
-        "implemented_training": True,
-        "placeholder_training": False,
-        "message": "Completed a minimal accelerate-based real FLUX Stage 2 training run on (image, canonical_caption) pairs.",
-        "component_plan_status": "real_training_ran",
-        "manifest_path": str(Path(manifest_path).resolve()),
-        "device": str(device),
-        "load_dtype": _torch_dtype_label(load_dtype),
-        "train_dtype": _torch_dtype_label(train_dtype),
-        "training_parameterization": config.training_parameterization,
-        "applied_transformer_module_selection": selection_result["selection"].to_dict(),
-        "adapter_injection": selection_result["adapter_injection"].to_dict() if selection_result["adapter_injection"] is not None else None,
-        "trainable_parameter_summary": selection_result["trainable_parameter_summary"],
-        "accelerate": {
-            "enabled": True,
-            "num_processes": world_size,
-            "gradient_accumulation_steps": max(config.gradient_accumulation_steps, 1),
-            "distributed_type": str(getattr(getattr(accelerator, "state", None), "distributed_type", "no")) if accelerator is not None else "no",
-            "requested_device_map_ignored": bool(config.backbone_device_map),
-        },
-        "gradient_checkpointing": gradient_checkpointing,
-        "memory_strategy": {
-            "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
-            "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step,
-        },
-        "dataloader_batches_per_epoch": steps_per_epoch,
-        "forward_steps": global_step,
-        "optimizer_steps": optimizer_step_count,
-        "steps": optimizer_step_count,
-        "epochs": max(config.epochs, 1),
-        "num_pairs": len(pairs),
-        "losses": losses,
-        "logs": logs,
-        "estimated_total_optimizer_steps": total_optimizer_steps,
-        "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
-        "memory_log_path": str(memory_log_path.resolve()),
-        "launch_notes": launch_notes,
-    }
-    if is_main_process:
-        write_json(run_dir / "training_metrics.json", summary)
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    return summary
+        requested_device_for_load = None if config.use_accelerate else str(device)
+        requested_device_map = None if config.use_accelerate else config.backbone_device_map
+
+        mark_phase("before_backbone_load")
+        backbone = load_real_backbone_module(
+            config.backbone_name,
+            torch_dtype=load_dtype_label,
+            device=requested_device_for_load,
+            device_map=requested_device_map,
+            local_files_only=config.backbone_local_files_only,
+            component=None,
+            allow_unimplemented=False,
+        )
+        pipeline = backbone.root_module
+        if pipeline is None:
+            raise RuntimeError("Real backbone load did not return a pipeline root module")
+        mark_phase(
+            "after_backbone_load",
+            extra={
+                "resolved_module_name": backbone.resolved_module_name,
+                "resolved_module_type": backbone.resolved_module_type,
+                "loader": backbone.loader_name,
+                "loader_status": backbone.implementation_status,
+            },
+        )
+
+        mark_phase("before_freeze_selection")
+        selection_result = _freeze_stage2_modules(pipeline, config)
+        mark_phase(
+            "after_freeze_selection",
+            extra={
+                "applied_transformer_module_selection": selection_result["selection"].to_dict(),
+                "training_parameterization": config.training_parameterization,
+                "adapter_injection": selection_result["adapter_injection"].to_dict() if selection_result["adapter_injection"] is not None else None,
+                "trainable_parameter_summary": selection_result["trainable_parameter_summary"],
+            },
+        )
+        transformer = pipeline.transformer
+        transformer.train()
+        gradient_checkpointing = {
+            "enabled": False,
+            "method": None,
+            "attempted_methods": [],
+            "reason": "disabled_by_config",
+        }
+        if config.enable_gradient_checkpointing:
+            gradient_checkpointing = _enable_transformer_gradient_checkpointing(transformer)
+        _set_module_mode(getattr(pipeline, "vae", None), training=False)
+        _set_module_mode(getattr(pipeline, "text_encoder", None), training=False)
+        _set_module_mode(getattr(pipeline, "text_encoder_2", None), training=False)
+        _set_module_mode(getattr(pipeline, "image_encoder", None), training=False)
+        if config.keep_frozen_modules_on_cpu_until_needed:
+            _move_named_pipeline_components(
+                pipeline,
+                component_names=["vae", "text_encoder", "text_encoder_2", "image_encoder"],
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+        mark_phase(
+            "after_gradient_checkpointing_setup",
+            extra={
+                "gradient_checkpointing": gradient_checkpointing,
+                "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
+                "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step,
+            },
+        )
+
+        mark_phase("before_optimizer_setup")
+        optimizer = torch.optim.AdamW(
+            (parameter for parameter in transformer.parameters() if parameter.requires_grad),
+            lr=config.learning_rate,
+        )
+        mark_phase("after_optimizer_setup")
+
+        mark_phase("before_dataloader_setup")
+        dataloader = make_stage2_dataloader(
+            pairs,
+            resolution=config.resolution,
+            batch_size=config.batch_size,
+            num_workers=config.num_workers,
+            shuffle=True,
+            drop_last=config.dataloader_drop_last,
+        )
+        mark_phase("after_dataloader_setup")
+
+        if accelerator is not None:
+            mark_phase("before_accelerate_prepare_transformer")
+            transformer = accelerator.prepare(transformer)
+            pipeline.transformer = transformer
+            mark_phase("after_accelerate_prepare_transformer")
+
+            mark_phase("before_accelerate_prepare_optimizer")
+            optimizer = accelerator.prepare(optimizer)
+            mark_phase("after_accelerate_prepare_optimizer")
+
+            mark_phase("before_accelerate_prepare_dataloader")
+            dataloader = accelerator.prepare(dataloader)
+            mark_phase(
+                "after_accelerate_prepare_dataloader",
+                extra={
+                    "batch_size": config.batch_size,
+                    "num_workers": config.num_workers,
+                    "gradient_accumulation_steps": max(config.gradient_accumulation_steps, 1),
+                    "dataloader_batches_per_epoch": len(dataloader) if hasattr(dataloader, "__len__") else None,
+                    "gradient_checkpointing": gradient_checkpointing,
+                    "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
+                },
+            )
+        else:
+            mark_phase(
+                "after_accelerate_prepare_skipped",
+                extra={
+                    "reason": "accelerate_disabled",
+                    "batch_size": config.batch_size,
+                    "num_workers": config.num_workers,
+                },
+            )
+
+        is_main_process = accelerator.is_main_process if accelerator is not None else True
+        if is_main_process:
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        mark_phase("after_checkpoint_dir_ready")
+
+        stop_after = config.max_steps if config.max_steps is not None else None
+        steps_per_epoch = len(dataloader) if hasattr(dataloader, "__len__") else None
+        if steps_per_epoch not in (0, None):
+            optimizer_updates_per_epoch = max(
+                math.ceil(steps_per_epoch / max(config.gradient_accumulation_steps, 1)),
+                1,
+            )
+            total_optimizer_steps = optimizer_updates_per_epoch * max(config.epochs, 1)
+            if stop_after is not None:
+                total_optimizer_steps = min(total_optimizer_steps, stop_after)
+
+        for epoch in range(max(config.epochs, 1)):
+            for batch in dataloader:
+                if stop_after is not None and optimizer_step_count >= stop_after:
+                    break
+                loss = _run_real_flux_train_step(
+                    pipeline=pipeline,
+                    transformer=transformer,
+                    batch=batch,
+                    optimizer=optimizer,
+                    accelerator=accelerator,
+                    device=device,
+                    train_dtype=train_dtype,
+                    resolution=config.resolution,
+                    memory_log_path=memory_log_path,
+                    epoch=epoch + 1,
+                    global_step=global_step + 1,
+                    optimizer_step=optimizer_step_count + 1,
+                    keep_frozen_modules_on_cpu_until_needed=config.keep_frozen_modules_on_cpu_until_needed,
+                    offload_frozen_modules_after_step=config.offload_frozen_modules_after_step,
+                )
+                global_step += 1
+                sync_gradients = accelerator.sync_gradients if accelerator is not None else True
+                if sync_gradients:
+                    optimizer_step_count += 1
+                    if accelerator is not None:
+                        loss_value = float(accelerator.gather_for_metrics(loss.detach().reshape(1)).mean().item())
+                    else:
+                        loss_value = float(loss.detach().cpu().item())
+                    losses.append(loss_value)
+                    if optimizer_step_count == 1 or optimizer_step_count % max(config.log_every, 1) == 0:
+                        logs.append({"step": optimizer_step_count, "epoch": epoch + 1, "loss": loss_value})
+                    if is_main_process and optimizer_step_count % max(config.save_every, 1) == 0:
+                        checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
+                        _save_transformer_checkpoint(
+                            checkpoint_model,
+                            checkpoint_dir / f"step_{optimizer_step_count:06d}",
+                        )
+            if stop_after is not None and optimizer_step_count >= stop_after:
+                break
+
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        mark_phase(
+            "training_loop_complete",
+            epoch=max(config.epochs, 1),
+            global_step_value=global_step,
+            optimizer_step_value=optimizer_step_count,
+            extra={"loss_count": len(losses)},
+        )
+        if is_main_process:
+            checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
+            _save_transformer_checkpoint(checkpoint_model, final_checkpoint_dir)
+
+        world_size = accelerator.num_processes if accelerator is not None else 1
+        launch_notes = [
+            "Uses Hugging Face Accelerate for process setup, dataloader sharding, backward, and main-process-only checkpoint writes.",
+            "Recommended launch is via: accelerate launch ... cspd-stage2 train ...",
+        ]
+        if config.backbone_device_map:
+            launch_notes.append(
+                "backbone_device_map is ignored during accelerate-managed training to avoid conflicting with multi-process device placement."
+            )
+
+        summary = {
+            "status": "completed",
+            "implemented_training": True,
+            "placeholder_training": False,
+            "message": "Completed a minimal accelerate-based real FLUX Stage 2 training run on (image, canonical_caption) pairs.",
+            "component_plan_status": "real_training_ran",
+            "manifest_path": str(Path(manifest_path).resolve()),
+            "device": str(device),
+            "load_dtype": load_dtype_label,
+            "train_dtype": train_dtype_label,
+            "training_parameterization": config.training_parameterization,
+            "applied_transformer_module_selection": selection_result["selection"].to_dict() if selection_result is not None else None,
+            "adapter_injection": selection_result["adapter_injection"].to_dict() if selection_result is not None and selection_result["adapter_injection"] is not None else None,
+            "trainable_parameter_summary": selection_result["trainable_parameter_summary"] if selection_result is not None else None,
+            "accelerate": {
+                "enabled": bool(accelerator is not None),
+                "num_processes": world_size,
+                "gradient_accumulation_steps": max(config.gradient_accumulation_steps, 1),
+                "distributed_type": str(getattr(getattr(accelerator, "state", None), "distributed_type", "no")) if accelerator is not None else "no",
+                "requested_device_map_ignored": bool(config.backbone_device_map),
+            },
+            "gradient_checkpointing": gradient_checkpointing,
+            "memory_strategy": {
+                "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
+                "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step,
+            },
+            "dataloader_batches_per_epoch": steps_per_epoch,
+            "forward_steps": global_step,
+            "optimizer_steps": optimizer_step_count,
+            "steps": optimizer_step_count,
+            "epochs": max(config.epochs, 1),
+            "num_pairs": len(pairs),
+            "losses": losses,
+            "logs": logs,
+            "estimated_total_optimizer_steps": total_optimizer_steps,
+            "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
+            "memory_log_path": str(memory_log_path.resolve()) if memory_log_path is not None else None,
+            "last_known_phase": last_known_phase,
+            "phase_history": phase_history,
+            "launch_notes": launch_notes,
+        }
+        if is_main_process:
+            _safe_write_json(run_dir / "training_metrics.json", summary)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        return summary
+    except Exception as exc:  # noqa: BLE001
+        failure_summary = {
+            "status": "failed_during_real_training",
+            "implemented_training": False,
+            "placeholder_training": False,
+            "message": "Real Stage 2 FLUX training failed after entering the real training path.",
+            "component_plan_status": "real_training_attempted",
+            "manifest_path": str(Path(manifest_path).resolve()),
+            "device": str(device),
+            "load_dtype": load_dtype_label,
+            "train_dtype": train_dtype_label,
+            "training_parameterization": config.training_parameterization,
+            "applied_transformer_module_selection": selection_result["selection"].to_dict() if selection_result is not None else None,
+            "adapter_injection": selection_result["adapter_injection"].to_dict() if selection_result is not None and selection_result["adapter_injection"] is not None else None,
+            "trainable_parameter_summary": selection_result["trainable_parameter_summary"] if selection_result is not None else None,
+            "gradient_checkpointing": gradient_checkpointing,
+            "memory_strategy": {
+                "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
+                "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step,
+            },
+            "dataloader_batches_per_epoch": steps_per_epoch,
+            "forward_steps": global_step,
+            "optimizer_steps": optimizer_step_count,
+            "steps": optimizer_step_count,
+            "epochs": max(config.epochs, 1),
+            "num_pairs": len(pairs),
+            "losses": losses,
+            "logs": logs,
+            "estimated_total_optimizer_steps": total_optimizer_steps,
+            "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
+            "memory_log_path": str(memory_log_path.resolve()) if memory_log_path is not None else None,
+            "last_known_phase": last_known_phase,
+            "phase_history": phase_history,
+            "failure": {
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+                "rank_info": _accelerator_rank_info(accelerator, device) if torch is not None else None,
+            },
+        }
+        if is_main_process:
+            _safe_write_json(run_dir / "training_metrics.json", failure_summary)
+        return failure_summary
 
 
 def _run_real_flux_train_step(
