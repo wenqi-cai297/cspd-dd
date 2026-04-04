@@ -6,7 +6,7 @@ This module is deliberately honest about scope:
 - it prepares run directories and paired manifests,
 - records text-conditioning-focused adaptation intent,
 - separates trainable and frozen component plans,
-- implements a minimal real FLUX training path over (image, canonical_caption) pairs when the runtime supports it,
+- implements a minimal accelerate-based real FLUX training path over (image, canonical_caption) pairs when the runtime supports it,
 - keeps the older tiny placeholder loop as an explicit plumbing fallback,
 - does not pretend every environment can actually load or fine-tune gated FLUX checkpoints.
 """
@@ -16,6 +16,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import math
+from contextlib import nullcontext
 
 from cspd_stage1.io_utils import write_json
 from cspd_stage2.backbone import (
@@ -103,6 +105,9 @@ class Stage2TrainConfig:
     backbone_device_map: str | None = None
     backbone_local_files_only: bool = False
     backbone_component: str | None = None
+    use_accelerate: bool = True
+    gradient_accumulation_steps: int = 1
+    dataloader_drop_last: bool = False
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
@@ -211,21 +216,38 @@ def run_real_stage2_flux_training(
         raise RuntimeError("PyTorch is not installed")
     if importlib.util.find_spec("diffusers") is None:
         raise RuntimeError("diffusers is not installed")
+    if config.use_accelerate and importlib.util.find_spec("accelerate") is None:
+        raise RuntimeError("accelerate is not installed")
 
     import torch
+    if config.use_accelerate:
+        from accelerate import Accelerator
+        from accelerate.utils import set_seed
 
     if not pairs:
         raise ValueError("No paired training samples were available after manifest generation")
 
-    device = _resolve_training_device(config)
+    accelerator = None
+    if config.use_accelerate:
+        accelerator = Accelerator(
+            gradient_accumulation_steps=max(config.gradient_accumulation_steps, 1),
+        )
+        set_seed(config.seed)
+        device = accelerator.device
+    else:
+        torch.manual_seed(config.seed)
+        device = _resolve_training_device(config)
     load_dtype = _resolve_training_dtype(config, device)
     train_dtype = torch.float32 if device.type == "cpu" else load_dtype
+
+    requested_device_for_load = None if config.use_accelerate else str(device)
+    requested_device_map = None if config.use_accelerate else config.backbone_device_map
 
     backbone = load_real_backbone_module(
         config.backbone_name,
         torch_dtype=_torch_dtype_label(load_dtype),
-        device=str(device),
-        device_map=config.backbone_device_map,
+        device=requested_device_for_load,
+        device_map=requested_device_map,
         local_files_only=config.backbone_local_files_only,
         component=None,
         allow_unimplemented=False,
@@ -237,10 +259,7 @@ def run_real_stage2_flux_training(
     _freeze_stage2_modules(pipeline, config)
     transformer = pipeline.transformer
     transformer.train()
-    if device.type == "cpu":
-        transformer.to(device=device, dtype=train_dtype)
-    else:
-        transformer.to(device=device)
+    _move_stage2_nontransformer_modules_to_device(pipeline, device=device, train_dtype=train_dtype)
 
     optimizer = torch.optim.AdamW(
         (parameter for parameter in transformer.parameters() if parameter.requires_grad),
@@ -253,60 +272,121 @@ def run_real_stage2_flux_training(
         batch_size=config.batch_size,
         num_workers=config.num_workers,
         shuffle=True,
+        drop_last=config.dataloader_drop_last,
     )
 
+    if accelerator is not None:
+        transformer, optimizer, dataloader = accelerator.prepare(transformer, optimizer, dataloader)
+        pipeline.transformer = transformer
+
     checkpoint_dir = run_dir / "checkpoints"
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    is_main_process = accelerator.is_main_process if accelerator is not None else True
+    if is_main_process:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+
     logs: list[dict[str, Any]] = []
     losses: list[float] = []
     global_step = 0
+    optimizer_step_count = 0
     stop_after = config.max_steps if config.max_steps is not None else None
-
-    torch.manual_seed(config.seed)
+    steps_per_epoch = len(dataloader) if hasattr(dataloader, "__len__") else None
+    if steps_per_epoch in (0, None):
+        total_optimizer_steps = None
+    else:
+        optimizer_updates_per_epoch = max(
+            math.ceil(steps_per_epoch / max(config.gradient_accumulation_steps, 1)),
+            1,
+        )
+        total_optimizer_steps = optimizer_updates_per_epoch * max(config.epochs, 1)
+        if stop_after is not None:
+            total_optimizer_steps = min(total_optimizer_steps, stop_after)
 
     for epoch in range(max(config.epochs, 1)):
         for batch in dataloader:
-            if stop_after is not None and global_step >= stop_after:
+            if stop_after is not None and optimizer_step_count >= stop_after:
                 break
             loss = _run_real_flux_train_step(
                 pipeline=pipeline,
                 transformer=transformer,
                 batch=batch,
                 optimizer=optimizer,
+                accelerator=accelerator,
                 device=device,
                 train_dtype=train_dtype,
                 resolution=config.resolution,
             )
             global_step += 1
-            losses.append(loss)
-            if global_step == 1 or global_step % max(config.log_every, 1) == 0:
-                logs.append({"step": global_step, "epoch": epoch + 1, "loss": loss})
-            if global_step % max(config.save_every, 1) == 0:
-                _save_transformer_checkpoint(transformer, checkpoint_dir / f"step_{global_step:06d}")
-        if stop_after is not None and global_step >= stop_after:
+            sync_gradients = accelerator.sync_gradients if accelerator is not None else True
+            if sync_gradients:
+                optimizer_step_count += 1
+                if accelerator is not None:
+                    loss_value = float(accelerator.gather_for_metrics(loss.detach().reshape(1)).mean().item())
+                else:
+                    loss_value = float(loss.detach().cpu().item())
+                losses.append(loss_value)
+                if optimizer_step_count == 1 or optimizer_step_count % max(config.log_every, 1) == 0:
+                    logs.append({"step": optimizer_step_count, "epoch": epoch + 1, "loss": loss_value})
+                if is_main_process and optimizer_step_count % max(config.save_every, 1) == 0:
+                    checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
+                    _save_transformer_checkpoint(
+                        checkpoint_model,
+                        checkpoint_dir / f"step_{optimizer_step_count:06d}",
+                    )
+        if stop_after is not None and optimizer_step_count >= stop_after:
             break
 
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
     final_checkpoint_dir = checkpoint_dir / "final_transformer"
-    _save_transformer_checkpoint(transformer, final_checkpoint_dir)
+    if is_main_process:
+        checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
+        _save_transformer_checkpoint(checkpoint_model, final_checkpoint_dir)
+
+    world_size = accelerator.num_processes if accelerator is not None else 1
+    launch_notes = [
+        "Uses Hugging Face Accelerate for process setup, dataloader sharding, backward, and main-process-only checkpoint writes.",
+        "Recommended launch is via: accelerate launch ... cspd-stage2 train ...",
+    ]
+    if config.backbone_device_map:
+        launch_notes.append(
+            "backbone_device_map is ignored during accelerate-managed training to avoid conflicting with multi-process device placement."
+        )
 
     summary = {
         "status": "completed",
         "implemented_training": True,
         "placeholder_training": False,
-        "message": "Completed a minimal real FLUX Stage 2 training run on (image, canonical_caption) pairs.",
+        "message": "Completed a minimal accelerate-based real FLUX Stage 2 training run on (image, canonical_caption) pairs.",
         "component_plan_status": "real_training_ran",
         "manifest_path": str(Path(manifest_path).resolve()),
         "device": str(device),
         "load_dtype": _torch_dtype_label(load_dtype),
         "train_dtype": _torch_dtype_label(train_dtype),
-        "steps": global_step,
+        "accelerate": {
+            "enabled": True,
+            "num_processes": world_size,
+            "gradient_accumulation_steps": max(config.gradient_accumulation_steps, 1),
+            "distributed_type": str(getattr(getattr(accelerator, "state", None), "distributed_type", "no")) if accelerator is not None else "no",
+            "requested_device_map_ignored": bool(config.backbone_device_map),
+        },
+        "dataloader_batches_per_epoch": steps_per_epoch,
+        "forward_steps": global_step,
+        "optimizer_steps": optimizer_step_count,
+        "steps": optimizer_step_count,
         "epochs": max(config.epochs, 1),
         "num_pairs": len(pairs),
         "losses": losses,
         "logs": logs,
+        "estimated_total_optimizer_steps": total_optimizer_steps,
         "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
+        "launch_notes": launch_notes,
     }
-    write_json(run_dir / "training_metrics.json", summary)
+    if is_main_process:
+        write_json(run_dir / "training_metrics.json", summary)
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
     return summary
 
 
@@ -316,77 +396,84 @@ def _run_real_flux_train_step(
     transformer: Any,
     batch: dict[str, Any],
     optimizer: Any,
+    accelerator: Any | None,
     device: Any,
     train_dtype: Any,
     resolution: int,
-) -> float:
+) -> Any:
     import torch
 
     del resolution  # training uses the dataloader-prepared image tensor shape directly
 
-    pixel_values = batch["pixel_values"].to(device=device, dtype=train_dtype)
-    with torch.no_grad():
-        vae_dtype = next(pipeline.vae.parameters()).dtype
-        vae_device = next(pipeline.vae.parameters()).device
-        latents = pipeline.vae.encode(pixel_values.to(device=vae_device, dtype=vae_dtype)).latent_dist.sample()
-        latents = (latents - pipeline.vae.config.shift_factor) * pipeline.vae.config.scaling_factor
-        latents = latents.to(device=device, dtype=train_dtype)
-        prompt_embeds, pooled_prompt_embeds, text_ids = pipeline.encode_prompt(
-            prompt=batch["conditioning_text"],
-            prompt_2=batch["conditioning_text"],
-            device=device,
-            num_images_per_prompt=1,
-            max_sequence_length=512,
+    accumulation_context = accelerator.accumulate(transformer) if accelerator is not None else nullcontext()
+    with accumulation_context:
+        pixel_values = batch["pixel_values"].to(device=device, dtype=train_dtype)
+        with torch.no_grad():
+            vae_dtype = next(pipeline.vae.parameters()).dtype
+            vae_device = next(pipeline.vae.parameters()).device
+            latents = pipeline.vae.encode(pixel_values.to(device=vae_device, dtype=vae_dtype)).latent_dist.sample()
+            latents = (latents - pipeline.vae.config.shift_factor) * pipeline.vae.config.scaling_factor
+            latents = latents.to(device=device, dtype=train_dtype)
+            prompt_embeds, pooled_prompt_embeds, text_ids = pipeline.encode_prompt(
+                prompt=batch["conditioning_text"],
+                prompt_2=batch["conditioning_text"],
+                device=device,
+                num_images_per_prompt=1,
+                max_sequence_length=512,
+            )
+            prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
+            pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=train_dtype)
+            text_ids = text_ids.to(device=device, dtype=train_dtype)
+
+        packed_latents = pipeline._pack_latents(
+            latents,
+            latents.shape[0],
+            latents.shape[1],
+            latents.shape[2],
+            latents.shape[3],
+        ).to(device=device, dtype=train_dtype)
+        latent_image_ids = pipeline._prepare_latent_image_ids(
+            latents.shape[0],
+            latents.shape[2] // 2,
+            latents.shape[3] // 2,
+            device,
+            train_dtype,
         )
-        prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
-        pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=train_dtype)
-        text_ids = text_ids.to(device=device, dtype=train_dtype)
 
-    packed_latents = pipeline._pack_latents(
-        latents,
-        latents.shape[0],
-        latents.shape[1],
-        latents.shape[2],
-        latents.shape[3],
-    ).to(device=device, dtype=train_dtype)
-    latent_image_ids = pipeline._prepare_latent_image_ids(
-        latents.shape[0],
-        latents.shape[2] // 2,
-        latents.shape[3] // 2,
-        device,
-        train_dtype,
-    )
+        noise = torch.randn_like(packed_latents)
+        timesteps, sigmas = _sample_flux_flow_matching_timesteps(
+            batch_size=packed_latents.shape[0],
+            device=device,
+            dtype=train_dtype,
+        )
+        noisy_latents = ((1.0 - sigmas) * packed_latents) + (sigmas * noise)
+        target = noise - packed_latents
 
-    noise = torch.randn_like(packed_latents)
-    timesteps, sigmas = _sample_flux_flow_matching_timesteps(
-        batch_size=packed_latents.shape[0],
-        device=device,
-        dtype=train_dtype,
-    )
-    noisy_latents = ((1.0 - sigmas) * packed_latents) + (sigmas * noise)
-    target = noise - packed_latents
+        guidance = None
+        unwrapped_transformer = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
+        if getattr(getattr(unwrapped_transformer, "config", None), "guidance_embeds", False):
+            guidance = torch.ones((packed_latents.shape[0],), device=device, dtype=torch.float32)
 
-    guidance = None
-    if getattr(getattr(transformer, "config", None), "guidance_embeds", False):
-        guidance = torch.ones((packed_latents.shape[0],), device=device, dtype=torch.float32)
+        model_output = transformer(
+            hidden_states=noisy_latents,
+            encoder_hidden_states=prompt_embeds,
+            pooled_projections=pooled_prompt_embeds,
+            timestep=timesteps,
+            img_ids=latent_image_ids,
+            txt_ids=text_ids,
+            guidance=guidance,
+            return_dict=True,
+        )
+        prediction = model_output.sample if hasattr(model_output, "sample") else model_output[0]
+        loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
 
-    model_output = transformer(
-        hidden_states=noisy_latents,
-        encoder_hidden_states=prompt_embeds,
-        pooled_projections=pooled_prompt_embeds,
-        timestep=timesteps,
-        img_ids=latent_image_ids,
-        txt_ids=text_ids,
-        guidance=guidance,
-        return_dict=True,
-    )
-    prediction = model_output.sample if hasattr(model_output, "sample") else model_output[0]
-    loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
-
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
-    return float(loss.detach().cpu().item())
+        optimizer.zero_grad(set_to_none=True)
+        if accelerator is not None:
+            accelerator.backward(loss)
+        else:
+            loss.backward()
+        optimizer.step()
+    return loss.detach()
 
 
 
@@ -398,6 +485,18 @@ def _sample_flux_flow_matching_timesteps(*, batch_size: int, device: Any, dtype:
     while sigmas.ndim < 3:
         sigmas = sigmas.unsqueeze(-1)
     return timesteps, sigmas
+
+
+
+def _move_stage2_nontransformer_modules_to_device(pipeline: Any, *, device: Any, train_dtype: Any) -> None:
+    for component_name in ["vae", "text_encoder", "text_encoder_2", "image_encoder"]:
+        component = getattr(pipeline, component_name, None)
+        if component is None or not hasattr(component, "to"):
+            continue
+        kwargs: dict[str, Any] = {"device": device}
+        if component_name != "image_encoder":
+            kwargs["dtype"] = train_dtype
+        component.to(**kwargs)
 
 
 
@@ -569,8 +668,8 @@ def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str,
         "backbone_runtime": backbone_runtime,
         "implementation_boundary": (
             "Pattern selectors support inspection and optional requires_grad application on a real torch module tree, "
-            "and the repo now includes a minimal real diffusers-backed FLUX-family transformer fine-tuning path over "
-            "(image, canonical_caption) pairs when the runtime can load the requested backbone."
+            "and the repo now includes a minimal accelerate-based diffusers-backed FLUX-family transformer fine-tuning "
+            "path over (image, canonical_caption) pairs when the runtime can load the requested backbone."
         ),
     }
 
@@ -846,7 +945,7 @@ def _build_trainer_plan(
             "This scaffold is intentionally conservative.",
             "Stage 2 no longer means render; render belongs to Stage 1.",
             "Current code records a default policy of freezing non-transformer top-level modules and fine-tuning the full transformer.",
-            "Real diffusers-backed FLUX-family training is wired conservatively around packed VAE latents and canonical-caption prompt encoding, but successful execution still depends on the local runtime actually loading the requested backbone.",
+            "Real accelerate-based diffusers-backed FLUX-family training is wired conservatively around packed VAE latents and canonical-caption prompt encoding, but successful execution still depends on the local runtime actually loading the requested backbone.",
         ],
     }
 

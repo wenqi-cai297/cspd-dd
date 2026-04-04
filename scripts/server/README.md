@@ -223,6 +223,7 @@ bash scripts/server/run_stage2_train.sh \
 ```
 
 This helper currently:
+- launches Stage 2 through `accelerate launch` by default for multi-GPU-friendly process semantics
 - builds a Stage 2 run directory under `runs/stage2/train/...`
   - default dataset label is the dataset-root basename, except split-only roots like `.../train` become `<parent>_train` (same for `val`/`valid`/`validation`/`test`/`testing`)
   - optional override: set `STAGE2_DATASET_LABEL=...` before invoking the script
@@ -235,20 +236,21 @@ This helper currently:
 You can still pass through extra Stage 2 CLI options after the positional helper arguments. For example:
 
 ```bash
-bash scripts/server/run_stage2_train.sh \
+STAGE2_NUM_PROCESSES=2 bash scripts/server/run_stage2_train.sh \
   /data/imagenette/train \
   runs/stage1/render/imagenette/qwen_local/2026-04-02_010203/records.jsonl \
   black-forest-labs/FLUX.1-Kontext-dev \
   4 \
   1 \
-  --dry-run \
+  --gradient-accumulation-steps 1 \
   --backbone-local-files-only
 ```
 
 Use the direct CLI mainly when you intentionally need full manual control over every argument:
 
 ```bash
-cspd-stage2 train \
+accelerate launch --num_processes 2 \
+  -m cspd_stage2.cli train \
   --dataset-root /path/to/dataset_root \
   --render-input /path/to/stage1_render_records.jsonl \
   --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000 \
@@ -257,14 +259,16 @@ cspd-stage2 train \
   --module-include-pattern "*" \
   --batch-size 4 \
   --epochs 1 \
-  --dry-run
+  --gradient-accumulation-steps 1
 ```
 
 Important scope note:
 - the pairing/manifest/run scaffold is implemented now
 - the recorded default policy is to freeze non-transformer top-level modules and fine-tune the full `FluxTransformer2DModel`
+- the real training path now uses `accelerate` for process setup, dataloader preparation, backward, and main-process checkpoint writes
 - if memory is insufficient, the intended fallback is conditioning-related transformer submodules only
-- executable real FLUX.1 Kontext fine-tuning is **not** fully wired in this repo yet
+- the current trainer is still a practical first version rather than a fully optimized FLUX training stack
+- use `STAGE2_DISABLE_ACCELERATE=1` only if you intentionally want the older single-process path
 - use `--allow-placeholder-loop` only if you want a tiny PyTorch plumbing check rather than real model training
 
 Real backbone-load inspection example:

@@ -160,6 +160,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional component name to inspect from a real loaded backbone, e.g. transformer or text_encoder",
     )
     train_parser.add_argument(
+        "--disable-accelerate",
+        action="store_true",
+        help="Disable accelerate-managed preparation and run the minimal single-process device path instead",
+    )
+    train_parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=1,
+        help="Gradient accumulation steps forwarded to accelerate during real Stage 2 training",
+    )
+    train_parser.add_argument(
+        "--dataloader-drop-last",
+        action="store_true",
+        help="Drop the last incomplete batch when building the Stage 2 dataloader",
+    )
+    train_parser.add_argument(
         "--inspect-limit",
         type=int,
         default=200,
@@ -377,6 +393,9 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         backbone_device_map=args.backbone_device_map,
         backbone_local_files_only=args.backbone_local_files_only,
         backbone_component=args.backbone_component,
+        use_accelerate=not args.disable_accelerate,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        dataloader_drop_last=args.dataloader_drop_last,
     )
 
 

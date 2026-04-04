@@ -137,19 +137,20 @@ Then build the Stage 2 canonical-caption-conditioned training run from real imag
 For routine server usage, prefer the helper so the output directory stays under the structured convention `runs/stage2/train/<dataset_label>/<backbone_slug>/<timestamp>`:
 
 ```bash
-bash scripts/server/run_stage2_train.sh \
+STAGE2_NUM_PROCESSES=2 bash scripts/server/run_stage2_train.sh \
   /path/to/imagefolder_dataset \
   runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
   black-forest-labs/FLUX.1-Kontext-dev \
   4 \
   1 \
-  --dry-run
+  --gradient-accumulation-steps 1
 ```
 
 If you intentionally need full manual control over every argument, the direct CLI remains available:
 
 ```bash
-cspd-stage2 train \
+accelerate launch --num_processes 2 \
+  -m cspd_stage2.cli train \
   --dataset-root /path/to/imagefolder_dataset \
   --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
   --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000 \
@@ -158,10 +159,10 @@ cspd-stage2 train \
   --module-include-pattern "*" \
   --batch-size 4 \
   --epochs 1 \
-  --dry-run
+  --gradient-accumulation-steps 1
 ```
 
-This Stage 2 CLI already implements pairing / manifest generation / run-directory setup for a full-transformer fine-tuning plan on the current experimental FLUX.1 Kontext target. The current default policy is to freeze non-transformer top-level modules and train the full `FluxTransformer2DModel`; if memory is insufficient, the intended fallback is to reduce training to conditioning-related transformer submodules. Executable real FLUX.1 Kontext training is still a placeholder boundary in the current repo.
+This Stage 2 CLI now implements pairing / manifest generation / run-directory setup plus a minimal `accelerate`-managed real FLUX training path on the current experimental FLUX.1 Kontext target. The current default policy is to freeze non-transformer top-level modules and train the full `FluxTransformer2DModel`; if memory is insufficient, the intended fallback is to reduce training to conditioning-related transformer submodules. The current implementation honestly remains limited: it uses `Accelerator` for process setup / dataloader sharding / backward / unwrap-model checkpointing, but it is still a conservative first version rather than a fully optimized production trainer.
 
 Stage 2 now also has a real diffusers-backed backbone load path for inspection when the environment actually supports it. Example:
 

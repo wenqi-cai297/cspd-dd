@@ -440,6 +440,7 @@ def make_stage2_dataloader(
     batch_size: int,
     num_workers: int = 0,
     shuffle: bool = True,
+    drop_last: bool = False,
 ) -> Any:
     import torch
     from torch.utils.data import DataLoader
@@ -450,6 +451,7 @@ def make_stage2_dataloader(
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
+        drop_last=drop_last,
         collate_fn=_collate_stage2_batch,
     )
 

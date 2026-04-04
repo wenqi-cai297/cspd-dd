@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run CSPD Stage 2 v1 training scaffold.
+# Run CSPD Stage 2 v1 training helper with accelerate-based launch by default.
 # Usage:
 #   bash scripts/server/run_stage2_train.sh <dataset_root> <stage1_render_records_jsonl> [backbone_name] [batch_size] [epochs] [extra args...]
 # Example:
@@ -12,6 +12,10 @@ set -euo pipefail
 #   - default label is basename(dataset_root)
 #   - split-only roots like .../train become <parent>_train
 #   - override with STAGE2_DATASET_LABEL=...
+# Launch behavior:
+#   - default: accelerate launch --num_processes ${STAGE2_NUM_PROCESSES:-all available GPUs}
+#   - override with STAGE2_ACCELERATE_EXTRA_ARGS="..."
+#   - set STAGE2_DISABLE_ACCELERATE=1 to fall back to direct single-process CLI launch
 
 if [[ $# -lt 2 ]]; then
   echo "Usage: bash scripts/server/run_stage2_train.sh <dataset_root> <stage1_render_records_jsonl> [backbone_name] [batch_size] [epochs] [extra args...]"
@@ -27,6 +31,8 @@ BATCH_SIZE="4"
 EPOCHS="1"
 EXTRA_ARGS=()
 ENV_NAME="cspd-dd"
+USE_ACCELERATE="${STAGE2_DISABLE_ACCELERATE:-0}"
+ACCELERATE_EXTRA_ARGS_STRING="${STAGE2_ACCELERATE_EXTRA_ARGS:-}"
 
 if [[ $# -gt 0 && "$1" != -* ]]; then
   BACKBONE_NAME="$1"
@@ -103,6 +109,19 @@ if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
   CMD+=("${EXTRA_ARGS[@]}")
 fi
 
+ACCELERATE_CMD=()
+if [[ "$USE_ACCELERATE" != "1" ]]; then
+  ACCELERATE_CMD=(accelerate launch)
+  if [[ -n "${STAGE2_NUM_PROCESSES:-}" ]]; then
+    ACCELERATE_CMD+=(--num_processes "$STAGE2_NUM_PROCESSES")
+  fi
+  if [[ -n "$ACCELERATE_EXTRA_ARGS_STRING" ]]; then
+    # shellcheck disable=SC2206
+    ACCELERATE_EXTRA_ARGS=($ACCELERATE_EXTRA_ARGS_STRING)
+    ACCELERATE_CMD+=("${ACCELERATE_EXTRA_ARGS[@]}")
+  fi
+fi
+
 echo "[INFO] dataset_root:        $DATASET_ROOT"
 echo "[INFO] dataset_label:       $DATASET_LABEL"
 echo "[INFO] render_input:        $RENDER_INPUT"
@@ -110,8 +129,18 @@ echo "[INFO] backbone_name:       $BACKBONE_NAME"
 echo "[INFO] batch_size:          $BATCH_SIZE"
 echo "[INFO] epochs:              $EPOCHS"
 echo "[INFO] stage2_output_dir:   $OUTPUT_DIR"
+if [[ "$USE_ACCELERATE" != "1" ]]; then
+  echo "[INFO] launch_mode:         accelerate"
+  echo "[INFO] accelerate_cmd:      ${ACCELERATE_CMD[*]}"
+else
+  echo "[INFO] launch_mode:         direct_single_process"
+fi
 
-"${CMD[@]}"
+if [[ "$USE_ACCELERATE" != "1" ]]; then
+  "${ACCELERATE_CMD[@]}" "${CMD[@]}"
+else
+  "${CMD[@]}" --disable-accelerate
+fi
 
 echo "[INFO] Stage 2 helper run complete."
 echo "[INFO] manifest:            $OUTPUT_DIR/train_manifest.jsonl"
