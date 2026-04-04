@@ -13,35 +13,63 @@ from typing import Any
 def build_mock_transformer_backbone() -> Any:
     import torch
 
-    class MockAttentionBlock(torch.nn.Module):
+    class MockNorm1Context(torch.nn.Module):
         def __init__(self, width: int) -> None:
             super().__init__()
-            self.attn = torch.nn.Linear(width, width)
-            self.cross_attn = torch.nn.Linear(width, width)
-            self.context = torch.nn.Linear(width, width)
-            self.txt_proj = torch.nn.Linear(width, width)
+            self.linear = torch.nn.Linear(width, width)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return self.txt_proj(self.context(self.cross_attn(self.attn(x))))
+            return self.linear(x)
 
-    class MockBackbone(torch.nn.Module):
+    class MockAddedAttention(torch.nn.Module):
+        def __init__(self, width: int) -> None:
+            super().__init__()
+            self.add_q_proj = torch.nn.Linear(width, width)
+            self.add_k_proj = torch.nn.Linear(width, width)
+            self.add_v_proj = torch.nn.Linear(width, width)
+            self.to_add_out = torch.nn.Sequential(torch.nn.Linear(width, width))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.to_add_out(self.add_q_proj(x) + self.add_k_proj(x) + self.add_v_proj(x))
+
+    class MockTransformerBlock(torch.nn.Module):
+        def __init__(self, width: int) -> None:
+            super().__init__()
+            self.norm1_context = MockNorm1Context(width)
+            self.attn = MockAddedAttention(width)
+            self.ff_context = torch.nn.Sequential(torch.nn.Linear(width, width), torch.nn.GELU(), torch.nn.Linear(width, width))
+            self.ff = torch.nn.Sequential(torch.nn.Linear(width, width), torch.nn.GELU(), torch.nn.Linear(width, width))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            x = self.norm1_context(x)
+            x = self.attn(x)
+            x = self.ff_context(x)
+            return self.ff(x)
+
+    class MockFluxTransformer(torch.nn.Module):
+        def __init__(self, width: int = 16, depth: int = 2) -> None:
+            super().__init__()
+            self.context_embedder = torch.nn.Linear(width, width)
+            self.time_text_embed = torch.nn.Linear(width, width)
+            self.time_text_embed_timestep = torch.nn.Linear(width, width)
+            self.transformer_blocks = torch.nn.ModuleList([MockTransformerBlock(width) for _ in range(depth)])
+            self.output_proj = torch.nn.Linear(width, width)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            x = self.context_embedder(x) + self.time_text_embed(x) + self.time_text_embed_timestep(x)
+            for block in self.transformer_blocks:
+                x = block(x)
+            return self.output_proj(x)
+
+    class MockPipeline(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.transformer = torch.nn.ModuleDict(
-                {
-                    "block0": MockAttentionBlock(16),
-                    "block1": MockAttentionBlock(16),
-                }
-            )
-            self.context_embedder = torch.nn.Linear(16, 16)
-            self.decoder = torch.nn.Linear(16, 16)
+            self.transformer = MockFluxTransformer()
+            self.text_encoder = torch.nn.Linear(16, 16)
             self.vae = torch.nn.Linear(16, 16)
+            self.image_encoder = torch.nn.Linear(16, 16)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            x = self.transformer["block0"](x)
-            x = self.transformer["block1"](x)
-            x = self.context_embedder(x)
-            x = self.decoder(x)
-            return self.vae(x)
+            return self.vae(self.transformer(x))
 
-    return MockBackbone()
+    return MockPipeline()

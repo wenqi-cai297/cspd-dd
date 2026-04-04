@@ -256,11 +256,27 @@ accelerate launch --num_processes 2 \
   --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000 \
   --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
   --trainable-component-group full_transformer \
-  --module-include-pattern "*" \
   --batch-size 4 \
   --epochs 1 \
   --gradient-accumulation-steps 1
 ```
+
+For the memory-reduced conditioning-focused path, keep the same CLI and swap the component group:
+
+```bash
+accelerate launch --num_processes 2 \
+  -m cspd_stage2.cli train \
+  --dataset-root /path/to/dataset_root \
+  --render-input /path/to/stage1_render_records.jsonl \
+  --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000_conditioning_only \
+  --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
+  --trainable-component-group conditioning_transformer \
+  --batch-size 4 \
+  --epochs 1 \
+  --gradient-accumulation-steps 1
+```
+
+`conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also compose narrower groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`.
 
 Important scope note:
 - the pairing/manifest/run scaffold is implemented now

@@ -10,8 +10,10 @@ from typing import Any
 from cspd_stage2.backbone import load_module_from_reference, load_real_backbone_module
 from cspd_stage2.training import (
     AdapterPlan,
+    CONDITIONING_RELATED_GROUP_PATTERNS,
     Stage2TrainConfig,
     inspect_stage2_backbone_targets,
+    resolve_effective_module_selection,
     run_stage2_training,
 )
 
@@ -100,21 +102,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         dest="trainable_component_groups",
         default=None,
-        help="Trainable component-group label to record in the plan; may be repeated",
+        help=(
+            "Trainable component-group label to record and resolve into real transformer selection; may be repeated. "
+            f"Known groups: {', '.join(sorted(CONDITIONING_RELATED_GROUP_PATTERNS))}"
+        ),
     )
     train_parser.add_argument(
         "--module-include-pattern",
         action="append",
         dest="module_include_patterns",
         default=None,
-        help="Module-name include pattern placeholder for future backbone-specific selection; may be repeated",
+        help="Additional module-name include pattern; may be repeated and is combined with any selected component groups",
     )
     train_parser.add_argument(
         "--module-exclude-pattern",
         action="append",
         dest="module_exclude_patterns",
         default=None,
-        help="Module-name exclude pattern placeholder for future backbone-specific selection; may be repeated",
+        help="Module-name exclude pattern; may be repeated",
     )
     train_parser.add_argument(
         "--adapter-type",
@@ -184,7 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "--apply-real-module-selection",
         action="store_true",
-        help="If --inspect-module-reference is provided, apply include/exclude rules to the real module tree via requires_grad",
+        help="Force resolved include/exclude rules onto the real module tree via requires_grad even during inspection-oriented runs",
     )
     train_parser.add_argument(
         "--inject-adapters-on-real-module",
@@ -326,7 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
-    return Stage2TrainConfig(
+    config = Stage2TrainConfig(
         dataset_root=args.dataset_root,
         render_input=args.render_input,
         output_dir=args.output_dir,
@@ -356,12 +361,8 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         stage2_focus=args.stage2_focus,
         conditioning_objective=args.conditioning_objective,
         conditioning_text_field=args.conditioning_text_field,
-        trainable_component_groups=args.trainable_component_groups or [
-            "full_transformer",
-        ],
-        module_include_patterns=args.module_include_patterns or [
-            "*",
-        ],
+        trainable_component_groups=args.trainable_component_groups or ["full_transformer"],
+        module_include_patterns=args.module_include_patterns or [],
         module_exclude_patterns=args.module_exclude_patterns or [
             "vae",
             "autoencoder",
@@ -374,9 +375,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
             alpha=args.adapter_alpha,
             dropout=args.adapter_dropout,
             bias=args.adapter_bias,
-            target_module_patterns=args.module_include_patterns or [
-                "*",
-            ],
+            target_module_patterns=args.module_include_patterns or [],
             exclude_module_patterns=args.module_exclude_patterns or [
                 "vae",
                 "autoencoder",
@@ -397,6 +396,10 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         dataloader_drop_last=args.dataloader_drop_last,
     )
+    config.adapter_plan.target_module_patterns = (
+        config.adapter_plan.target_module_patterns or resolve_effective_module_selection(config)["effective_include_patterns"]
+    )
+    return config
 
 
 def _named_children_lines(module: Any, *, limit: int | None = None) -> list[str]:
@@ -587,9 +590,7 @@ def main() -> None:
         return
 
     if args.command == "inspect-targets":
-        include_patterns = args.module_include_patterns or [
-            "*"
-        ]
+        include_patterns = args.module_include_patterns or ["*"]
         exclude_patterns = args.module_exclude_patterns or [
             "vae",
             "autoencoder",

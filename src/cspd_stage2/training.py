@@ -36,15 +36,49 @@ DEFAULT_TEXT_CONDITIONING_GROUPS = [
     "full_transformer",
 ]
 
-DEFAULT_FLUX_KONTEXT_INCLUDE_PATTERNS = [
-    "*",
-]
-
 DEFAULT_EXCLUDE_PATTERNS = [
     "vae",
     "autoencoder",
     "decoder",
     "image_encoder",
+]
+
+CONDITIONING_RELATED_GROUP_PATTERNS = {
+    "full_transformer": ["*"],
+    "conditioning_context_embedder": [
+        "context_embedder",
+        "context_embedder.*",
+    ],
+    "conditioning_time_text_embed": [
+        "time_text_embed*",
+        "time_text_embed*.*",
+    ],
+    "conditioning_norm1_context": [
+        "transformer_blocks.*.norm1_context*",
+        "transformer_blocks.*.norm1_context*.*",
+    ],
+    "conditioning_added_kv_attention": [
+        "transformer_blocks.*.attn.add_q_proj",
+        "transformer_blocks.*.attn.add_k_proj",
+        "transformer_blocks.*.attn.add_v_proj",
+        "transformer_blocks.*.attn.to_add_out",
+        "transformer_blocks.*.attn.to_add_out.*",
+    ],
+    "conditioning_ff_context": [
+        "transformer_blocks.*.ff_context*",
+        "transformer_blocks.*.ff_context*.*",
+    ],
+}
+CONDITIONING_RELATED_GROUP_PATTERNS["conditioning_transformer"] = [
+    pattern
+    for group_name in [
+        "conditioning_context_embedder",
+        "conditioning_time_text_embed",
+        "conditioning_norm1_context",
+        "conditioning_added_kv_attention",
+        "conditioning_ff_context",
+    ]
+    for pattern in CONDITIONING_RELATED_GROUP_PATTERNS[group_name]
 ]
 
 
@@ -55,7 +89,7 @@ class AdapterPlan:
     alpha: float = 16.0
     dropout: float = 0.0
     target_strategy: str = "module_name_patterns"
-    target_module_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_FLUX_KONTEXT_INCLUDE_PATTERNS))
+    target_module_patterns: list[str] = field(default_factory=list)
     exclude_module_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE_PATTERNS))
     bias: str = "none"
     task_note: str = "placeholder adapter config until a concrete backbone-specific training stack is integrated"
@@ -93,7 +127,7 @@ class Stage2TrainConfig:
     conditioning_objective: str = "finetune_full_flux_transformer_on_real_image_and_stage1_canonical_caption_pairs"
     conditioning_text_field: str = "canonical_caption"
     trainable_component_groups: list[str] = field(default_factory=lambda: list(DEFAULT_TEXT_CONDITIONING_GROUPS))
-    module_include_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_FLUX_KONTEXT_INCLUDE_PATTERNS))
+    module_include_patterns: list[str] = field(default_factory=list)
     module_exclude_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE_PATTERNS))
     adapter_plan: AdapterPlan = field(default_factory=AdapterPlan)
     inspect_module_reference: str | None = None
@@ -256,7 +290,7 @@ def run_real_stage2_flux_training(
     if pipeline is None:
         raise RuntimeError("Real backbone load did not return a pipeline root module")
 
-    _freeze_stage2_modules(pipeline, config)
+    selection_result = _freeze_stage2_modules(pipeline, config)
     transformer = pipeline.transformer
     transformer.train()
     _move_stage2_nontransformer_modules_to_device(pipeline, device=device, train_dtype=train_dtype)
@@ -364,6 +398,7 @@ def run_real_stage2_flux_training(
         "device": str(device),
         "load_dtype": _torch_dtype_label(load_dtype),
         "train_dtype": _torch_dtype_label(train_dtype),
+        "applied_transformer_module_selection": selection_result.to_dict(),
         "accelerate": {
             "enabled": True,
             "num_processes": world_size,
@@ -500,7 +535,49 @@ def _move_stage2_nontransformer_modules_to_device(pipeline: Any, *, device: Any,
 
 
 
-def _freeze_stage2_modules(pipeline: Any, config: Stage2TrainConfig) -> None:
+def _resolve_trainable_component_groups(config: Stage2TrainConfig) -> list[str]:
+    groups = list(dict.fromkeys(config.trainable_component_groups or DEFAULT_TEXT_CONDITIONING_GROUPS))
+    return groups or list(DEFAULT_TEXT_CONDITIONING_GROUPS)
+
+
+
+def _expand_component_group_patterns(groups: list[str]) -> tuple[list[str], list[str]]:
+    include_patterns: list[str] = []
+    unknown_groups: list[str] = []
+    for group_name in groups:
+        patterns = CONDITIONING_RELATED_GROUP_PATTERNS.get(group_name)
+        if patterns is None:
+            unknown_groups.append(group_name)
+            continue
+        include_patterns.extend(patterns)
+    return list(dict.fromkeys(include_patterns)), unknown_groups
+
+
+
+def resolve_effective_module_selection(config: Stage2TrainConfig) -> dict[str, Any]:
+    groups = _resolve_trainable_component_groups(config)
+    group_patterns, unknown_groups = _expand_component_group_patterns(groups)
+    manual_patterns = list(dict.fromkeys(config.module_include_patterns or []))
+    effective_include_patterns = list(dict.fromkeys(group_patterns + manual_patterns))
+    if not effective_include_patterns:
+        effective_include_patterns = ["*"]
+    effective_exclude_patterns = list(dict.fromkeys(config.module_exclude_patterns or []))
+    selection_is_full_transformer = effective_include_patterns == ["*"]
+    should_apply = bool(config.apply_real_module_selection or not selection_is_full_transformer)
+    return {
+        "trainable_component_groups": groups,
+        "unknown_trainable_component_groups": unknown_groups,
+        "group_resolved_include_patterns": group_patterns,
+        "manual_include_patterns": manual_patterns,
+        "effective_include_patterns": effective_include_patterns,
+        "effective_exclude_patterns": effective_exclude_patterns,
+        "selection_is_full_transformer": selection_is_full_transformer,
+        "should_apply_real_transformer_selection": should_apply,
+    }
+
+
+
+def _freeze_stage2_modules(pipeline: Any, config: Stage2TrainConfig) -> Any:
     for component_name in ["transformer", "text_encoder", "text_encoder_2", "vae", "image_encoder"]:
         component = getattr(pipeline, component_name, None)
         if component is None or not hasattr(component, "parameters"):
@@ -512,14 +589,22 @@ def _freeze_stage2_modules(pipeline: Any, config: Stage2TrainConfig) -> None:
         raise RuntimeError("Loaded pipeline does not expose a transformer component")
 
     transformer = pipeline.transformer
+    selection = resolve_effective_module_selection(config)
     if config.train_transformer_core_only:
         for parameter in transformer.parameters():
             parameter.requires_grad = True
-    if config.apply_real_module_selection:
-        apply_trainable_parameter_selection(
+    if selection["should_apply_real_transformer_selection"]:
+        targeting = apply_trainable_parameter_selection(
             transformer,
-            include_patterns=config.module_include_patterns,
-            exclude_patterns=config.module_exclude_patterns,
+            include_patterns=selection["effective_include_patterns"],
+            exclude_patterns=selection["effective_exclude_patterns"],
+        )
+    else:
+        targeting = inspect_target_modules(
+            transformer,
+            include_patterns=selection["effective_include_patterns"],
+            exclude_patterns=selection["effective_exclude_patterns"],
+            limit=None,
         )
 
     if not config.freeze_text_encoder:
@@ -531,6 +616,7 @@ def _freeze_stage2_modules(pipeline: Any, config: Stage2TrainConfig) -> None:
     if not config.freeze_vae and getattr(pipeline, "vae", None) is not None:
         for parameter in pipeline.vae.parameters():
             parameter.requires_grad = True
+    return targeting
 
 
 
@@ -632,14 +718,18 @@ def run_placeholder_transformer_core_loop(config: Stage2TrainConfig, manifest_pa
     }
 
 
+
 def _config_to_dict(config: Stage2TrainConfig) -> dict[str, Any]:
     payload = asdict(config)
     payload["backbone_assumptions"] = _infer_backbone_assumptions(config.backbone_name)
+    payload["resolved_module_selection"] = resolve_effective_module_selection(config)
     return payload
 
 
+
 def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str, Any]) -> dict[str, Any]:
-    trainable_groups = list(dict.fromkeys(config.trainable_component_groups))
+    selection = resolve_effective_module_selection(config)
+    trainable_groups = selection["trainable_component_groups"]
     frozen_groups: list[str] = []
     if config.train_transformer_core_only:
         frozen_groups.append("non_transformer_top_level_modules")
@@ -653,28 +743,32 @@ def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str,
         "conditioning_objective": config.conditioning_objective,
         "fallback_if_oom": "restrict training to conditioning-related transformer submodules",
         "trainable_component_groups": trainable_groups,
+        "unknown_trainable_component_groups": selection["unknown_trainable_component_groups"],
         "frozen_component_groups": frozen_groups,
         "module_selection": {
-            "include_patterns": config.module_include_patterns,
-            "exclude_patterns": config.module_exclude_patterns,
+            "requested_include_patterns": list(config.module_include_patterns),
+            "effective_include_patterns": selection["effective_include_patterns"],
+            "exclude_patterns": selection["effective_exclude_patterns"],
             "selection_semantics": (
-                "pattern_inspection_with_optional_requires_grad_and_adapter_injection"
-                if config.inspect_module_reference
-                else "pattern_metadata_only"
+                "resolved_component_groups_plus_patterns_with_real_requires_grad_application"
+                if selection["should_apply_real_transformer_selection"] or config.inspect_module_reference
+                else "resolved_component_groups_plus_patterns_metadata_only"
             ),
         },
         "adapter_plan": asdict(config.adapter_plan),
         "backbone_assumptions": _infer_backbone_assumptions(config.backbone_name),
         "backbone_runtime": backbone_runtime,
         "implementation_boundary": (
-            "Pattern selectors support inspection and optional requires_grad application on a real torch module tree, "
-            "and the repo now includes a minimal accelerate-based diffusers-backed FLUX-family transformer fine-tuning "
-            "path over (image, canonical_caption) pairs when the runtime can load the requested backbone."
+            "Pattern selectors now resolve trainable component groups into real transformer-internal module patterns, "
+            "and the real training path applies those selectors to requires_grad when using the conditioning-focused "
+            "submodule path instead of full-transformer training."
         ),
     }
 
 
+
 def _build_backbone_runtime_summary(config: Stage2TrainConfig) -> dict[str, Any]:
+    selection = resolve_effective_module_selection(config)
     loader_name = "generic_python_loader" if not config.inspect_module_reference else None
     load_result = load_generative_backbone(
         config.backbone_name,
@@ -697,6 +791,7 @@ def _build_backbone_runtime_summary(config: Stage2TrainConfig) -> dict[str, Any]
         "module_reference": config.inspect_module_reference,
         "module_selection_applied": False,
         "adapter_injection_applied": False,
+        "resolved_module_selection": selection,
         "module_targeting": None,
         "adapter_injection": None,
         "requested_component": config.backbone_component,
@@ -729,38 +824,40 @@ def _build_backbone_runtime_summary(config: Stage2TrainConfig) -> dict[str, Any]
             summary["loader_notes"] = list(real_load.notes or [])
             summary["resolved_module_name"] = real_load.resolved_module_name
             summary["resolved_module_type"] = real_load.resolved_module_type
-        if config.apply_real_module_selection:
+        if selection["should_apply_real_transformer_selection"]:
             targeting = apply_trainable_parameter_selection(
                 module,
-                include_patterns=config.module_include_patterns,
-                exclude_patterns=config.module_exclude_patterns,
+                include_patterns=selection["effective_include_patterns"],
+                exclude_patterns=selection["effective_exclude_patterns"],
             )
             summary["module_selection_applied"] = True
         else:
             targeting = inspect_target_modules(
                 module,
-                include_patterns=config.module_include_patterns,
-                exclude_patterns=config.module_exclude_patterns,
+                include_patterns=selection["effective_include_patterns"],
+                exclude_patterns=selection["effective_exclude_patterns"],
                 limit=config.inspect_limit,
             )
         summary["inspection_status"] = "ok"
         summary["module_targeting"] = targeting.to_dict()
 
         if config.inject_adapters_on_real_module:
+            adapter_plan = config.adapter_plan
+            target_patterns = adapter_plan.target_module_patterns or selection["effective_include_patterns"]
             injection = inject_lora_adapters(
                 module,
-                include_patterns=config.adapter_plan.target_module_patterns,
-                exclude_patterns=config.adapter_plan.exclude_module_patterns,
-                rank=config.adapter_plan.rank,
-                alpha=config.adapter_plan.alpha,
-                dropout=config.adapter_plan.dropout,
+                include_patterns=target_patterns,
+                exclude_patterns=adapter_plan.exclude_module_patterns,
+                rank=adapter_plan.rank,
+                alpha=adapter_plan.alpha,
+                dropout=adapter_plan.dropout,
             )
             summary["adapter_injection_applied"] = True
             summary["adapter_injection"] = injection.to_dict()
             summary["module_targeting_after_adapter_injection"] = inspect_target_modules(
                 module,
-                include_patterns=config.module_include_patterns,
-                exclude_patterns=config.module_exclude_patterns,
+                include_patterns=selection["effective_include_patterns"],
+                exclude_patterns=selection["effective_exclude_patterns"],
                 limit=config.inspect_limit,
             ).to_dict()
     except Exception as exc:  # noqa: BLE001
@@ -768,6 +865,7 @@ def _build_backbone_runtime_summary(config: Stage2TrainConfig) -> dict[str, Any]
         summary["inspection_error"] = str(exc)
 
     return summary
+
 
 
 def inspect_stage2_backbone_targets(
@@ -898,6 +996,7 @@ def inspect_stage2_backbone_targets(
     return summary
 
 
+
 def _build_trainer_plan(
     config: Stage2TrainConfig,
     manifest_path: str,
@@ -936,18 +1035,21 @@ def _build_trainer_plan(
             "config_snapshot": "implemented",
             "component_target_plan": "implemented_with_optional_real_module_inspection",
             "adapter_target_plan": "implemented_with_optional_real_module_lora_injection",
-            "real_module_target_selection": "optional_when_explicit_module_reference_is_provided",
+            "real_module_target_selection": "implemented_for_real_training_when_conditioning_submodule_path_is_selected",
             "real_module_adapter_injection": "optional_when_explicit_module_reference_is_provided",
             "placeholder_loop": "optional",
             "full_flux_kontext_finetuning": "minimally_implemented_when_runtime_supports_real_backbone_loading",
         },
         "notes": [
             "This scaffold is intentionally conservative.",
+            "Stage 2 is canonical-caption-conditioned generative adaptation, not image-editing fine-tuning.",
             "Stage 2 no longer means render; render belongs to Stage 1.",
             "Current code records a default policy of freezing non-transformer top-level modules and fine-tuning the full transformer.",
+            "When a conditioning-focused transformer submodule group is selected, the real training path now applies that selection to requires_grad before optimization.",
             "Real accelerate-based diffusers-backed FLUX-family training is wired conservatively around packed VAE latents and canonical-caption prompt encoding, but successful execution still depends on the local runtime actually loading the requested backbone.",
         ],
     }
+
 
 
 def _infer_backbone_assumptions(backbone_name: str) -> dict[str, Any]:

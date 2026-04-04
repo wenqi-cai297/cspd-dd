@@ -156,11 +156,27 @@ accelerate launch --num_processes 2 \
   --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000 \
   --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
   --trainable-component-group full_transformer \
-  --module-include-pattern "*" \
   --batch-size 4 \
   --epochs 1 \
   --gradient-accumulation-steps 1
 ```
+
+If you hit memory pressure, keep the same top-level interface but switch to the new conditioning-focused transformer-internal path:
+
+```bash
+accelerate launch --num_processes 2 \
+  -m cspd_stage2.cli train \
+  --dataset-root /path/to/imagefolder_dataset \
+  --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
+  --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000_conditioning_only \
+  --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
+  --trainable-component-group conditioning_transformer \
+  --batch-size 4 \
+  --epochs 1 \
+  --gradient-accumulation-steps 1
+```
+
+`conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also combine finer groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`.
 
 This Stage 2 CLI now implements pairing / manifest generation / run-directory setup plus a minimal `accelerate`-managed real FLUX training path on the current experimental FLUX.1 Kontext target. The current default policy is to freeze non-transformer top-level modules and train the full `FluxTransformer2DModel`; if memory is insufficient, the intended fallback is to reduce training to conditioning-related transformer submodules. The current implementation honestly remains limited: it uses `Accelerator` for process setup / dataloader sharding / backward / unwrap-model checkpointing, but it is still a conservative first version rather than a fully optimized production trainer.
 
