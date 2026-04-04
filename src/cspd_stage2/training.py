@@ -12,6 +12,8 @@ This module is deliberately honest about scope:
 """
 
 import importlib.util
+import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -101,6 +103,7 @@ class Stage2TrainConfig:
     render_input: str
     output_dir: str
     backbone_name: str = "black-forest-labs/FLUX.1-Kontext-dev"
+    memory_log_artifact_name: str = "memory_diagnostics.jsonl"
     batch_size: int = 4
     learning_rate: float = 1e-4
     epochs: int = 1
@@ -232,11 +235,98 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
             "config": str((run_dir / "stage2_config_snapshot.json").resolve()),
             "trainer_plan": str((run_dir / "trainer_plan.json").resolve()),
             "run_summary": str((run_dir / "stage2_run_summary.json").resolve()),
+            "memory_log_pattern": str((run_dir / f"rank*_{config.memory_log_artifact_name}").resolve()),
         },
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
     write_json(run_dir / "stage2_run_summary.json", summary)
     return summary
+
+
+def _safe_jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _safe_jsonable(inner) for key, inner in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_jsonable(item) for item in value]
+    return str(value)
+
+
+def _accelerator_rank_info(accelerator: Any | None, device: Any) -> dict[str, Any]:
+    local_rank = getattr(accelerator, "local_process_index", 0) if accelerator is not None else 0
+    global_rank = getattr(accelerator, "process_index", 0) if accelerator is not None else 0
+    world_size = getattr(accelerator, "num_processes", 1) if accelerator is not None else 1
+    distributed_type = str(getattr(getattr(accelerator, "state", None), "distributed_type", "no")) if accelerator is not None else "no"
+    return {
+        "global_rank": int(global_rank),
+        "local_rank": int(local_rank),
+        "world_size": int(world_size),
+        "distributed_type": distributed_type,
+        "device": str(device),
+        "device_type": getattr(device, "type", None),
+        "device_index": getattr(device, "index", None),
+        "pid": os.getpid(),
+    }
+
+
+
+def _collect_cuda_memory_stats(torch: Any, device: Any) -> dict[str, Any]:
+    stats: dict[str, Any] = {
+        "cuda_available": bool(torch.cuda.is_available()),
+        "device": str(device),
+    }
+    if not torch.cuda.is_available() or getattr(device, "type", None) != "cuda":
+        stats["memory_stats_available"] = False
+        return stats
+
+    resolved_device = device
+    if getattr(device, "index", None) is None:
+        resolved_device = torch.device("cuda", torch.cuda.current_device())
+    stats.update(
+        {
+            "memory_stats_available": True,
+            "device_index": resolved_device.index,
+            "allocated_bytes": int(torch.cuda.memory_allocated(resolved_device)),
+            "reserved_bytes": int(torch.cuda.memory_reserved(resolved_device)),
+            "max_allocated_bytes": int(torch.cuda.max_memory_allocated(resolved_device)),
+            "max_reserved_bytes": int(torch.cuda.max_memory_reserved(resolved_device)),
+        }
+    )
+    return stats
+
+
+
+def _append_memory_event(
+    *,
+    artifact_path: Path,
+    accelerator: Any | None,
+    device: Any,
+    phase: str,
+    torch_module: Any,
+    epoch: int | None = None,
+    global_step: int | None = None,
+    optimizer_step: int | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "phase": phase,
+        "epoch": epoch,
+        "global_step": global_step,
+        "optimizer_step": optimizer_step,
+    }
+    payload.update(_accelerator_rank_info(accelerator, device))
+    payload["memory"] = _collect_cuda_memory_stats(torch_module, device)
+    if extra:
+        payload["extra"] = _safe_jsonable(extra)
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    with artifact_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return payload
+
 
 
 def run_real_stage2_flux_training(
@@ -273,6 +363,24 @@ def run_real_stage2_flux_training(
         device = _resolve_training_device(config)
     load_dtype = _resolve_training_dtype(config, device)
     train_dtype = torch.float32 if device.type == "cpu" else load_dtype
+    rank_info = _accelerator_rank_info(accelerator, device)
+    memory_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_{config.memory_log_artifact_name}"
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    _append_memory_event(
+        artifact_path=memory_log_path,
+        accelerator=accelerator,
+        device=device,
+        phase="training_start",
+        torch_module=torch,
+        extra={
+            "backbone_name": config.backbone_name,
+            "manifest_path": str(Path(manifest_path).resolve()),
+            "num_pairs": len(pairs),
+            "load_dtype": _torch_dtype_label(load_dtype),
+            "train_dtype": _torch_dtype_label(train_dtype),
+        },
+    )
 
     requested_device_for_load = None if config.use_accelerate else str(device)
     requested_device_map = None if config.use_accelerate else config.backbone_device_map
@@ -289,8 +397,29 @@ def run_real_stage2_flux_training(
     pipeline = backbone.root_module
     if pipeline is None:
         raise RuntimeError("Real backbone load did not return a pipeline root module")
+    _append_memory_event(
+        artifact_path=memory_log_path,
+        accelerator=accelerator,
+        device=device,
+        phase="after_backbone_load",
+        torch_module=torch,
+        extra={
+            "resolved_module_name": backbone.resolved_module_name,
+            "resolved_module_type": backbone.resolved_module_type,
+            "loader": backbone.loader_name,
+            "loader_status": backbone.implementation_status,
+        },
+    )
 
     selection_result = _freeze_stage2_modules(pipeline, config)
+    _append_memory_event(
+        artifact_path=memory_log_path,
+        accelerator=accelerator,
+        device=device,
+        phase="after_freeze_selection",
+        torch_module=torch,
+        extra={"applied_transformer_module_selection": selection_result.to_dict()},
+    )
     transformer = pipeline.transformer
     transformer.train()
     _move_stage2_nontransformer_modules_to_device(pipeline, device=device, train_dtype=train_dtype)
@@ -312,6 +441,19 @@ def run_real_stage2_flux_training(
     if accelerator is not None:
         transformer, optimizer, dataloader = accelerator.prepare(transformer, optimizer, dataloader)
         pipeline.transformer = transformer
+    _append_memory_event(
+        artifact_path=memory_log_path,
+        accelerator=accelerator,
+        device=device,
+        phase="after_dataloader_accelerate_prepare",
+        torch_module=torch,
+        extra={
+            "batch_size": config.batch_size,
+            "num_workers": config.num_workers,
+            "gradient_accumulation_steps": max(config.gradient_accumulation_steps, 1),
+            "dataloader_batches_per_epoch": len(dataloader) if hasattr(dataloader, "__len__") else None,
+        },
+    )
 
     checkpoint_dir = run_dir / "checkpoints"
     is_main_process = accelerator.is_main_process if accelerator is not None else True
@@ -350,6 +492,10 @@ def run_real_stage2_flux_training(
                 device=device,
                 train_dtype=train_dtype,
                 resolution=config.resolution,
+                memory_log_path=memory_log_path,
+                epoch=epoch + 1,
+                global_step=global_step + 1,
+                optimizer_step=optimizer_step_count + 1,
             )
             global_step += 1
             sync_gradients = accelerator.sync_gradients if accelerator is not None else True
@@ -373,6 +519,17 @@ def run_real_stage2_flux_training(
 
     if accelerator is not None:
         accelerator.wait_for_everyone()
+    _append_memory_event(
+        artifact_path=memory_log_path,
+        accelerator=accelerator,
+        device=device,
+        phase="training_loop_complete",
+        torch_module=torch,
+        epoch=max(config.epochs, 1),
+        global_step=global_step,
+        optimizer_step=optimizer_step_count,
+        extra={"loss_count": len(losses)},
+    )
     final_checkpoint_dir = checkpoint_dir / "final_transformer"
     if is_main_process:
         checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
@@ -416,6 +573,7 @@ def run_real_stage2_flux_training(
         "logs": logs,
         "estimated_total_optimizer_steps": total_optimizer_steps,
         "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
+        "memory_log_path": str(memory_log_path.resolve()),
         "launch_notes": launch_notes,
     }
     if is_main_process:
@@ -435,6 +593,10 @@ def _run_real_flux_train_step(
     device: Any,
     train_dtype: Any,
     resolution: int,
+    memory_log_path: Path,
+    epoch: int,
+    global_step: int,
+    optimizer_step: int,
 ) -> Any:
     import torch
 
@@ -443,12 +605,48 @@ def _run_real_flux_train_step(
     accumulation_context = accelerator.accumulate(transformer) if accelerator is not None else nullcontext()
     with accumulation_context:
         pixel_values = batch["pixel_values"].to(device=device, dtype=train_dtype)
+        _append_memory_event(
+            artifact_path=memory_log_path,
+            accelerator=accelerator,
+            device=device,
+            phase="before_vae_encode",
+            torch_module=torch,
+            epoch=epoch,
+            global_step=global_step,
+            optimizer_step=optimizer_step,
+            extra={
+                "pixel_values_shape": list(pixel_values.shape),
+                "conditioning_batch_size": len(batch.get("conditioning_text", [])),
+            },
+        )
         with torch.no_grad():
             vae_dtype = next(pipeline.vae.parameters()).dtype
             vae_device = next(pipeline.vae.parameters()).device
             latents = pipeline.vae.encode(pixel_values.to(device=vae_device, dtype=vae_dtype)).latent_dist.sample()
             latents = (latents - pipeline.vae.config.shift_factor) * pipeline.vae.config.scaling_factor
             latents = latents.to(device=device, dtype=train_dtype)
+            _append_memory_event(
+                artifact_path=memory_log_path,
+                accelerator=accelerator,
+                device=device,
+                phase="after_vae_encode",
+                torch_module=torch,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                extra={"latents_shape": list(latents.shape)},
+            )
+            _append_memory_event(
+                artifact_path=memory_log_path,
+                accelerator=accelerator,
+                device=device,
+                phase="before_prompt_encode",
+                torch_module=torch,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                extra={"prompt_sample": batch["conditioning_text"][0] if batch.get("conditioning_text") else None},
+            )
             prompt_embeds, pooled_prompt_embeds, text_ids = pipeline.encode_prompt(
                 prompt=batch["conditioning_text"],
                 prompt_2=batch["conditioning_text"],
@@ -459,6 +657,21 @@ def _run_real_flux_train_step(
             prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
             pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=train_dtype)
             text_ids = text_ids.to(device=device, dtype=train_dtype)
+            _append_memory_event(
+                artifact_path=memory_log_path,
+                accelerator=accelerator,
+                device=device,
+                phase="after_prompt_encode",
+                torch_module=torch,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                extra={
+                    "prompt_embeds_shape": list(prompt_embeds.shape),
+                    "pooled_prompt_embeds_shape": list(pooled_prompt_embeds.shape),
+                    "text_ids_shape": list(text_ids.shape),
+                },
+            )
 
         packed_latents = pipeline._pack_latents(
             latents,
@@ -489,6 +702,22 @@ def _run_real_flux_train_step(
         if getattr(getattr(unwrapped_transformer, "config", None), "guidance_embeds", False):
             guidance = torch.ones((packed_latents.shape[0],), device=device, dtype=torch.float32)
 
+        _append_memory_event(
+            artifact_path=memory_log_path,
+            accelerator=accelerator,
+            device=device,
+            phase="before_transformer_forward",
+            torch_module=torch,
+            epoch=epoch,
+            global_step=global_step,
+            optimizer_step=optimizer_step,
+            extra={
+                "packed_latents_shape": list(packed_latents.shape),
+                "latent_image_ids_shape": list(latent_image_ids.shape),
+                "timesteps_shape": list(timesteps.shape),
+                "guidance_enabled": guidance is not None,
+            },
+        )
         model_output = transformer(
             hidden_states=noisy_latents,
             encoder_hidden_states=prompt_embeds,
@@ -501,12 +730,43 @@ def _run_real_flux_train_step(
         )
         prediction = model_output.sample if hasattr(model_output, "sample") else model_output[0]
         loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+        _append_memory_event(
+            artifact_path=memory_log_path,
+            accelerator=accelerator,
+            device=device,
+            phase="after_loss",
+            torch_module=torch,
+            epoch=epoch,
+            global_step=global_step,
+            optimizer_step=optimizer_step,
+            extra={"loss": float(loss.detach().float().cpu().item())},
+        )
 
         optimizer.zero_grad(set_to_none=True)
+        _append_memory_event(
+            artifact_path=memory_log_path,
+            accelerator=accelerator,
+            device=device,
+            phase="before_backward",
+            torch_module=torch,
+            epoch=epoch,
+            global_step=global_step,
+            optimizer_step=optimizer_step,
+        )
         if accelerator is not None:
             accelerator.backward(loss)
         else:
             loss.backward()
+        _append_memory_event(
+            artifact_path=memory_log_path,
+            accelerator=accelerator,
+            device=device,
+            phase="after_backward",
+            torch_module=torch,
+            epoch=epoch,
+            global_step=global_step,
+            optimizer_step=optimizer_step,
+        )
         optimizer.step()
     return loss.detach()
 

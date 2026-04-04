@@ -180,6 +180,8 @@ accelerate launch --num_processes 2 \
 
 This Stage 2 CLI now implements pairing / manifest generation / run-directory setup plus a minimal `accelerate`-managed real FLUX training path on the current experimental FLUX.1 Kontext target. The current default policy is to freeze non-transformer top-level modules and train the full `FluxTransformer2DModel`; if memory is insufficient, the intended fallback is to reduce training to conditioning-related transformer submodules. The current implementation honestly remains limited: it uses `Accelerator` for process setup / dataloader sharding / backward / unwrap-model checkpointing, but it is still a conservative first version rather than a fully optimized production trainer.
 
+During real Stage 2 training, each process now also writes a per-rank GPU memory diagnostics artifact under the run directory, named like `rank00_memory_diagnostics.jsonl`. These JSONL events log rank / device identity plus current and peak CUDA allocated/reserved memory around key phases such as backbone load, module freeze/selection, accelerate prepare, VAE encode, prompt encode, transformer forward, loss, and backward.
+
 Stage 2 now also has a real diffusers-backed backbone load path for inspection when the environment actually supports it. Example:
 
 ```bash
