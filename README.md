@@ -194,6 +194,39 @@ accelerate launch --num_processes 2 \
   --gradient-accumulation-steps 1
 ```
 
+PixArt-Σ is now also wired as a real Stage 2 path for the same `(image, canonical_caption)` objective. This stays in the text-to-image generative framing: real images are VAE-encoded to latents, canonical captions are encoded with the PixArt text stack, and the PixArt transformer is adapted to model those caption-conditioned latents. It is not an image-editing path.
+
+Recommended first practical run on limited hardware: PixArt-Σ LoRA at 512 resolution.
+
+```bash
+accelerate launch --num_processes 1 \
+  -m cspd_stage2.cli train \
+  --dataset-root /path/to/imagefolder_dataset \
+  --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
+  --output-dir runs/stage2/train/my_dataset/pixart_sigma/2026-04-05_020000_lora \
+  --backbone-name PixArt-alpha/PixArt-Sigma-XL-2-512-MS \
+  --resolution 512 \
+  --backbone-torch-dtype float16 \
+  --training-parameterization lora \
+  --trainable-component-group conditioning_transformer \
+  --adapter-rank 16 \
+  --adapter-alpha 16 \
+  --batch-size 1 \
+  --gradient-accumulation-steps 4 \
+  --epochs 1
+```
+
+If you want to precompute PixArt prompt conditioning for repeated captions, the prompt cache path also works for PixArt-Σ now; it stores `prompt_embeds` plus `prompt_attention_mask` instead of the FLUX/Kontext triplet:
+
+```bash
+cspd-stage2 cache-prompt-embeds \
+  --dataset-root /path/to/imagefolder_dataset \
+  --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
+  --output-dir runs/stage2/prompt_cache/my_dataset/pixart_sigma/2026-04-05_020500 \
+  --backbone-name PixArt-alpha/PixArt-Sigma-XL-2-512-MS \
+  --backbone-device cpu
+```
+
 If prompt/text encoder movement is now the memory bottleneck, you can precompute canonical-caption prompt embeddings once and then train from the cache so Stage 2 no longer runs `encode_prompt(...)` each step. The current cache format is honest and backbone-path-specific: it stores the current diffusers FLUX/Kontext `encode_prompt` outputs (`prompt_embeds`, `pooled_prompt_embeds`, `text_ids`) per canonical caption, so you should regenerate it if you change the backbone family or prompt-encoding path.
 
 Explicit preprocessing:

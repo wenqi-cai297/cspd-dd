@@ -156,8 +156,12 @@ class Stage2PairedDataset:
             item["prompt_cache_key"] = cache_key
             item["prompt_cache_path"] = str(cache_path)
             item["cached_prompt_embeds"] = cache_payload["prompt_embeds"]
-            item["cached_pooled_prompt_embeds"] = cache_payload["pooled_prompt_embeds"]
-            item["cached_text_ids"] = cache_payload["text_ids"]
+            if "pooled_prompt_embeds" in cache_payload:
+                item["cached_pooled_prompt_embeds"] = cache_payload["pooled_prompt_embeds"]
+            if "text_ids" in cache_payload:
+                item["cached_text_ids"] = cache_payload["text_ids"]
+            if "prompt_attention_mask" in cache_payload:
+                item["cached_prompt_attention_mask"] = cache_payload["prompt_attention_mask"]
         return item
 
 
@@ -524,15 +528,19 @@ def _collate_stage2_batch(items: list[dict[str, Any]]) -> dict[str, Any]:
     cached_prompt_embeds = [item.get("cached_prompt_embeds") for item in items if item.get("cached_prompt_embeds") is not None]
     cached_pooled_prompt_embeds = [item.get("cached_pooled_prompt_embeds") for item in items if item.get("cached_pooled_prompt_embeds") is not None]
     cached_text_ids = [item.get("cached_text_ids") for item in items if item.get("cached_text_ids") is not None]
+    cached_prompt_attention_mask = [item.get("cached_prompt_attention_mask") for item in items if item.get("cached_prompt_attention_mask") is not None]
     if len(cached_prompt_embeds) == len(items):
         batch["prompt_cache_key"] = [item.get("prompt_cache_key") for item in items]
         batch["prompt_cache_path"] = [item.get("prompt_cache_path") for item in items]
         batch["cached_prompt_embeds"] = torch.cat(cached_prompt_embeds, dim=0)
-        batch["cached_pooled_prompt_embeds"] = torch.cat(cached_pooled_prompt_embeds, dim=0)
+        if len(cached_pooled_prompt_embeds) == len(items):
+            batch["cached_pooled_prompt_embeds"] = torch.cat(cached_pooled_prompt_embeds, dim=0)
         if cached_text_ids:
             reference = cached_text_ids[0]
             same_text_ids = all(torch.equal(reference, other) for other in cached_text_ids[1:])
             batch["cached_text_ids"] = reference if same_text_ids else torch.cat(cached_text_ids, dim=0)
+        if len(cached_prompt_attention_mask) == len(items):
+            batch["cached_prompt_attention_mask"] = torch.cat(cached_prompt_attention_mask, dim=0)
     return batch
 
 

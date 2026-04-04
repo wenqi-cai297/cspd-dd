@@ -132,7 +132,7 @@ class Stage2TrainConfig:
     freeze_vae: bool = True
     train_transformer_core_only: bool = True
     stage2_focus: str = "transformer_finetuning"
-    conditioning_objective: str = "finetune_full_flux_transformer_on_real_image_and_stage1_canonical_caption_pairs"
+    conditioning_objective: str = "finetune_generative_transformer_on_real_image_and_stage1_canonical_caption_pairs"
     conditioning_text_field: str = "canonical_caption"
     trainable_component_groups: list[str] = field(default_factory=lambda: list(DEFAULT_TEXT_CONDITIONING_GROUPS))
     module_include_patterns: list[str] = field(default_factory=list)
@@ -229,7 +229,7 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         if not config.generate_manifest_only and not config.dry_run:
             try:
                 last_known_phase = "before_real_training"
-                training_result = run_real_stage2_flux_training(
+                training_result = run_real_stage2_backbone_training(
                     config=config,
                     pairs=pairing.pairs,
                     run_dir=run_dir,
@@ -244,7 +244,7 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
                     training_result["real_training_traceback"] = traceback.format_exc()
                     training_result["last_known_phase"] = training_result.get("last_known_phase") or last_known_phase
                     training_result["message"] = (
-                        "Real Stage 2 FLUX training could not run in this environment; fell back to the explicit placeholder loop."
+                        "Real Stage 2 backbone training could not run in this environment; fell back to the explicit placeholder loop."
                     )
                 else:
                     training_result = {
@@ -252,7 +252,7 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
                         "implemented_training": False,
                         "placeholder_training": False,
                         "message": (
-                            "Real Stage 2 FLUX training was attempted but could not start or complete in this environment. "
+                            "Real Stage 2 backbone training was attempted but could not start or complete in this environment. "
                             "See training_error for the real runtime failure."
                         ),
                         "training_error": str(exc),
@@ -315,6 +315,8 @@ def _build_or_validate_prompt_cache(*, config: Stage2TrainConfig, prompt_cache_d
     expected_paths = {stable_prompt_cache_key(caption): prompt_cache_dir / f"{stable_prompt_cache_key(caption)}.pt" for caption in unique_captions}
     existing = {key: path for key, path in expected_paths.items() if path.exists()}
     missing = {key: path for key, path in expected_paths.items() if not path.exists()}
+    backbone_family = infer_backbone_family(config.backbone_name)
+    cache_fields = ["prompt_embeds", "pooled_prompt_embeds", "text_ids"] if backbone_family in {"flux", "flux_kontext"} else ["prompt_embeds", "prompt_attention_mask"]
 
     if missing and not config.precompute_prompt_embeddings:
         missing_preview = [str(path) for path in list(missing.values())[:5]]
@@ -340,9 +342,9 @@ def _build_or_validate_prompt_cache(*, config: Stage2TrainConfig, prompt_cache_d
         "backbone_name": config.backbone_name,
         "backbone_family_assumption": _infer_backbone_assumptions(config.backbone_name),
         "cache_format": {
-            "format_version": 1,
-            "fields": ["prompt_embeds", "pooled_prompt_embeds", "text_ids"],
-            "backbone_specific_note": "This cache format is currently tied to the diffusers FLUX/Kontext encode_prompt contract used by the current Stage 2 path.",
+            "format_version": 2,
+            "fields": cache_fields,
+            "backbone_specific_note": f"Cache tensors are produced from the current diffusers {backbone_family} encode_prompt contract and should be treated as backbone/path-specific.",
         },
         "prompt_cache_dir": str(prompt_cache_dir.resolve()),
         "num_unique_canonical_captions": len(unique_captions),
@@ -362,13 +364,14 @@ def _build_or_validate_prompt_cache(*, config: Stage2TrainConfig, prompt_cache_d
         "num_existing_entries": len(existing),
         "num_built_entries": built_count,
         "uses_cached_prompt_embeddings_in_training": True,
-        "backbone_specific_note": "Cache tensors are produced from the current diffusers FLUX/Kontext encode_prompt outputs and should be treated as backbone/path-specific.",
+        "backbone_specific_note": index_payload["cache_format"]["backbone_specific_note"],
     }
 
 
 def _encode_and_store_prompt_cache(*, backbone_name: str, captions: list[str], prompt_cache_dir: Path, torch_dtype: str, device: str | None, batch_size: int, max_sequence_length: int, local_files_only: bool) -> int:
     import torch
 
+    backbone_family = infer_backbone_family(backbone_name)
     backbone = load_real_backbone_module(
         backbone_name,
         torch_dtype=torch_dtype,
@@ -386,30 +389,54 @@ def _encode_and_store_prompt_cache(*, backbone_name: str, captions: list[str], p
     encode_device = next(pipeline.transformer.parameters()).device if getattr(pipeline, "transformer", None) is not None else torch.device(device or "cpu")
     for start in range(0, len(captions), max(int(batch_size), 1)):
         caption_batch = captions[start:start + max(int(batch_size), 1)]
-        prompt_embeds, pooled_prompt_embeds, text_ids = pipeline.encode_prompt(
-            prompt=caption_batch,
-            prompt_2=caption_batch,
-            device=encode_device,
-            num_images_per_prompt=1,
-            max_sequence_length=max_sequence_length,
-        )
-        prompt_embeds = prompt_embeds.detach().to(device="cpu")
-        pooled_prompt_embeds = pooled_prompt_embeds.detach().to(device="cpu")
-        text_ids = text_ids.detach().to(device="cpu")
-        for index, caption in enumerate(caption_batch):
-            cache_key = stable_prompt_cache_key(caption)
-            payload = {
-                "caption": caption,
-                "cache_key": cache_key,
-                "prompt_embeds": prompt_embeds[index:index + 1].contiguous(),
-                "pooled_prompt_embeds": pooled_prompt_embeds[index:index + 1].contiguous(),
-                "text_ids": text_ids.contiguous(),
-                "max_sequence_length": int(max_sequence_length),
-                "backbone_name": backbone_name,
-            }
-            torch.save(payload, prompt_cache_dir / f"{cache_key}.pt")
-            built_count += 1
-        del prompt_embeds, pooled_prompt_embeds, text_ids
+        if backbone_family in {"flux", "flux_kontext"}:
+            prompt_embeds, pooled_prompt_embeds, text_ids = pipeline.encode_prompt(
+                prompt=caption_batch,
+                prompt_2=caption_batch,
+                device=encode_device,
+                num_images_per_prompt=1,
+                max_sequence_length=max_sequence_length,
+            )
+            prompt_embeds = prompt_embeds.detach().to(device="cpu")
+            pooled_prompt_embeds = pooled_prompt_embeds.detach().to(device="cpu")
+            text_ids = text_ids.detach().to(device="cpu")
+            for index, caption in enumerate(caption_batch):
+                cache_key = stable_prompt_cache_key(caption)
+                payload = {
+                    "caption": caption,
+                    "cache_key": cache_key,
+                    "prompt_embeds": prompt_embeds[index:index + 1].contiguous(),
+                    "pooled_prompt_embeds": pooled_prompt_embeds[index:index + 1].contiguous(),
+                    "text_ids": text_ids.contiguous(),
+                    "max_sequence_length": int(max_sequence_length),
+                    "backbone_name": backbone_name,
+                }
+                torch.save(payload, prompt_cache_dir / f"{cache_key}.pt")
+                built_count += 1
+            del prompt_embeds, pooled_prompt_embeds, text_ids
+        else:
+            prompt_embeds, prompt_attention_mask, _, _ = pipeline.encode_prompt(
+                prompt=caption_batch,
+                do_classifier_free_guidance=False,
+                device=encode_device,
+                num_images_per_prompt=1,
+                max_sequence_length=max_sequence_length,
+            )
+            prompt_embeds = prompt_embeds.detach().to(device="cpu")
+            prompt_attention_mask = prompt_attention_mask.detach().to(device="cpu")
+            for index, caption in enumerate(caption_batch):
+                cache_key = stable_prompt_cache_key(caption)
+                payload = {
+                    "caption": caption,
+                    "cache_key": cache_key,
+                    "prompt_embeds": prompt_embeds[index:index + 1].contiguous(),
+                    "prompt_attention_mask": prompt_attention_mask[index:index + 1].contiguous(),
+                    "max_sequence_length": int(max_sequence_length),
+                    "backbone_name": backbone_name,
+                }
+                torch.save(payload, prompt_cache_dir / f"{cache_key}.pt")
+                built_count += 1
+            del prompt_embeds, prompt_attention_mask
     del pipeline, backbone
     return built_count
 
@@ -657,6 +684,29 @@ def _move_component_with_diagnostics(
         _append_jsonl_event(component_move_log_path, event)
     return event
 
+
+
+def run_real_stage2_backbone_training(
+    *,
+    config: Stage2TrainConfig,
+    pairs: list[Any],
+    run_dir: Path,
+    manifest_path: str,
+) -> dict[str, Any]:
+    family = infer_backbone_family(config.backbone_name)
+    if family in {"pixart_sigma", "pixart"}:
+        return run_real_stage2_pixart_training(
+            config=config,
+            pairs=pairs,
+            run_dir=run_dir,
+            manifest_path=manifest_path,
+        )
+    return run_real_stage2_flux_training(
+        config=config,
+        pairs=pairs,
+        run_dir=run_dir,
+        manifest_path=manifest_path,
+    )
 
 
 def run_real_stage2_flux_training(
@@ -1060,6 +1110,275 @@ def run_real_stage2_flux_training(
         if is_main_process:
             _safe_write_json(run_dir / "training_metrics.json", failure_summary)
         return failure_summary
+
+
+def run_real_stage2_pixart_training(
+    *,
+    config: Stage2TrainConfig,
+    pairs: list[Any],
+    run_dir: Path,
+    manifest_path: str,
+) -> dict[str, Any]:
+    accelerator = None
+    device = "unknown"
+    memory_log_path: Path | None = None
+    torch = None
+    transformer = None
+    checkpoint_dir = run_dir / "checkpoints"
+    final_checkpoint_dir = checkpoint_dir / "final_transformer"
+    is_main_process = True
+    load_dtype_label: str | None = None
+    train_dtype_label: str | None = None
+    selection_result: dict[str, Any] | None = None
+    gradient_checkpointing: dict[str, Any] = {"enabled": False, "method": None, "attempted_methods": [], "reason": "not_initialized"}
+    logs: list[dict[str, Any]] = []
+    losses: list[float] = []
+    global_step = 0
+    optimizer_step_count = 0
+    steps_per_epoch = None
+    total_optimizer_steps = None
+    last_known_phase = "preflight"
+    phase_history: list[str] = []
+
+    def mark_phase(phase: str, *, extra: dict[str, Any] | None = None, epoch: int | None = None, global_step_value: int | None = None, optimizer_step_value: int | None = None) -> None:
+        nonlocal last_known_phase
+        last_known_phase = phase
+        phase_history.append(phase)
+        if torch is not None and memory_log_path is not None:
+            _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase=phase, torch_module=torch, epoch=epoch, global_step=global_step_value, optimizer_step=optimizer_step_value, extra=extra)
+
+    try:
+        if importlib.util.find_spec("torch") is None:
+            raise RuntimeError("PyTorch is not installed")
+        if importlib.util.find_spec("diffusers") is None:
+            raise RuntimeError("diffusers is not installed")
+        if config.use_accelerate and importlib.util.find_spec("accelerate") is None:
+            raise RuntimeError("accelerate is not installed")
+
+        import torch as torch_module
+        torch = torch_module
+        if config.use_accelerate:
+            from accelerate import Accelerator
+            from accelerate.utils import set_seed
+
+        if not pairs:
+            raise ValueError("No paired training samples were available after manifest generation")
+
+        if config.use_accelerate:
+            accelerator = Accelerator(gradient_accumulation_steps=max(config.gradient_accumulation_steps, 1))
+            set_seed(config.seed)
+            device = accelerator.device
+        else:
+            torch.manual_seed(config.seed)
+            device = _resolve_training_device(config)
+        load_dtype = _resolve_training_dtype(config, device)
+        train_dtype = torch.float32 if device.type == "cpu" else load_dtype
+        load_dtype_label = _torch_dtype_label(load_dtype)
+        train_dtype_label = _torch_dtype_label(train_dtype)
+        rank_info = _accelerator_rank_info(accelerator, device)
+        memory_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_{config.memory_log_artifact_name}"
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        mark_phase("training_start", extra={"backbone_name": config.backbone_name, "manifest_path": str(Path(manifest_path).resolve()), "num_pairs": len(pairs), "load_dtype": load_dtype_label, "train_dtype": train_dtype_label})
+
+        requested_device_for_load = None if config.use_accelerate else str(device)
+        requested_device_map = None if config.use_accelerate else config.backbone_device_map
+        mark_phase("before_backbone_load")
+        backbone = load_real_backbone_module(config.backbone_name, torch_dtype=load_dtype_label, device=requested_device_for_load, device_map=requested_device_map, local_files_only=config.backbone_local_files_only, component=None, allow_unimplemented=False)
+        pipeline = backbone.root_module
+        if pipeline is None:
+            raise RuntimeError("Real backbone load did not return a pipeline root module")
+        mark_phase("after_backbone_load", extra={"resolved_module_name": backbone.resolved_module_name, "resolved_module_type": backbone.resolved_module_type, "loader": backbone.loader_name, "loader_status": backbone.implementation_status})
+
+        selection_result = _freeze_stage2_modules(pipeline, config)
+        transformer = pipeline.transformer
+        transformer.train()
+        if config.enable_gradient_checkpointing:
+            gradient_checkpointing = _enable_transformer_gradient_checkpointing(transformer)
+        else:
+            gradient_checkpointing = {"enabled": False, "method": None, "attempted_methods": [], "reason": "disabled_by_config"}
+        _set_module_mode(getattr(pipeline, "vae", None), training=False)
+        _set_module_mode(getattr(pipeline, "text_encoder", None), training=False)
+
+        optimizer = torch.optim.AdamW((parameter for parameter in transformer.parameters() if parameter.requires_grad), lr=config.learning_rate)
+        dataloader = make_stage2_dataloader(pairs, resolution=config.resolution, batch_size=config.batch_size, num_workers=config.num_workers, shuffle=True, drop_last=config.dataloader_drop_last, prompt_cache_dir=config.prompt_cache_dir)
+        if accelerator is not None:
+            transformer = accelerator.prepare(transformer)
+            pipeline.transformer = transformer
+            optimizer = accelerator.prepare(optimizer)
+            dataloader = accelerator.prepare(dataloader)
+        is_main_process = accelerator.is_main_process if accelerator is not None else True
+        if is_main_process:
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+
+        stop_after = config.max_steps if config.max_steps is not None else None
+        steps_per_epoch = len(dataloader) if hasattr(dataloader, "__len__") else None
+        if steps_per_epoch not in (0, None):
+            optimizer_updates_per_epoch = max(math.ceil(steps_per_epoch / max(config.gradient_accumulation_steps, 1)), 1)
+            total_optimizer_steps = optimizer_updates_per_epoch * max(config.epochs, 1)
+            if stop_after is not None:
+                total_optimizer_steps = min(total_optimizer_steps, stop_after)
+
+        for epoch in range(max(config.epochs, 1)):
+            for batch in dataloader:
+                if stop_after is not None and optimizer_step_count >= stop_after:
+                    break
+                loss = _run_real_pixart_train_step(pipeline=pipeline, transformer=transformer, batch=batch, optimizer=optimizer, accelerator=accelerator, device=device, train_dtype=train_dtype, memory_log_path=memory_log_path, epoch=epoch + 1, global_step=global_step + 1, optimizer_step=optimizer_step_count + 1, use_cached_prompt_embeddings=bool(config.prompt_cache_dir))
+                global_step += 1
+                sync_gradients = accelerator.sync_gradients if accelerator is not None else True
+                if sync_gradients:
+                    optimizer_step_count += 1
+                    loss_value = float(accelerator.gather_for_metrics(loss.detach().reshape(1)).mean().item()) if accelerator is not None else float(loss.detach().cpu().item())
+                    losses.append(loss_value)
+                    if optimizer_step_count == 1 or optimizer_step_count % max(config.log_every, 1) == 0:
+                        logs.append({"step": optimizer_step_count, "epoch": epoch + 1, "loss": loss_value})
+                    if is_main_process and optimizer_step_count % max(config.save_every, 1) == 0:
+                        checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
+                        _save_transformer_checkpoint(checkpoint_model, checkpoint_dir / f"step_{optimizer_step_count:06d}")
+            if stop_after is not None and optimizer_step_count >= stop_after:
+                break
+
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        if is_main_process:
+            checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
+            _save_transformer_checkpoint(checkpoint_model, final_checkpoint_dir)
+        world_size = accelerator.num_processes if accelerator is not None else 1
+        summary = {
+            "status": "completed",
+            "implemented_training": True,
+            "placeholder_training": False,
+            "message": "Completed a minimal accelerate-based real PixArt Stage 2 training run on (image, canonical_caption) pairs.",
+            "component_plan_status": "real_training_ran",
+            "manifest_path": str(Path(manifest_path).resolve()),
+            "device": str(device),
+            "load_dtype": load_dtype_label,
+            "train_dtype": train_dtype_label,
+            "training_parameterization": config.training_parameterization,
+            "applied_transformer_module_selection": selection_result["selection"].to_dict() if selection_result is not None else None,
+            "adapter_injection": selection_result["adapter_injection"].to_dict() if selection_result is not None and selection_result["adapter_injection"] is not None else None,
+            "trainable_parameter_summary": selection_result["trainable_parameter_summary"] if selection_result is not None else None,
+            "accelerate": {"enabled": bool(accelerator is not None), "num_processes": world_size, "gradient_accumulation_steps": max(config.gradient_accumulation_steps, 1), "distributed_type": str(getattr(getattr(accelerator, "state", None), "distributed_type", "no")) if accelerator is not None else "no", "requested_device_map_ignored": bool(config.backbone_device_map)},
+            "gradient_checkpointing": gradient_checkpointing,
+            "dataloader_batches_per_epoch": steps_per_epoch,
+            "forward_steps": global_step,
+            "optimizer_steps": optimizer_step_count,
+            "steps": optimizer_step_count,
+            "epochs": max(config.epochs, 1),
+            "num_pairs": len(pairs),
+            "losses": losses,
+            "logs": logs,
+            "estimated_total_optimizer_steps": total_optimizer_steps,
+            "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
+            "memory_log_path": str(memory_log_path.resolve()) if memory_log_path is not None else None,
+            "last_known_phase": last_known_phase,
+            "phase_history": phase_history,
+            "launch_notes": ["Uses Hugging Face Accelerate for process setup, dataloader sharding, backward, and main-process-only checkpoint writes.", "PixArt-Σ uses the diffusers PixArtSigmaPipeline contract: prompt_embeds + prompt_attention_mask conditioning, VAE latents, and scheduler.add_noise training timesteps."],
+        }
+        if is_main_process:
+            _safe_write_json(run_dir / "training_metrics.json", summary)
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        return summary
+    except Exception as exc:  # noqa: BLE001
+        failure_summary = {
+            "status": "failed_during_real_training",
+            "implemented_training": False,
+            "placeholder_training": False,
+            "message": "Real Stage 2 PixArt training failed after entering the real training path.",
+            "component_plan_status": "real_training_attempted",
+            "manifest_path": str(Path(manifest_path).resolve()),
+            "device": str(device),
+            "load_dtype": load_dtype_label,
+            "train_dtype": train_dtype_label,
+            "training_parameterization": config.training_parameterization,
+            "applied_transformer_module_selection": selection_result["selection"].to_dict() if selection_result is not None else None,
+            "adapter_injection": selection_result["adapter_injection"].to_dict() if selection_result is not None and selection_result["adapter_injection"] is not None else None,
+            "trainable_parameter_summary": selection_result["trainable_parameter_summary"] if selection_result is not None else None,
+            "gradient_checkpointing": gradient_checkpointing,
+            "dataloader_batches_per_epoch": steps_per_epoch,
+            "forward_steps": global_step,
+            "optimizer_steps": optimizer_step_count,
+            "steps": optimizer_step_count,
+            "epochs": max(config.epochs, 1),
+            "num_pairs": len(pairs),
+            "losses": losses,
+            "logs": logs,
+            "estimated_total_optimizer_steps": total_optimizer_steps,
+            "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
+            "memory_log_path": str(memory_log_path.resolve()) if memory_log_path is not None else None,
+            "last_known_phase": last_known_phase,
+            "phase_history": phase_history,
+            "failure": {"error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc(), "rank_info": _accelerator_rank_info(accelerator, device) if torch is not None else None},
+        }
+        if is_main_process:
+            _safe_write_json(run_dir / "training_metrics.json", failure_summary)
+        return failure_summary
+
+
+def _run_real_pixart_train_step(
+    *,
+    pipeline: Any,
+    transformer: Any,
+    batch: dict[str, Any],
+    optimizer: Any,
+    accelerator: Any | None,
+    device: Any,
+    train_dtype: Any,
+    memory_log_path: Path,
+    epoch: int,
+    global_step: int,
+    optimizer_step: int,
+    use_cached_prompt_embeddings: bool,
+) -> Any:
+    import torch
+
+    accumulation_context = accelerator.accumulate(transformer) if accelerator is not None else nullcontext()
+    with accumulation_context:
+        pixel_values = batch["pixel_values"].to(device=device, dtype=train_dtype)
+        vae_dtype = next(pipeline.vae.parameters()).dtype
+        vae_device = next(pipeline.vae.parameters()).device
+        with torch.no_grad():
+            latents = pipeline.vae.encode(pixel_values.to(device=vae_device, dtype=vae_dtype)).latent_dist.sample()
+            scaling_factor = float(getattr(getattr(pipeline.vae, "config", None), "scaling_factor", 0.13025))
+            shift_factor = float(getattr(getattr(pipeline.vae, "config", None), "shift_factor", 0.0) or 0.0)
+            latents = (latents - shift_factor) * scaling_factor
+            latents = latents.to(device=device, dtype=train_dtype)
+            if use_cached_prompt_embeddings:
+                prompt_embeds = batch["cached_prompt_embeds"].to(device=device, dtype=train_dtype)
+                prompt_attention_mask = batch["cached_prompt_attention_mask"].to(device=device)
+            else:
+                prompt_embeds, prompt_attention_mask, _, _ = pipeline.encode_prompt(prompt=batch["conditioning_text"], do_classifier_free_guidance=False, device=device, num_images_per_prompt=1, max_sequence_length=300)
+                prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
+                prompt_attention_mask = prompt_attention_mask.to(device=device)
+
+        noise = torch.randn_like(latents)
+        batch_size = latents.shape[0]
+        if not hasattr(pipeline.scheduler, "config") or not hasattr(pipeline.scheduler, "add_noise"):
+            raise RuntimeError("Loaded PixArt scheduler does not expose add_noise for training")
+        num_train_timesteps = int(getattr(pipeline.scheduler.config, "num_train_timesteps", 1000))
+        timesteps = torch.randint(0, num_train_timesteps, (batch_size,), device=device, dtype=torch.long)
+        noisy_latents = pipeline.scheduler.add_noise(latents, noise, timesteps)
+        added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
+        model_output = transformer(hidden_states=noisy_latents, encoder_hidden_states=prompt_embeds, encoder_attention_mask=prompt_attention_mask, timestep=timesteps, added_cond_kwargs=added_cond_kwargs, return_dict=True)
+        prediction = model_output.sample if hasattr(model_output, "sample") else model_output[0]
+        out_channels = int(getattr(getattr(transformer, "config", None), "out_channels", prediction.shape[1]))
+        latent_channels = int(getattr(getattr(transformer, "config", None), "in_channels", latents.shape[1]))
+        if out_channels // 2 == latent_channels:
+            prediction = prediction.chunk(2, dim=1)[0]
+        loss = torch.nn.functional.mse_loss(prediction.float(), noise.float())
+        optimizer.zero_grad(set_to_none=True)
+        if accelerator is not None:
+            accelerator.backward(loss)
+            if accelerator.sync_gradients:
+                optimizer.step()
+        else:
+            loss.backward()
+            optimizer.step()
+        _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="after_pixart_step", torch_module=torch, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra={"pixel_values_shape": list(batch['pixel_values'].shape), "latents_shape": list(latents.shape), "timesteps_shape": list(timesteps.shape), "prompt_embeds_shape": list(prompt_embeds.shape), "prompt_attention_mask_shape": list(prompt_attention_mask.shape)})
+        return loss.detach()
 
 
 def _run_real_flux_train_step(
@@ -1532,6 +1851,17 @@ def resolve_effective_module_selection(config: Stage2TrainConfig) -> dict[str, A
     group_patterns, unknown_groups = _expand_component_group_patterns(groups)
     manual_patterns = list(dict.fromkeys(config.module_include_patterns or []))
     effective_include_patterns = list(dict.fromkeys(group_patterns + manual_patterns))
+    family = infer_backbone_family(config.backbone_name)
+    if family in {"pixart_sigma", "pixart"} and not manual_patterns and groups == ["conditioning_transformer"]:
+        effective_include_patterns = [
+            "caption_projection",
+            "caption_projection.*",
+            "adaln_single",
+            "adaln_single.*",
+            "transformer_blocks.*.attn1.*",
+            "transformer_blocks.*.attn2.*",
+            "transformer_blocks.*.ff.*",
+        ]
     if not effective_include_patterns:
         effective_include_patterns = ["*"]
     effective_exclude_patterns = list(dict.fromkeys(config.module_exclude_patterns or []))
@@ -2134,6 +2464,15 @@ def _infer_backbone_assumptions(backbone_name: str) -> dict[str, Any]:
                 "Current target family is experimental FLUX.1 Kontext [dev].",
                 "Default Stage 2 policy is to freeze non-transformer top-level modules and fine-tune the full FluxTransformer2DModel.",
                 "If memory is insufficient, the intended fallback is conditioning-related transformer submodules only.",
+            ],
+        }
+    if family in {"pixart_sigma", "pixart"}:
+        return {
+            "family": family,
+            "notes": [
+                "Current target family is PixArt text-to-image diffusion transformers via diffusers.",
+                "Stage 2 semantics stay canonical-caption-conditioned generation on real images, not image editing.",
+                "The practical first fallback for constrained hardware is transformer LoRA over selected PixArt attention/feed-forward modules.",
             ],
         }
     return {

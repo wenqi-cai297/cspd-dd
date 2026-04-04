@@ -203,6 +203,10 @@ if importlib.util.find_spec("torch") is not None:
 
 def infer_backbone_family(backbone_name: str) -> str:
     lowered = backbone_name.lower()
+    if "pixart" in lowered and ("sigma" in lowered or "pixart-sigma" in lowered):
+        return "pixart_sigma"
+    if "pixart" in lowered:
+        return "pixart"
     if "flux" in lowered and "kontext" in lowered:
         return "flux_kontext"
     if "flux" in lowered:
@@ -238,7 +242,7 @@ def load_generative_backbone(
             ],
         )
 
-    if loader_name in {"diffusers_flux_kontext", "diffusers_flux"}:
+    if loader_name in {"diffusers_flux_kontext", "diffusers_flux", "diffusers_pixart_sigma", "diffusers_pixart"}:
         try:
             return _load_diffusers_backbone(
                 backbone_name,
@@ -490,6 +494,10 @@ def _default_loader_name(family: str) -> str:
         return "diffusers_flux_kontext"
     if family == "flux":
         return "diffusers_flux"
+    if family == "pixart_sigma":
+        return "diffusers_pixart_sigma"
+    if family == "pixart":
+        return "diffusers_pixart"
     return "generic_python_loader"
 
 
@@ -512,19 +520,43 @@ def _load_diffusers_backbone(
     import torch
     import diffusers
 
-    pipeline_class_name = "FluxKontextPipeline" if family == "flux_kontext" else "FluxPipeline"
+    resolved_dtype = _resolve_torch_dtype(torch_dtype)
+    if family == "flux_kontext":
+        pipeline_class_name = "FluxKontextPipeline"
+    elif family == "flux":
+        pipeline_class_name = "FluxPipeline"
+    elif family == "pixart_sigma":
+        pipeline_class_name = "PixArtSigmaPipeline"
+    elif family == "pixart":
+        pipeline_class_name = "PixArtAlphaPipeline"
+    else:
+        raise RuntimeError(f"Unsupported diffusers backbone family: {family}")
     if not hasattr(diffusers, pipeline_class_name):
         raise RuntimeError(f"Installed diffusers does not expose {pipeline_class_name}")
 
     pipeline_class = getattr(diffusers, pipeline_class_name)
     load_kwargs: dict[str, Any] = {
-        "torch_dtype": _resolve_torch_dtype(torch_dtype),
+        "torch_dtype": resolved_dtype,
         "local_files_only": local_files_only,
     }
     if device_map:
         load_kwargs["device_map"] = device_map
 
-    pipeline = pipeline_class.from_pretrained(backbone_name, **load_kwargs)
+    if family == "pixart_sigma":
+        transformer_class = getattr(diffusers, "Transformer2DModel")
+        base_repo = "PixArt-alpha/pixart_sigma_sdxlvae_T5_diffusers"
+        try:
+            pipeline = pipeline_class.from_pretrained(backbone_name, **load_kwargs)
+        except Exception:
+            transformer = transformer_class.from_pretrained(
+                backbone_name,
+                subfolder="transformer",
+                torch_dtype=resolved_dtype,
+                local_files_only=local_files_only,
+            )
+            pipeline = pipeline_class.from_pretrained(base_repo, transformer=transformer, **load_kwargs)
+    else:
+        pipeline = pipeline_class.from_pretrained(backbone_name, **load_kwargs)
     if device and not device_map and hasattr(pipeline, "to"):
         pipeline = pipeline.to(device)
 
@@ -589,7 +621,12 @@ def _classify_loader_exception(exc: Exception) -> str:
     text = str(exc).lower()
     if isinstance(exc, ModuleNotFoundError):
         return "dependency_missing"
-    if "does not expose fluxkontextpipeline" in text or "does not expose fluxpipeline" in text:
+    if (
+        "does not expose fluxkontextpipeline" in text
+        or "does not expose fluxpipeline" in text
+        or "does not expose pixartsigmapipeline" in text
+        or "does not expose pixartalphapipeline" in text
+    ):
         return "unsupported_runtime"
     if "local_files_only" in text or "cannot find the requested files in the disk cache" in text:
         return "load_failed_local_files_only"
