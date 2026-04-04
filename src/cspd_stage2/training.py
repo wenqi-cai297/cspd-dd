@@ -1088,14 +1088,34 @@ def _freeze_stage2_modules(pipeline: Any, config: Stage2TrainConfig) -> dict[str
     }
 
 
-def _summarize_trainable_parameters(module: Any) -> dict[str, Any]:
+def _iter_named_parameters_from_pipeline_or_module(module_or_pipeline: Any):
+    if hasattr(module_or_pipeline, "named_parameters"):
+        yield from module_or_pipeline.named_parameters()
+        return
+
+    seen_parameter_ids: set[int] = set()
+    component_names = ["transformer", "text_encoder", "text_encoder_2", "vae", "image_encoder"]
+    for component_name in component_names:
+        component = getattr(module_or_pipeline, component_name, None)
+        if component is None or not hasattr(component, "named_parameters"):
+            continue
+        for name, parameter in component.named_parameters():
+            parameter_id = id(parameter)
+            if parameter_id in seen_parameter_ids:
+                continue
+            seen_parameter_ids.add(parameter_id)
+            qualified_name = f"{component_name}.{name}" if name else component_name
+            yield qualified_name, parameter
+
+
+def _summarize_trainable_parameters(module_or_pipeline: Any) -> dict[str, Any]:
     trainable_names: list[str] = []
     frozen_names: list[str] = []
     lora_parameter_names: list[str] = []
     trainable_parameter_count = 0
     frozen_parameter_count = 0
     lora_parameter_count = 0
-    for name, parameter in module.named_parameters():
+    for name, parameter in _iter_named_parameters_from_pipeline_or_module(module_or_pipeline):
         count = int(parameter.numel())
         if parameter.requires_grad:
             trainable_names.append(name)
@@ -1116,6 +1136,8 @@ def _summarize_trainable_parameters(module: Any) -> dict[str, Any]:
         "lora_parameter_names": lora_parameter_names,
         "non_lora_trainable_parameter_names": non_lora_trainable_names,
         "only_lora_parameters_trainable": bool(trainable_names) and not non_lora_trainable_names,
+        "summary_target_type": type(module_or_pipeline).__name__,
+        "summary_from_pipeline_components": not hasattr(module_or_pipeline, "named_parameters"),
     }
 
 
