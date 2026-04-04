@@ -16,6 +16,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+import hashlib
 
 import numpy as np
 from PIL import Image
@@ -96,6 +97,11 @@ class ManifestPaths:
     unmatched_render_records_path: str
 
 
+def stable_prompt_cache_key(text: str) -> str:
+    normalized = str(text).strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 class Stage2PairedDataset:
     """Minimal dataset wrapper for downstream Stage 2 trainers.
 
@@ -104,9 +110,16 @@ class Stage2PairedDataset:
     suitable for a real Stage 2 training loop.
     """
 
-    def __init__(self, pairs: Iterable[Stage2PairRecord], *, resolution: int | None = None):
+    def __init__(
+        self,
+        pairs: Iterable[Stage2PairRecord],
+        *,
+        resolution: int | None = None,
+        prompt_cache_dir: str | Path | None = None,
+    ):
         self._pairs = list(pairs)
         self._resolution = resolution
+        self._prompt_cache_dir = Path(prompt_cache_dir) if prompt_cache_dir is not None else None
 
     def __len__(self) -> int:
         return len(self._pairs)
@@ -133,6 +146,18 @@ class Stage2PairedDataset:
         }
         if self._resolution is not None:
             item["pixel_values"] = pil_to_normalized_tensor(image, self._resolution)
+        if self._prompt_cache_dir is not None:
+            cache_key = stable_prompt_cache_key(pair.canonical_caption)
+            cache_path = self._prompt_cache_dir / f"{cache_key}.pt"
+            if not cache_path.exists():
+                raise FileNotFoundError(f"Prompt cache entry not found for caption key {cache_key}: {cache_path}")
+            import torch
+            cache_payload = torch.load(cache_path, map_location="cpu")
+            item["prompt_cache_key"] = cache_key
+            item["prompt_cache_path"] = str(cache_path)
+            item["cached_prompt_embeds"] = cache_payload["prompt_embeds"]
+            item["cached_pooled_prompt_embeds"] = cache_payload["pooled_prompt_embeds"]
+            item["cached_text_ids"] = cache_payload["text_ids"]
         return item
 
 
@@ -441,11 +466,12 @@ def make_stage2_dataloader(
     num_workers: int = 0,
     shuffle: bool = True,
     drop_last: bool = False,
+    prompt_cache_dir: str | Path | None = None,
 ) -> Any:
     import torch
     from torch.utils.data import DataLoader
 
-    dataset = Stage2PairedDataset(pairs, resolution=resolution)
+    dataset = Stage2PairedDataset(pairs, resolution=resolution, prompt_cache_dir=prompt_cache_dir)
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -494,6 +520,19 @@ def _collate_stage2_batch(items: list[dict[str, Any]]) -> dict[str, Any]:
     pixel_values = [item.get("pixel_values") for item in items if item.get("pixel_values") is not None]
     if len(pixel_values) == len(items):
         batch["pixel_values"] = torch.stack(pixel_values, dim=0)
+
+    cached_prompt_embeds = [item.get("cached_prompt_embeds") for item in items if item.get("cached_prompt_embeds") is not None]
+    cached_pooled_prompt_embeds = [item.get("cached_pooled_prompt_embeds") for item in items if item.get("cached_pooled_prompt_embeds") is not None]
+    cached_text_ids = [item.get("cached_text_ids") for item in items if item.get("cached_text_ids") is not None]
+    if len(cached_prompt_embeds) == len(items):
+        batch["prompt_cache_key"] = [item.get("prompt_cache_key") for item in items]
+        batch["prompt_cache_path"] = [item.get("prompt_cache_path") for item in items]
+        batch["cached_prompt_embeds"] = torch.cat(cached_prompt_embeds, dim=0)
+        batch["cached_pooled_prompt_embeds"] = torch.cat(cached_pooled_prompt_embeds, dim=0)
+        if cached_text_ids:
+            reference = cached_text_ids[0]
+            same_text_ids = all(torch.equal(reference, other) for other in cached_text_ids[1:])
+            batch["cached_text_ids"] = reference if same_text_ids else torch.cat(cached_text_ids, dim=0)
     return batch
 
 

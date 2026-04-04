@@ -15,6 +15,7 @@ from cspd_stage2.training import (
     inspect_stage2_backbone_targets,
     resolve_effective_module_selection,
     run_stage2_training,
+    _build_or_validate_prompt_cache,
 )
 
 
@@ -202,6 +203,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable the default policy that offloads frozen VAE/text components back to CPU after their no-grad encode step",
     )
     train_parser.add_argument(
+        "--prompt-cache-dir",
+        default=None,
+        help="Optional directory containing precomputed canonical-caption prompt embeddings (.pt per caption hash)",
+    )
+    train_parser.add_argument(
+        "--precompute-prompt-embeddings",
+        action="store_true",
+        help="Before training, build a canonical-caption prompt cache for this Stage 2 run and then consume it during training",
+    )
+    train_parser.add_argument("--prompt-cache-batch-size", type=int, default=8, help="Batch size for prompt-cache precompute")
+    train_parser.add_argument("--prompt-cache-max-sequence-length", type=int, default=512, help="max_sequence_length used for prompt-cache precompute")
+    train_parser.add_argument(
+        "--prompt-cache-device",
+        default=None,
+        help="Optional device for prompt-cache precompute, e.g. cpu or cuda; defaults to the backbone load device behavior",
+    )
+    train_parser.add_argument(
         "--inspect-limit",
         type=int,
         default=200,
@@ -217,6 +235,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="If --inspect-module-reference is provided, inject lightweight LoRA adapters into matching real torch modules",
     )
+
+    cache_parser = subparsers.add_parser(
+        "cache-prompt-embeds",
+        help="Precompute canonical-caption prompt embeddings for Stage 2 and write a reusable cache directory",
+    )
+    cache_parser.add_argument("--dataset-root", required=True, help="ImageFolder-style dataset root used to build the Stage 2 pairing surface")
+    cache_parser.add_argument("--render-input", required=True, help="Stage 1 render records.jsonl path used as canonical text-conditioning source")
+    cache_parser.add_argument("--output-dir", required=True, help="Directory where prompt-cache artifacts should be written")
+    cache_parser.add_argument("--backbone-name", default="black-forest-labs/FLUX.1-Kontext-dev")
+    cache_parser.add_argument("--class-name-map", default=None)
+    cache_parser.add_argument("--class-archetype-map", default=None)
+    cache_parser.add_argument("--verify-images", action="store_true")
+    cache_parser.add_argument("--strict-pairing", action="store_true")
+    cache_parser.add_argument("--max-train-samples", type=int, default=None)
+    cache_parser.add_argument("--backbone-torch-dtype", default="bfloat16")
+    cache_parser.add_argument("--backbone-device", default=None)
+    cache_parser.add_argument("--backbone-local-files-only", action="store_true")
+    cache_parser.add_argument("--prompt-cache-batch-size", type=int, default=8)
+    cache_parser.add_argument("--prompt-cache-max-sequence-length", type=int, default=512)
+    cache_parser.add_argument("--prompt-cache-device", default=None)
 
     inspect_parser = subparsers.add_parser(
         "inspect-targets",
@@ -420,6 +458,11 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         enable_gradient_checkpointing=not args.disable_gradient_checkpointing,
         keep_frozen_modules_on_cpu_until_needed=not args.disable_keep_frozen_modules_on_cpu_until_needed,
         offload_frozen_modules_after_step=not args.disable_offload_frozen_modules_after_step,
+        prompt_cache_dir=args.prompt_cache_dir,
+        precompute_prompt_embeddings=args.precompute_prompt_embeddings,
+        prompt_cache_batch_size=args.prompt_cache_batch_size,
+        prompt_cache_max_sequence_length=args.prompt_cache_max_sequence_length,
+        prompt_cache_device=args.prompt_cache_device,
     )
     config.adapter_plan.target_module_patterns = (
         config.adapter_plan.target_module_patterns or resolve_effective_module_selection(config)["effective_include_patterns"]
@@ -605,12 +648,60 @@ def _run_dump_modules(args: argparse.Namespace) -> dict[str, Any]:
     return summary
 
 
+
+def _run_cache_prompt_embeds(args: argparse.Namespace) -> dict[str, Any]:
+    from cspd_stage2.data import build_stage2_pairs
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    config = Stage2TrainConfig(
+        dataset_root=args.dataset_root,
+        render_input=args.render_input,
+        output_dir=str(output_dir),
+        backbone_name=args.backbone_name,
+        class_name_map=args.class_name_map,
+        class_archetype_map=args.class_archetype_map,
+        verify_images=args.verify_images,
+        strict_pairing=args.strict_pairing,
+        max_train_samples=args.max_train_samples,
+        backbone_torch_dtype=args.backbone_torch_dtype,
+        backbone_device=args.backbone_device,
+        backbone_local_files_only=args.backbone_local_files_only,
+        prompt_cache_dir=str(output_dir),
+        precompute_prompt_embeddings=True,
+        prompt_cache_batch_size=args.prompt_cache_batch_size,
+        prompt_cache_max_sequence_length=args.prompt_cache_max_sequence_length,
+        prompt_cache_device=args.prompt_cache_device,
+    )
+    pairing = build_stage2_pairs(
+        dataset_root=args.dataset_root,
+        render_input=args.render_input,
+        class_name_map=args.class_name_map,
+        class_archetype_map=args.class_archetype_map,
+        verify_images=args.verify_images,
+        strict=args.strict_pairing,
+    )
+    if args.max_train_samples is not None:
+        pairing.pairs = pairing.pairs[: max(args.max_train_samples, 0)]
+    summary = _build_or_validate_prompt_cache(config=config, prompt_cache_dir=output_dir, pairs=pairing.pairs)
+    return {
+        "status": "ok",
+        "message": "Built Stage 2 canonical-caption prompt cache.",
+        "output_dir": str(output_dir.resolve()),
+        "prompt_cache": summary,
+    }
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
     if args.command == "train":
         summary = run_stage2_training(config_from_args(args))
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "cache-prompt-embeds":
+        summary = _run_cache_prompt_embeds(args)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
 

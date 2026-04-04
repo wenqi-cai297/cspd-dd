@@ -140,6 +140,7 @@ def run_case(parameterization: str):
         optimizer_step=1,
         keep_frozen_modules_on_cpu_until_needed=False,
         offload_frozen_modules_after_step=False,
+        use_cached_prompt_embeddings=False,
     )
     return {
         'parameterization': parameterization,
