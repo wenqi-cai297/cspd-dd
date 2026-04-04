@@ -95,7 +95,7 @@ echo "[INFO] stage2_output_dir:   $OUTPUT_DIR"
 
 "${CMD[@]}"
 
-echo "[INFO] Stage 2 scaffold run complete."
+echo "[INFO] Stage 2 helper run complete."
 echo "[INFO] manifest:            $OUTPUT_DIR/train_manifest.jsonl"
 echo "[INFO] manifest_summary:    $OUTPUT_DIR/train_manifest_summary.json"
 echo "[INFO] run_summary:         $OUTPUT_DIR/stage2_run_summary.json"

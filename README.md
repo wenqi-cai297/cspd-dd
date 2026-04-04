@@ -133,7 +133,20 @@ cspd-stage1 render \
   --output-dir runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500
 ```
 
-Then build the Stage 2 v1 training scaffold from real images + Stage 1 canonical captions:
+Then build the Stage 2 canonical-caption-conditioned training run from real images + Stage 1 canonical captions.
+For routine server usage, prefer the helper so the output directory stays under the structured convention `runs/stage2/train/<dataset_label>/<backbone_slug>/<timestamp>`:
+
+```bash
+bash scripts/server/run_stage2_train.sh \
+  /path/to/imagefolder_dataset \
+  runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
+  black-forest-labs/FLUX.1-Kontext-dev \
+  4 \
+  1 \
+  --dry-run
+```
+
+If you intentionally need full manual control over every argument, the direct CLI remains available:
 
 ```bash
 cspd-stage2 train \

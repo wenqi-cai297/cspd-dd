@@ -232,7 +232,20 @@ This helper currently:
 - records full-transformer fine-tuning intent and module-selection metadata
 - keeps non-transformer top-level modules frozen by default (`freeze_text_encoder=true`, `freeze_vae=true`)
 
-Direct CLI example:
+You can still pass through extra Stage 2 CLI options after the positional helper arguments. For example:
+
+```bash
+bash scripts/server/run_stage2_train.sh \
+  /data/imagenette/train \
+  runs/stage1/render/imagenette/qwen_local/2026-04-02_010203/records.jsonl \
+  black-forest-labs/FLUX.1-Kontext-dev \
+  4 \
+  1 \
+  --dry-run \
+  --backbone-local-files-only
+```
+
+Use the direct CLI mainly when you intentionally need full manual control over every argument:
 
 ```bash
 cspd-stage2 train \
