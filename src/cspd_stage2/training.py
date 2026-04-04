@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-"""Training scaffold for CSPD Stage 2.
+"""Training utilities for CSPD Stage 2.
 
 This module is deliberately honest about scope:
 - it prepares run directories and paired manifests,
 - records text-conditioning-focused adaptation intent,
 - separates trainable and frozen component plans,
-- exposes a minimal trainer contract,
-- optionally runs a tiny PyTorch-backed placeholder loop,
-- does not claim full FLUX.1 Kontext [dev] fine-tuning is implemented here.
+- implements a minimal real FLUX training path over (image, canonical_caption) pairs when the runtime supports it,
+- keeps the older tiny placeholder loop as an explicit plumbing fallback,
+- does not pretend every environment can actually load or fine-tune gated FLUX checkpoints.
 """
 
 import importlib.util
@@ -27,7 +27,7 @@ from cspd_stage2.backbone import (
     load_module_from_reference,
     load_real_backbone_module,
 )
-from cspd_stage2.data import build_stage2_pairs, write_pairing_artifacts
+from cspd_stage2.data import build_stage2_pairs, make_stage2_dataloader, write_pairing_artifacts
 
 
 DEFAULT_TEXT_CONDITIONING_GROUPS = [
@@ -106,7 +106,7 @@ class Stage2TrainConfig:
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
-    """Build Stage 2 artifacts and optionally run a placeholder trainer."""
+    """Build Stage 2 artifacts and run the smallest honest training path available."""
     run_dir = Path(config.output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -137,27 +137,37 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         "status": "manifest_ready",
         "implemented_training": False,
         "placeholder_training": False,
-        "message": (
-            "Stage 2 paired manifest is ready. The code now records a concrete full-transformer fine-tuning plan "
-            "for FLUX.1 Kontext, but executable real training is still not wired in this repo."
-        ),
+        "message": "Stage 2 paired manifest is ready.",
         "component_plan_status": "implemented_metadata_only",
     }
 
     if not config.generate_manifest_only and not config.dry_run:
-        if config.allow_placeholder_loop:
-            training_result = run_placeholder_transformer_core_loop(config, manifest_paths.manifest_path)
-        else:
-            training_result = {
-                "status": "not_run",
-                "implemented_training": False,
-                "placeholder_training": False,
-                "message": (
-                    "Manifest/data prep completed. Actual generative-backbone training remains a scaffold until "
-                    "a concrete FLUX Kontext or equivalent backbone-specific dependency stack is selected and integrated."
-                ),
-                "component_plan_status": "implemented_metadata_only",
-            }
+        try:
+            training_result = run_real_stage2_flux_training(
+                config=config,
+                pairs=pairing.pairs,
+                run_dir=run_dir,
+                manifest_path=manifest_paths.manifest_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if config.allow_placeholder_loop:
+                training_result = run_placeholder_transformer_core_loop(config, manifest_paths.manifest_path)
+                training_result["real_training_error"] = str(exc)
+                training_result["message"] = (
+                    "Real Stage 2 FLUX training could not run in this environment; fell back to the explicit placeholder loop."
+                )
+            else:
+                training_result = {
+                    "status": "failed_before_training",
+                    "implemented_training": False,
+                    "placeholder_training": False,
+                    "message": (
+                        "Real Stage 2 FLUX training was attempted but could not start or complete in this environment. "
+                        "See training_error for the real runtime failure."
+                    ),
+                    "training_error": str(exc),
+                    "component_plan_status": "real_training_attempted",
+                }
 
     summary = {
         "stage": "stage2_v1",
@@ -188,6 +198,290 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
     }
     write_json(run_dir / "stage2_run_summary.json", summary)
     return summary
+
+
+def run_real_stage2_flux_training(
+    *,
+    config: Stage2TrainConfig,
+    pairs: list[Any],
+    run_dir: Path,
+    manifest_path: str,
+) -> dict[str, Any]:
+    if importlib.util.find_spec("torch") is None:
+        raise RuntimeError("PyTorch is not installed")
+    if importlib.util.find_spec("diffusers") is None:
+        raise RuntimeError("diffusers is not installed")
+
+    import torch
+
+    if not pairs:
+        raise ValueError("No paired training samples were available after manifest generation")
+
+    device = _resolve_training_device(config)
+    load_dtype = _resolve_training_dtype(config, device)
+    train_dtype = torch.float32 if device.type == "cpu" else load_dtype
+
+    backbone = load_real_backbone_module(
+        config.backbone_name,
+        torch_dtype=_torch_dtype_label(load_dtype),
+        device=str(device),
+        device_map=config.backbone_device_map,
+        local_files_only=config.backbone_local_files_only,
+        component=None,
+        allow_unimplemented=False,
+    )
+    pipeline = backbone.root_module
+    if pipeline is None:
+        raise RuntimeError("Real backbone load did not return a pipeline root module")
+
+    _freeze_stage2_modules(pipeline, config)
+    transformer = pipeline.transformer
+    transformer.train()
+    if device.type == "cpu":
+        transformer.to(device=device, dtype=train_dtype)
+    else:
+        transformer.to(device=device)
+
+    optimizer = torch.optim.AdamW(
+        (parameter for parameter in transformer.parameters() if parameter.requires_grad),
+        lr=config.learning_rate,
+    )
+
+    dataloader = make_stage2_dataloader(
+        pairs,
+        resolution=config.resolution,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
+        shuffle=True,
+    )
+
+    checkpoint_dir = run_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    logs: list[dict[str, Any]] = []
+    losses: list[float] = []
+    global_step = 0
+    stop_after = config.max_steps if config.max_steps is not None else None
+
+    torch.manual_seed(config.seed)
+
+    for epoch in range(max(config.epochs, 1)):
+        for batch in dataloader:
+            if stop_after is not None and global_step >= stop_after:
+                break
+            loss = _run_real_flux_train_step(
+                pipeline=pipeline,
+                transformer=transformer,
+                batch=batch,
+                optimizer=optimizer,
+                device=device,
+                train_dtype=train_dtype,
+                resolution=config.resolution,
+            )
+            global_step += 1
+            losses.append(loss)
+            if global_step == 1 or global_step % max(config.log_every, 1) == 0:
+                logs.append({"step": global_step, "epoch": epoch + 1, "loss": loss})
+            if global_step % max(config.save_every, 1) == 0:
+                _save_transformer_checkpoint(transformer, checkpoint_dir / f"step_{global_step:06d}")
+        if stop_after is not None and global_step >= stop_after:
+            break
+
+    final_checkpoint_dir = checkpoint_dir / "final_transformer"
+    _save_transformer_checkpoint(transformer, final_checkpoint_dir)
+
+    summary = {
+        "status": "completed",
+        "implemented_training": True,
+        "placeholder_training": False,
+        "message": "Completed a minimal real FLUX Stage 2 training run on (image, canonical_caption) pairs.",
+        "component_plan_status": "real_training_ran",
+        "manifest_path": str(Path(manifest_path).resolve()),
+        "device": str(device),
+        "load_dtype": _torch_dtype_label(load_dtype),
+        "train_dtype": _torch_dtype_label(train_dtype),
+        "steps": global_step,
+        "epochs": max(config.epochs, 1),
+        "num_pairs": len(pairs),
+        "losses": losses,
+        "logs": logs,
+        "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
+    }
+    write_json(run_dir / "training_metrics.json", summary)
+    return summary
+
+
+def _run_real_flux_train_step(
+    *,
+    pipeline: Any,
+    transformer: Any,
+    batch: dict[str, Any],
+    optimizer: Any,
+    device: Any,
+    train_dtype: Any,
+    resolution: int,
+) -> float:
+    import torch
+
+    del resolution  # training uses the dataloader-prepared image tensor shape directly
+
+    pixel_values = batch["pixel_values"].to(device=device, dtype=train_dtype)
+    with torch.no_grad():
+        vae_dtype = next(pipeline.vae.parameters()).dtype
+        vae_device = next(pipeline.vae.parameters()).device
+        latents = pipeline.vae.encode(pixel_values.to(device=vae_device, dtype=vae_dtype)).latent_dist.sample()
+        latents = (latents - pipeline.vae.config.shift_factor) * pipeline.vae.config.scaling_factor
+        latents = latents.to(device=device, dtype=train_dtype)
+        prompt_embeds, pooled_prompt_embeds, text_ids = pipeline.encode_prompt(
+            prompt=batch["conditioning_text"],
+            prompt_2=batch["conditioning_text"],
+            device=device,
+            num_images_per_prompt=1,
+            max_sequence_length=512,
+        )
+        prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
+        pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=train_dtype)
+        text_ids = text_ids.to(device=device, dtype=train_dtype)
+
+    packed_latents = pipeline._pack_latents(
+        latents,
+        latents.shape[0],
+        latents.shape[1],
+        latents.shape[2],
+        latents.shape[3],
+    ).to(device=device, dtype=train_dtype)
+    latent_image_ids = pipeline._prepare_latent_image_ids(
+        latents.shape[0],
+        latents.shape[2] // 2,
+        latents.shape[3] // 2,
+        device,
+        train_dtype,
+    )
+
+    noise = torch.randn_like(packed_latents)
+    timesteps, sigmas = _sample_flux_flow_matching_timesteps(
+        batch_size=packed_latents.shape[0],
+        device=device,
+        dtype=train_dtype,
+    )
+    noisy_latents = ((1.0 - sigmas) * packed_latents) + (sigmas * noise)
+    target = noise - packed_latents
+
+    guidance = None
+    if getattr(getattr(transformer, "config", None), "guidance_embeds", False):
+        guidance = torch.ones((packed_latents.shape[0],), device=device, dtype=torch.float32)
+
+    model_output = transformer(
+        hidden_states=noisy_latents,
+        encoder_hidden_states=prompt_embeds,
+        pooled_projections=pooled_prompt_embeds,
+        timestep=timesteps,
+        img_ids=latent_image_ids,
+        txt_ids=text_ids,
+        guidance=guidance,
+        return_dict=True,
+    )
+    prediction = model_output.sample if hasattr(model_output, "sample") else model_output[0]
+    loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+    return float(loss.detach().cpu().item())
+
+
+
+def _sample_flux_flow_matching_timesteps(*, batch_size: int, device: Any, dtype: Any) -> tuple[Any, Any]:
+    import torch
+
+    timesteps = torch.rand((batch_size,), device=device, dtype=torch.float32)
+    sigmas = timesteps.to(device=device, dtype=dtype)
+    while sigmas.ndim < 3:
+        sigmas = sigmas.unsqueeze(-1)
+    return timesteps, sigmas
+
+
+
+def _freeze_stage2_modules(pipeline: Any, config: Stage2TrainConfig) -> None:
+    for component_name in ["transformer", "text_encoder", "text_encoder_2", "vae", "image_encoder"]:
+        component = getattr(pipeline, component_name, None)
+        if component is None or not hasattr(component, "parameters"):
+            continue
+        for parameter in component.parameters():
+            parameter.requires_grad = False
+
+    if not hasattr(pipeline, "transformer") or pipeline.transformer is None:
+        raise RuntimeError("Loaded pipeline does not expose a transformer component")
+
+    transformer = pipeline.transformer
+    if config.train_transformer_core_only:
+        for parameter in transformer.parameters():
+            parameter.requires_grad = True
+    if config.apply_real_module_selection:
+        apply_trainable_parameter_selection(
+            transformer,
+            include_patterns=config.module_include_patterns,
+            exclude_patterns=config.module_exclude_patterns,
+        )
+
+    if not config.freeze_text_encoder:
+        for component_name in ["text_encoder", "text_encoder_2"]:
+            component = getattr(pipeline, component_name, None)
+            if component is not None and hasattr(component, "parameters"):
+                for parameter in component.parameters():
+                    parameter.requires_grad = True
+    if not config.freeze_vae and getattr(pipeline, "vae", None) is not None:
+        for parameter in pipeline.vae.parameters():
+            parameter.requires_grad = True
+
+
+
+def _save_transformer_checkpoint(transformer: Any, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if hasattr(transformer, "save_pretrained"):
+        transformer.save_pretrained(output_dir)
+        return
+    if importlib.util.find_spec("torch") is None:
+        return
+    import torch
+
+    torch.save(transformer.state_dict(), output_dir / "pytorch_model.bin")
+
+
+
+def _resolve_training_device(config: Stage2TrainConfig) -> Any:
+    import torch
+
+    if config.backbone_device:
+        return torch.device(config.backbone_device)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+
+def _resolve_training_dtype(config: Stage2TrainConfig, device: Any) -> Any:
+    import torch
+
+    normalized = str(config.backbone_torch_dtype).lower().strip()
+    mapping = {
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "half": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+    }
+    if normalized not in mapping:
+        raise ValueError(f"Unsupported torch dtype label: {config.backbone_torch_dtype}")
+    if device.type == "cpu" and mapping[normalized] != torch.float32:
+        return torch.float32
+    return mapping[normalized]
+
+
+
+def _torch_dtype_label(dtype: Any) -> str:
+    text = str(dtype)
+    return text.split(".")[-1]
+
 
 
 def run_placeholder_transformer_core_loop(config: Stage2TrainConfig, manifest_path: str) -> dict[str, Any]:
@@ -274,8 +568,9 @@ def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str,
         "backbone_assumptions": _infer_backbone_assumptions(config.backbone_name),
         "backbone_runtime": backbone_runtime,
         "implementation_boundary": (
-            "Pattern selectors now support inspection and optional requires_grad application on a real torch module tree "
-            "when one is explicitly provided. Concrete FLUX Kontext loading/training is still not implemented in this repo."
+            "Pattern selectors support inspection and optional requires_grad application on a real torch module tree, "
+            "and the repo now includes a minimal real diffusers-backed FLUX-family transformer fine-tuning path over "
+            "(image, canonical_caption) pairs when the runtime can load the requested backbone."
         ),
     }
 
@@ -545,13 +840,13 @@ def _build_trainer_plan(
             "real_module_target_selection": "optional_when_explicit_module_reference_is_provided",
             "real_module_adapter_injection": "optional_when_explicit_module_reference_is_provided",
             "placeholder_loop": "optional",
-            "full_flux_kontext_finetuning": "not_implemented",
+            "full_flux_kontext_finetuning": "minimally_implemented_when_runtime_supports_real_backbone_loading",
         },
         "notes": [
             "This scaffold is intentionally conservative.",
             "Stage 2 no longer means render; render belongs to Stage 1.",
             "Current code records a default policy of freezing non-transformer top-level modules and fine-tuning the full transformer.",
-            "Current FLUX.1 Kontext references are assumption labels for planning, not proof that executable module surgery or real training is implemented.",
+            "Real diffusers-backed FLUX-family training is wired conservatively around packed VAE latents and canonical-caption prompt encoding, but successful execution still depends on the local runtime actually loading the requested backbone.",
         ],
     }
 
