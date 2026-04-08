@@ -206,17 +206,27 @@ if importlib.util.find_spec("torch") is not None:
             self.alpha = float(alpha)
             self.scaling = float(alpha) / float(rank)
             self.dropout = torch.nn.Dropout(dropout) if dropout and dropout > 0 else torch.nn.Identity()
-            self.lora_A = torch.nn.Linear(base_layer.in_features, rank, bias=False)
-            self.lora_B = torch.nn.Linear(rank, base_layer.out_features, bias=False)
+
+            target_weight = base_layer.weight
+            target_device = target_weight.device
+            target_dtype = target_weight.dtype
+            self.lora_A = torch.nn.Linear(base_layer.in_features, rank, bias=False, device=target_device, dtype=target_dtype)
+            self.lora_B = torch.nn.Linear(rank, base_layer.out_features, bias=False, device=target_device, dtype=target_dtype)
             torch.nn.init.kaiming_uniform_(self.lora_A.weight, a=5**0.5)
             torch.nn.init.zeros_(self.lora_B.weight)
+            self.dropout = self.dropout.to(device=target_device)
 
             for parameter in self.base_layer.parameters():
                 parameter.requires_grad = False
 
         def forward(self, inputs: Any) -> Any:
             base = self.base_layer(inputs)
-            update = self.lora_B(self.lora_A(self.dropout(inputs))) * self.scaling
+            lora_inputs = self.dropout(inputs)
+            if lora_inputs.device != self.lora_A.weight.device or lora_inputs.dtype != self.lora_A.weight.dtype:
+                lora_inputs = lora_inputs.to(device=self.lora_A.weight.device, dtype=self.lora_A.weight.dtype)
+            update = self.lora_B(self.lora_A(lora_inputs)) * self.scaling
+            if update.device != base.device or update.dtype != base.dtype:
+                update = update.to(device=base.device, dtype=base.dtype)
             return base + update
 
 
