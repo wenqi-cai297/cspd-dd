@@ -1741,7 +1741,14 @@ def _run_real_pixart_train_step(
                 lr_scheduler.step()
             if global_step == 1:
                 _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step, "grad_global_norm": grad_diagnostics["grad_global_norm"], "clipped_grad_norm": grad_norm_value, "lr": float(optimizer.param_groups[0]["lr"]), "max_abs_trainable_parameter_value": None if parameter_diagnostics is None else parameter_diagnostics["max_abs_trainable_parameter_value"]}, main_process_only=False)
-        _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="after_pixart_step", torch_module=torch, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra={"pixel_values_shape": list(batch['pixel_values'].shape), "latents_shape": list(latents.shape), "timesteps_shape": list(timesteps.shape), "prompt_embeds_shape": list(prompt_embeds.shape), "prompt_attention_mask_shape": list(prompt_attention_mask.shape), "dropped_prompt_count": dropped_prompt_count, "lr": float(optimizer.param_groups[0]["lr"]), "clipped_grad_norm": grad_norm_value, "transformer_train_dtype": _torch_dtype_label(transformer_train_dtype), "trainable_parameter_diagnostics": parameter_diagnostics})
+        transformer_train_dtype_label = _torch_dtype_label(train_dtype)
+        if parameter_diagnostics is not None:
+            dtype_counts = parameter_diagnostics.get("trainable_parameter_dtype_counts") or {}
+            if len(dtype_counts) == 1:
+                transformer_train_dtype_label = next(iter(dtype_counts))
+            elif dtype_counts:
+                transformer_train_dtype_label = f"mixed:{dtype_counts}"
+        _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="after_pixart_step", torch_module=torch, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra={"pixel_values_shape": list(batch['pixel_values'].shape), "latents_shape": list(latents.shape), "timesteps_shape": list(timesteps.shape), "prompt_embeds_shape": list(prompt_embeds.shape), "prompt_attention_mask_shape": list(prompt_attention_mask.shape), "dropped_prompt_count": dropped_prompt_count, "lr": float(optimizer.param_groups[0]["lr"]), "clipped_grad_norm": grad_norm_value, "transformer_train_dtype": transformer_train_dtype_label, "trainable_parameter_diagnostics": parameter_diagnostics})
         return loss.detach()
 
 
