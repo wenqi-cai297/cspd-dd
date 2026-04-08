@@ -15,6 +15,8 @@ dependencies = [
   "transformers",
   "accelerate",
   "sentencepiece",
+  "protobuf",
+  "tiktoken",
   "safetensors",
 ]
 
