@@ -1089,6 +1089,8 @@ def run_real_stage2_pixart_training(
     total_optimizer_steps = None
     last_known_phase = "preflight"
     phase_history: list[str] = []
+    component_move_log_path: Path | None = None
+    component_move_state: dict[str, Any] = {"component_move_failures": [], "last_component_move_attempt": None}
 
     def mark_phase(phase: str, *, extra: dict[str, Any] | None = None, epoch: int | None = None, global_step_value: int | None = None, optimizer_step_value: int | None = None, main_process_only: bool = True) -> None:
         nonlocal last_known_phase
@@ -1128,6 +1130,7 @@ def run_real_stage2_pixart_training(
         train_dtype_label = _torch_dtype_label(train_dtype)
         rank_info = _accelerator_rank_info(accelerator, device)
         memory_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_{config.memory_log_artifact_name}"
+        component_move_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_component_move_diagnostics.jsonl"
         _mark_sync_point(phase="accelerator_startup_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"backbone_name": config.backbone_name}, main_process_only=False)
         mark_phase("training_start", extra={"backbone_name": config.backbone_name, "manifest_path": str(Path(manifest_path).resolve()), "num_pairs": len(pairs), "load_dtype": load_dtype_label, "train_dtype": train_dtype_label})
 
@@ -1149,6 +1152,21 @@ def run_real_stage2_pixart_training(
             gradient_checkpointing = {"enabled": False, "method": None, "attempted_methods": [], "reason": "disabled_by_config"}
         _set_module_mode(getattr(pipeline, "vae", None), training=False)
         _set_module_mode(getattr(pipeline, "text_encoder", None), training=False)
+        _set_module_mode(getattr(pipeline, "text_encoder_2", None), training=False)
+        if not config.keep_frozen_modules_on_cpu_until_needed:
+            _move_named_pipeline_components(
+                pipeline,
+                component_names=["vae", "text_encoder", "text_encoder_2"],
+                device=device,
+                dtype=train_dtype,
+                torch_module=torch,
+                accelerator=accelerator,
+                runtime_device=device,
+                memory_log_path=memory_log_path,
+                component_move_log_path=component_move_log_path,
+                move_state=component_move_state,
+            )
+            mark_phase("after_eager_frozen_component_move", extra={"component_names": ["vae", "text_encoder", "text_encoder_2"]})
 
         mark_phase("before_optimizer_setup")
         optimizer = torch.optim.AdamW((parameter for parameter in transformer.parameters() if parameter.requires_grad), lr=config.learning_rate)
@@ -1188,7 +1206,24 @@ def run_real_stage2_pixart_training(
                     mark_phase("first_batch_fetched", epoch=epoch + 1, global_step_value=global_step + 1, optimizer_step_value=optimizer_step_count + 1, extra={"batch_index": batch_index, "batch_size": len(batch.get("conditioning_text", [])) if isinstance(batch, dict) else None}, main_process_only=False)
                 if stop_after is not None and optimizer_step_count >= stop_after:
                     break
-                loss = _run_real_pixart_train_step(pipeline=pipeline, transformer=transformer, batch=batch, optimizer=optimizer, accelerator=accelerator, device=device, train_dtype=train_dtype, memory_log_path=memory_log_path, epoch=epoch + 1, global_step=global_step + 1, optimizer_step=optimizer_step_count + 1, config=config)
+                loss = _run_real_pixart_train_step(
+                    pipeline=pipeline,
+                    transformer=transformer,
+                    batch=batch,
+                    optimizer=optimizer,
+                    accelerator=accelerator,
+                    device=device,
+                    train_dtype=train_dtype,
+                    memory_log_path=memory_log_path,
+                    component_move_log_path=component_move_log_path,
+                    epoch=epoch + 1,
+                    global_step=global_step + 1,
+                    optimizer_step=optimizer_step_count + 1,
+                    config=config,
+                    keep_frozen_modules_on_cpu_until_needed=config.keep_frozen_modules_on_cpu_until_needed,
+                    offload_frozen_modules_after_step=config.offload_frozen_modules_after_step,
+                    move_state=component_move_state,
+                )
                 global_step += 1
                 sync_gradients = accelerator.sync_gradients if accelerator is not None else True
                 if sync_gradients:
@@ -1241,6 +1276,9 @@ def run_real_stage2_pixart_training(
             "estimated_total_optimizer_steps": total_optimizer_steps,
             "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
             "memory_log_path": str(memory_log_path.resolve()) if memory_log_path is not None else None,
+            "component_move_log_path": str(component_move_log_path.resolve()) if component_move_log_path is not None else None,
+            "last_component_move_attempt": component_move_state.get("last_component_move_attempt"),
+            "component_move_failures": component_move_state.get("component_move_failures", []),
             "last_known_phase": last_known_phase,
             "phase_history": phase_history,
             "launch_notes": ["Uses Hugging Face Accelerate for process setup, dataloader sharding, backward, and main-process-only checkpoint writes.", "PixArt-Σ uses the diffusers PixArtSigmaPipeline contract: prompt_embeds + prompt_attention_mask conditioning, VAE latents, and scheduler.add_noise training timesteps."],
@@ -1277,6 +1315,9 @@ def run_real_stage2_pixart_training(
             "estimated_total_optimizer_steps": total_optimizer_steps,
             "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
             "memory_log_path": str(memory_log_path.resolve()) if memory_log_path is not None else None,
+            "component_move_log_path": str(component_move_log_path.resolve()) if component_move_log_path is not None else None,
+            "last_component_move_attempt": component_move_state.get("last_component_move_attempt"),
+            "component_move_failures": component_move_state.get("component_move_failures", []),
             "last_known_phase": last_known_phase,
             "phase_history": phase_history,
             "failure": {"error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc(), "rank_info": _accelerator_rank_info(accelerator, device) if torch is not None else None},
@@ -1296,30 +1337,135 @@ def _run_real_pixart_train_step(
     device: Any,
     train_dtype: Any,
     memory_log_path: Path,
+    component_move_log_path: Path | None,
     epoch: int,
     global_step: int,
     optimizer_step: int,
     config: Stage2TrainConfig,
+    keep_frozen_modules_on_cpu_until_needed: bool,
+    offload_frozen_modules_after_step: bool,
+    move_state: dict[str, Any] | None,
 ) -> Any:
     import torch
 
     accumulation_context = accelerator.accumulate(transformer) if accelerator is not None else nullcontext()
     with accumulation_context:
+        pixel_values = batch["pixel_values"].to(device=device, dtype=train_dtype)
         if global_step == 1:
             _emit_stage2_console_event(accelerator=accelerator, device=device, phase="before_first_vae_encode", extra={"optimizer_step": optimizer_step}, main_process_only=False)
-        pixel_values = batch["pixel_values"].to(device=device, dtype=train_dtype)
-        vae_dtype = next(pipeline.vae.parameters()).dtype
-        vae_device = next(pipeline.vae.parameters()).device
+        _append_memory_event(
+            artifact_path=memory_log_path,
+            accelerator=accelerator,
+            device=device,
+            phase="before_vae_encode",
+            torch_module=torch,
+            epoch=epoch,
+            global_step=global_step,
+            optimizer_step=optimizer_step,
+            extra={
+                "pixel_values_shape": list(pixel_values.shape),
+                "conditioning_batch_size": len(batch.get("conditioning_text", [])),
+                "keep_frozen_modules_on_cpu_until_needed": keep_frozen_modules_on_cpu_until_needed,
+            },
+        )
         with torch.no_grad():
+            if keep_frozen_modules_on_cpu_until_needed:
+                _move_named_pipeline_components(
+                    pipeline,
+                    component_names=["vae"],
+                    device=device,
+                    dtype=train_dtype,
+                    torch_module=torch,
+                    accelerator=accelerator,
+                    runtime_device=device,
+                    memory_log_path=memory_log_path,
+                    component_move_log_path=component_move_log_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                    move_state=move_state,
+                )
+            vae_dtype = next(pipeline.vae.parameters()).dtype
+            vae_device = next(pipeline.vae.parameters()).device
+            _append_memory_event(
+                artifact_path=memory_log_path,
+                accelerator=accelerator,
+                device=device,
+                phase="vae_encode_runtime",
+                torch_module=torch,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                extra={"vae_device": str(vae_device), "vae_dtype": _torch_dtype_label(vae_dtype)},
+            )
             latents = pipeline.vae.encode(pixel_values.to(device=vae_device, dtype=vae_dtype)).latent_dist.sample()
             if global_step == 1:
-                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_vae_encode", extra={"optimizer_step": optimizer_step, "latents_shape": list(latents.shape)}, main_process_only=False)
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_vae_encode", extra={"optimizer_step": optimizer_step, "latents_shape": list(latents.shape), "vae_device": str(vae_device)}, main_process_only=False)
             scaling_factor = float(getattr(getattr(pipeline.vae, "config", None), "scaling_factor", 0.13025))
             shift_factor = float(getattr(getattr(pipeline.vae, "config", None), "shift_factor", 0.0) or 0.0)
             latents = (latents - shift_factor) * scaling_factor
             latents = latents.to(device=device, dtype=train_dtype)
+            _append_memory_event(
+                artifact_path=memory_log_path,
+                accelerator=accelerator,
+                device=device,
+                phase="after_vae_encode",
+                torch_module=torch,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                extra={"latents_shape": list(latents.shape), "vae_device": str(vae_device)},
+            )
+            if keep_frozen_modules_on_cpu_until_needed and offload_frozen_modules_after_step:
+                _move_named_pipeline_components(
+                    pipeline,
+                    component_names=["vae"],
+                    device=torch.device("cpu"),
+                    dtype=torch.float32,
+                    torch_module=torch,
+                    accelerator=accelerator,
+                    runtime_device=device,
+                    memory_log_path=memory_log_path,
+                    component_move_log_path=component_move_log_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                    move_state=move_state,
+                )
+            if keep_frozen_modules_on_cpu_until_needed:
+                _move_named_pipeline_components(
+                    pipeline,
+                    component_names=["text_encoder", "text_encoder_2"],
+                    device=device,
+                    dtype=train_dtype,
+                    torch_module=torch,
+                    accelerator=accelerator,
+                    runtime_device=device,
+                    memory_log_path=memory_log_path,
+                    component_move_log_path=component_move_log_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                    move_state=move_state,
+                )
             if global_step == 1:
                 _emit_stage2_console_event(accelerator=accelerator, device=device, phase="before_first_text_encode", extra={"optimizer_step": optimizer_step}, main_process_only=False)
+            text_encoder = getattr(pipeline, "text_encoder", None)
+            text_device = next(text_encoder.parameters()).device if text_encoder is not None and hasattr(text_encoder, "parameters") else device
+            _append_memory_event(
+                artifact_path=memory_log_path,
+                accelerator=accelerator,
+                device=device,
+                phase="before_prompt_encode",
+                torch_module=torch,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                extra={
+                    "prompt_sample": batch["conditioning_text"][0] if batch.get("conditioning_text") else None,
+                    "text_encoder_device": str(text_device),
+                },
+            )
             prompt_embeds, prompt_attention_mask, _, _ = pipeline.encode_prompt(
                 prompt=batch["conditioning_text"],
                 do_classifier_free_guidance=False,
@@ -1330,7 +1476,38 @@ def _run_real_pixart_train_step(
             prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
             prompt_attention_mask = prompt_attention_mask.to(device=device)
             if global_step == 1:
-                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_text_encode", extra={"optimizer_step": optimizer_step, "prompt_embeds_shape": list(prompt_embeds.shape)}, main_process_only=False)
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_text_encode", extra={"optimizer_step": optimizer_step, "prompt_embeds_shape": list(prompt_embeds.shape), "text_encoder_device": str(text_device)}, main_process_only=False)
+            _append_memory_event(
+                artifact_path=memory_log_path,
+                accelerator=accelerator,
+                device=device,
+                phase="after_prompt_encode",
+                torch_module=torch,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                extra={
+                    "prompt_embeds_shape": list(prompt_embeds.shape),
+                    "prompt_attention_mask_shape": list(prompt_attention_mask.shape),
+                    "text_encoder_device": str(text_device),
+                },
+            )
+            if keep_frozen_modules_on_cpu_until_needed and offload_frozen_modules_after_step:
+                _move_named_pipeline_components(
+                    pipeline,
+                    component_names=["text_encoder", "text_encoder_2"],
+                    device=torch.device("cpu"),
+                    dtype=torch.float32,
+                    torch_module=torch,
+                    accelerator=accelerator,
+                    runtime_device=device,
+                    memory_log_path=memory_log_path,
+                    component_move_log_path=component_move_log_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                    move_state=move_state,
+                )
 
         noise = torch.randn_like(latents)
         batch_size = latents.shape[0]
