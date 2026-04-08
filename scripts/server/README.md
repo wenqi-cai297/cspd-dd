@@ -311,7 +311,7 @@ accelerate launch --num_processes 2 \
   --epochs 1
 ```
 
-`conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also compose narrower groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`. On PixArt, this path now works with the safer FP32 partial-full-update strategy because frozen entry modules such as `pos_embed` keep their native half-precision boundary while the selected conditioning modules can still be upcasted to FP32.
+`conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also compose narrower groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`. On PixArt, this path now works with the safer FP32 partial-full-update strategy because frozen entry modules such as `pos_embed` keep their native half-precision boundary, the boundary-sensitive `adaln_single` timestep block also stays at that native dtype, and the remaining selected conditioning modules can still be upcasted to FP32.
 
 Important scope note:
 - the pairing/manifest/run scaffold is implemented now

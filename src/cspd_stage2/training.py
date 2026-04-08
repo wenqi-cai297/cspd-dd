@@ -11,6 +11,7 @@ This module is deliberately honest about scope:
 - does not pretend every environment can actually load or fine-tune gated FLUX checkpoints.
 """
 
+import fnmatch
 import importlib.util
 import json
 import os
@@ -341,12 +342,19 @@ def _should_force_full_update_fp32(*, config: Stage2TrainConfig) -> bool:
     return bool(config.full_update_fp32_for_pixart and parameterization == "full" and family in {"pixart", "pixart_sigma"})
 
 
-def _upcast_trainable_parameters_(module: Any, *, dtype: Any) -> dict[str, Any]:
+def _upcast_trainable_parameters_(module: Any, *, dtype: Any, exclude_patterns: list[str] | None = None) -> dict[str, Any]:
     converted_parameter_names: list[str] = []
+    skipped_parameter_names: list[str] = []
     converted_parameter_count = 0
     converted_value_count = 0
+    exclude_patterns = list(dict.fromkeys(exclude_patterns or []))
     for name, parameter in module.named_parameters():
-        if not parameter.requires_grad or parameter.dtype == dtype:
+        if not parameter.requires_grad:
+            continue
+        if exclude_patterns and any(fnmatch.fnmatchcase(name, pattern) for pattern in exclude_patterns):
+            skipped_parameter_names.append(name)
+            continue
+        if parameter.dtype == dtype:
             continue
         parameter.data = parameter.data.to(dtype=dtype)
         if parameter.grad is not None:
@@ -360,7 +368,22 @@ def _upcast_trainable_parameters_(module: Any, *, dtype: Any) -> dict[str, Any]:
         "converted_parameter_count": converted_parameter_count,
         "converted_value_count": converted_value_count,
         "converted_parameter_names_sample": converted_parameter_names[:20],
+        "excluded_parameter_patterns": exclude_patterns,
+        "skipped_parameter_count": len(skipped_parameter_names),
+        "skipped_parameter_names_sample": skipped_parameter_names[:20],
     }
+
+
+def _resolve_pixart_partial_full_update_fp32_exclude_patterns(*, config: Stage2TrainConfig) -> list[str]:
+    family = infer_backbone_family(config.backbone_name)
+    if family not in {"pixart", "pixart_sigma"}:
+        return []
+    if not _should_force_full_update_fp32(config=config):
+        return []
+    selection = resolve_effective_module_selection(config)
+    if selection["selection_is_full_transformer"]:
+        return []
+    return ["adaln_single.*"]
 
 
 def _infer_trainable_parameter_dtype(module: Any, *, fallback: Any) -> Any:
@@ -1297,8 +1320,9 @@ def run_real_stage2_pixart_training(
         selection_result = _freeze_stage2_modules(pipeline, config)
         transformer = pipeline.transformer
         if _should_force_full_update_fp32(config=config):
-            fp32_full_update_summary = _upcast_trainable_parameters_(transformer, dtype=torch.float32)
-            if fp32_full_update_summary["enabled"]:
+            fp32_upcast_exclude_patterns = _resolve_pixart_partial_full_update_fp32_exclude_patterns(config=config)
+            fp32_full_update_summary = _upcast_trainable_parameters_(transformer, dtype=torch.float32, exclude_patterns=fp32_upcast_exclude_patterns)
+            if fp32_full_update_summary["enabled"] or fp32_full_update_summary.get("skipped_parameter_count", 0) > 0:
                 mark_phase("after_full_update_fp32_upcast", extra=fp32_full_update_summary)
             else:
                 fp32_full_update_summary = {**fp32_full_update_summary, "reason": "no_trainable_parameter_dtype_changes_needed"}
