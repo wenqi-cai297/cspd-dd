@@ -12,6 +12,7 @@ from cspd_stage2.training import (
     AdapterPlan,
     CONDITIONING_RELATED_GROUP_PATTERNS,
     Stage2TrainConfig,
+    derive_stage2_output_dir,
     inspect_stage2_backbone_targets,
     resolve_effective_module_selection,
     run_stage2_training,
@@ -34,7 +35,15 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Stage 1 render records.jsonl path used as canonical text-conditioning source",
     )
-    train_parser.add_argument("--output-dir", required=True, help="Run directory for Stage 2 artifacts")
+    train_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            "Optional run directory for Stage 2 artifacts. Defaults to "
+            "runs/stage2/train/<dataset_label>/<backbone_slug>/<timestamp>, where split-only dataset roots "
+            "like train/val/valid/validation/test/testing become <parent>_<split>."
+        ),
+    )
     train_parser.add_argument(
         "--backbone-name",
         default="black-forest-labs/FLUX.1-Kontext-dev",
@@ -361,10 +370,11 @@ def _resolve_conditioning_objective(backbone_name: str, requested_objective: str
 
 
 def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
+    output_dir = args.output_dir or derive_stage2_output_dir(args.dataset_root, args.backbone_name)
     config = Stage2TrainConfig(
         dataset_root=args.dataset_root,
         render_input=args.render_input,
-        output_dir=args.output_dir,
+        output_dir=output_dir,
         backbone_name=args.backbone_name,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,

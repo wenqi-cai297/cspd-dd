@@ -34,7 +34,7 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 
 - `cspd-stage1 run --dataset-root ... --output-dir ...`
 - `cspd-stage1 render --input ... --output-dir ...`
-- `cspd-stage2 train --dataset-root ... --render-input ... --output-dir ...`
+- `cspd-stage2 train --dataset-root ... --render-input ... [--output-dir ...]`
 - Canonical Stage 1 render implementation now lives under `src/cspd_stage1/`
 - Stage 2 now means generative-backbone adaptation / canonical-semantic-space familiarization; it no longer refers to render
 
@@ -146,20 +146,23 @@ STAGE2_NUM_PROCESSES=2 bash scripts/server/run_stage2_train.sh \
   --gradient-accumulation-steps 1
 ```
 
-If you intentionally need full manual control over every argument, the direct CLI remains available:
+If you intentionally need direct CLI control, `--output-dir` is now optional there too. When omitted, the CLI derives the same structured path as the helper: `runs/stage2/train/<dataset_label>/<backbone_slug>/<timestamp>`.
+
+Recommended direct CLI form:
 
 ```bash
 accelerate launch --num_processes 2 \
   -m cspd_stage2.cli train \
   --dataset-root /path/to/imagefolder_dataset \
   --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
-  --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000 \
   --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
   --trainable-component-group full_transformer \
   --batch-size 4 \
   --epochs 1 \
   --gradient-accumulation-steps 1
 ```
+
+If you still want to pin a custom run directory manually, `--output-dir ...` continues to override the derived default.
 
 If you hit memory pressure, you now have two honest fallback levels while keeping the same top-level/fine-grained selector interface. First, you can stay in real-parameter mode but restrict training to conditioning-focused transformer internals:
 
@@ -168,7 +171,6 @@ accelerate launch --num_processes 2 \
   -m cspd_stage2.cli train \
   --dataset-root /path/to/imagefolder_dataset \
   --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
-  --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000_conditioning_only \
   --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
   --trainable-component-group conditioning_transformer \
   --batch-size 4 \
@@ -183,7 +185,6 @@ accelerate launch --num_processes 2 \
   -m cspd_stage2.cli train \
   --dataset-root /path/to/imagefolder_dataset \
   --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
-  --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000_lora \
   --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
   --training-parameterization lora \
   --trainable-component-group conditioning_transformer \
@@ -203,7 +204,6 @@ accelerate launch --num_processes 1 \
   -m cspd_stage2.cli train \
   --dataset-root /path/to/imagefolder_dataset \
   --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
-  --output-dir runs/stage2/train/my_dataset/pixart_sigma/2026-04-05_020000_lora \
   --backbone-name PixArt-alpha/PixArt-Sigma-XL-2-512-MS \
   --resolution 512 \
   --backbone-torch-dtype float16 \

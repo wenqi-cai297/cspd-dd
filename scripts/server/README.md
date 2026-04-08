@@ -246,20 +246,21 @@ STAGE2_NUM_PROCESSES=2 bash scripts/server/run_stage2_train.sh \
   --backbone-local-files-only
 ```
 
-Use the direct CLI mainly when you intentionally need full manual control over every argument:
+Use the direct CLI mainly when you intentionally need full argument-level control. `--output-dir` is now optional there too; if you omit it, the CLI derives `runs/stage2/train/<dataset_label>/<backbone_slug>/<timestamp>` with the same dataset-label rule as this helper.
 
 ```bash
 accelerate launch --num_processes 2 \
   -m cspd_stage2.cli train \
   --dataset-root /path/to/dataset_root \
   --render-input /path/to/stage1_render_records.jsonl \
-  --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000 \
   --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
   --trainable-component-group full_transformer \
   --batch-size 4 \
   --epochs 1 \
   --gradient-accumulation-steps 1
 ```
+
+If you want to pin a custom run directory, `--output-dir ...` still overrides the default.
 
 For the memory-reduced conditioning-focused path, keep the same CLI and swap the component group:
 
@@ -268,7 +269,6 @@ accelerate launch --num_processes 2 \
   -m cspd_stage2.cli train \
   --dataset-root /path/to/dataset_root \
   --render-input /path/to/stage1_render_records.jsonl \
-  --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-02_180000_conditioning_only \
   --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
   --trainable-component-group conditioning_transformer \
   --batch-size 4 \

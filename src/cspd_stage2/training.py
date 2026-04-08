@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 import math
+import re
 from contextlib import nullcontext
 
 from cspd_stage1.io_utils import write_json
@@ -89,6 +90,38 @@ CONDITIONING_RELATED_GROUP_PATTERNS["conditioning_transformer"] = [
 ]
 
 
+SPLIT_ONLY_DATASET_ROOT_NAMES = {
+    "train",
+    "val",
+    "valid",
+    "validation",
+    "test",
+    "testing",
+}
+
+
+def derive_stage2_dataset_label(dataset_root: str | os.PathLike[str]) -> str:
+    dataset_path = Path(dataset_root).expanduser().resolve()
+    base_name = dataset_path.name
+    parent_name = dataset_path.parent.name
+    if base_name.lower() in SPLIT_ONLY_DATASET_ROOT_NAMES and parent_name:
+        return f"{parent_name}_{base_name}"
+    return base_name
+
+
+def sanitize_stage2_backbone_slug(backbone_name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]", "_", backbone_name.strip().replace("/", "__").replace(" ", "__"))
+    slug = re.sub(r"_+", "_", slug)
+    return slug.strip("._-") or "backbone"
+
+
+def derive_stage2_output_dir(dataset_root: str | os.PathLike[str], backbone_name: str, *, timestamp: str | None = None) -> str:
+    resolved_timestamp = timestamp or datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    dataset_label = derive_stage2_dataset_label(dataset_root)
+    backbone_slug = sanitize_stage2_backbone_slug(backbone_name)
+    return str(Path("runs") / "stage2" / "train" / dataset_label / backbone_slug / resolved_timestamp)
+
+
 @dataclass(slots=True)
 class AdapterPlan:
     adapter_type: str = "lora"
@@ -106,7 +139,7 @@ class AdapterPlan:
 class Stage2TrainConfig:
     dataset_root: str
     render_input: str
-    output_dir: str
+    output_dir: str | None = None
     backbone_name: str = "black-forest-labs/FLUX.1-Kontext-dev"
     memory_log_artifact_name: str = "memory_diagnostics.jsonl"
     batch_size: int = 4
@@ -158,6 +191,8 @@ class Stage2TrainConfig:
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
     """Build Stage 2 artifacts and run the smallest honest training path available."""
+    if not config.output_dir:
+        config.output_dir = derive_stage2_output_dir(config.dataset_root, config.backbone_name)
     run_dir = Path(config.output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -214,7 +249,7 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         write_json(run_dir / "stage2_config_snapshot.json", _config_to_dict(config))
         last_known_phase = "after_write_config_snapshot"
 
-        trainer_plan = _build_trainer_plan(config, manifest_paths.manifest_path, len(pairing.pairs), component_plan, None)
+        trainer_plan = _build_trainer_plan(config, manifest_paths.manifest_path, len(pairing.pairs), component_plan)
         last_known_phase = "before_write_trainer_plan"
         write_json(run_dir / "trainer_plan.json", trainer_plan)
         last_known_phase = "after_write_trainer_plan"
