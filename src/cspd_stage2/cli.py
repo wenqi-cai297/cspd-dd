@@ -50,7 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Backbone identifier for the intended Stage 2 generative-backbone adaptation target",
     )
     train_parser.add_argument("--batch-size", type=int, default=4, help="Logical training batch size")
-    train_parser.add_argument("--learning-rate", type=float, default=1e-4, help="Optimizer learning rate")
+    train_parser.add_argument("--learning-rate", type=float, default=2e-5, help="Optimizer learning rate")
+    train_parser.add_argument("--lr-scheduler", default="constant_with_warmup", choices=["constant", "constant_with_warmup"], help="Learning-rate scheduler for the real Stage 2 path")
+    train_parser.add_argument("--lr-warmup-steps", type=int, default=1000, help="Warmup steps for the real Stage 2 learning-rate scheduler")
+    train_parser.add_argument("--max-grad-norm", type=float, default=0.01, help="Gradient clipping norm for the real Stage 2 path")
+    train_parser.add_argument("--adam-beta1", type=float, default=0.9, help="AdamW beta1")
+    train_parser.add_argument("--adam-beta2", type=float, default=0.999, help="AdamW beta2")
+    train_parser.add_argument("--adam-weight-decay", type=float, default=0.0, help="AdamW weight decay")
+    train_parser.add_argument("--adam-epsilon", type=float, default=1e-8, help="AdamW epsilon")
+    train_parser.add_argument("--pixart-sigma-prompt-dropout-prob", type=float, default=0.1, help="Classifier-free style prompt dropout probability used on the PixArt canonical-caption conditioning path")
     train_parser.add_argument("--epochs", type=int, default=1, help="Number of epochs for the training scaffold")
     train_parser.add_argument("--max-steps", type=int, default=None, help="Optional maximum number of optimization steps")
     train_parser.add_argument("--num-workers", type=int, default=0, help="Data loader worker count placeholder")
@@ -386,6 +394,14 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         backbone_name=args.backbone_name,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        lr_scheduler=args.lr_scheduler,
+        lr_warmup_steps=args.lr_warmup_steps,
+        max_grad_norm=args.max_grad_norm,
+        adam_beta1=args.adam_beta1,
+        adam_beta2=args.adam_beta2,
+        adam_weight_decay=args.adam_weight_decay,
+        adam_epsilon=args.adam_epsilon,
+        pixart_sigma_prompt_dropout_prob=args.pixart_sigma_prompt_dropout_prob,
         epochs=args.epochs,
         max_steps=args.max_steps,
         num_workers=args.num_workers,

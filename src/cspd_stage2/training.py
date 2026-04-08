@@ -143,7 +143,7 @@ class Stage2TrainConfig:
     backbone_name: str = "black-forest-labs/FLUX.1-Kontext-dev"
     memory_log_artifact_name: str = "memory_diagnostics.jsonl"
     batch_size: int = 4
-    learning_rate: float = 1e-4
+    learning_rate: float = 2e-5
     epochs: int = 1
     max_steps: int | None = None
     num_workers: int = 0
@@ -151,6 +151,14 @@ class Stage2TrainConfig:
     seed: int = 42
     weight_dtype: str = "float16"
     optimizer_name: str = "adamw"
+    lr_scheduler: str = "constant_with_warmup"
+    lr_warmup_steps: int = 1000
+    max_grad_norm: float = 0.01
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.999
+    adam_weight_decay: float = 0.0
+    adam_epsilon: float = 1e-8
+    pixart_sigma_prompt_dropout_prob: float = 0.1
     log_every: int = 10
     save_every: int = 200
     max_train_samples: int | None = None
@@ -326,6 +334,63 @@ def _effective_prompt_max_sequence_length(config: Stage2TrainConfig) -> int:
     if family in {"pixart", "pixart_sigma"}:
         return 300
     return 512
+
+
+def _build_optimizer(*, parameters: list[Any], config: Stage2TrainConfig, torch_module: Any) -> Any:
+    optimizer_name = config.optimizer_name.strip().lower()
+    if optimizer_name != "adamw":
+        raise ValueError(f"Unsupported optimizer_name for real Stage 2 training: {config.optimizer_name}")
+    return torch_module.optim.AdamW(
+        parameters,
+        lr=config.learning_rate,
+        betas=(config.adam_beta1, config.adam_beta2),
+        weight_decay=config.adam_weight_decay,
+        eps=config.adam_epsilon,
+    )
+
+
+def _build_lr_scheduler(*, optimizer: Any, config: Stage2TrainConfig, total_optimizer_steps: int | None) -> tuple[Any | None, dict[str, Any]]:
+    if optimizer is None:
+        return None, {"name": config.lr_scheduler, "enabled": False, "reason": "optimizer_missing"}
+    scheduler_name = config.lr_scheduler.strip().lower()
+    warmup_steps = max(int(config.lr_warmup_steps), 0)
+    effective_total_steps = None if total_optimizer_steps is None else max(int(total_optimizer_steps), 1)
+    if scheduler_name == "constant":
+        return None, {"name": scheduler_name, "enabled": False, "warmup_steps": 0}
+    if scheduler_name == "constant_with_warmup":
+        from torch.optim.lr_scheduler import LambdaLR
+
+        def lr_lambda(step: int) -> float:
+            if warmup_steps <= 0:
+                return 1.0
+            return min(float(step + 1) / float(warmup_steps), 1.0)
+
+        return LambdaLR(optimizer, lr_lambda=lr_lambda), {
+            "name": scheduler_name,
+            "enabled": True,
+            "warmup_steps": warmup_steps,
+            "total_optimizer_steps": effective_total_steps,
+        }
+    raise ValueError(f"Unsupported lr_scheduler for real Stage 2 training: {config.lr_scheduler}")
+
+
+def _maybe_apply_conditioning_dropout(conditioning_text: list[str], *, config: Stage2TrainConfig, torch_module: Any) -> tuple[list[str], int]:
+    family = infer_backbone_family(config.backbone_name)
+    if family not in {"pixart", "pixart_sigma"}:
+        return list(conditioning_text), 0
+    dropout_prob = float(config.pixart_sigma_prompt_dropout_prob)
+    if dropout_prob <= 0.0:
+        return list(conditioning_text), 0
+    dropped_count = 0
+    conditioned: list[str] = []
+    for text in conditioning_text:
+        if float(torch_module.rand(1).item()) < dropout_prob:
+            conditioned.append("")
+            dropped_count += 1
+        else:
+            conditioned.append(text)
+    return conditioned, dropped_count
+
 
 def _safe_write_json(path: Path, payload: dict[str, Any]) -> None:
     try:
@@ -1192,8 +1257,9 @@ def run_real_stage2_pixart_training(
             mark_phase("after_eager_frozen_component_move", extra={"component_names": ["vae", "text_encoder", "text_encoder_2"]})
 
         mark_phase("before_optimizer_setup")
-        optimizer = torch.optim.AdamW((parameter for parameter in transformer.parameters() if parameter.requires_grad), lr=config.learning_rate)
-        mark_phase("after_optimizer_setup")
+        trainable_parameters = [parameter for parameter in transformer.parameters() if parameter.requires_grad]
+        optimizer = _build_optimizer(parameters=trainable_parameters, config=config, torch_module=torch)
+        mark_phase("after_optimizer_setup", extra={"optimizer_name": config.optimizer_name, "learning_rate": config.learning_rate, "adam_beta1": config.adam_beta1, "adam_beta2": config.adam_beta2, "adam_weight_decay": config.adam_weight_decay, "adam_epsilon": config.adam_epsilon})
         mark_phase("before_dataloader_setup")
         dataloader = make_stage2_dataloader(pairs, resolution=config.resolution, batch_size=config.batch_size, num_workers=config.num_workers, shuffle=True, drop_last=config.dataloader_drop_last)
         mark_phase("after_dataloader_setup")
@@ -1221,6 +1287,8 @@ def run_real_stage2_pixart_training(
             total_optimizer_steps = optimizer_updates_per_epoch * max(config.epochs, 1)
             if stop_after is not None:
                 total_optimizer_steps = min(total_optimizer_steps, stop_after)
+        lr_scheduler, lr_scheduler_summary = _build_lr_scheduler(optimizer=optimizer, config=config, total_optimizer_steps=total_optimizer_steps)
+        mark_phase("after_lr_scheduler_setup", extra=lr_scheduler_summary)
 
         for epoch in range(max(config.epochs, 1)):
             mark_phase("epoch_start", epoch=epoch + 1, extra={"epoch_index": epoch + 1, "planned_epochs": max(config.epochs, 1)})
@@ -1234,6 +1302,7 @@ def run_real_stage2_pixart_training(
                     transformer=transformer,
                     batch=batch,
                     optimizer=optimizer,
+                    lr_scheduler=lr_scheduler,
                     accelerator=accelerator,
                     device=device,
                     train_dtype=train_dtype,
@@ -1287,6 +1356,8 @@ def run_real_stage2_pixart_training(
             "adapter_injection": selection_result["adapter_injection"].to_dict() if selection_result is not None and selection_result["adapter_injection"] is not None else None,
             "trainable_parameter_summary": selection_result["trainable_parameter_summary"] if selection_result is not None else None,
             "accelerate": {"enabled": bool(accelerator is not None), "num_processes": world_size, "gradient_accumulation_steps": max(config.gradient_accumulation_steps, 1), "distributed_type": str(getattr(getattr(accelerator, "state", None), "distributed_type", "no")) if accelerator is not None else "no", "requested_device_map_ignored": bool(config.backbone_device_map)},
+            "optimizer": {"name": config.optimizer_name, "learning_rate": config.learning_rate, "adam_beta1": config.adam_beta1, "adam_beta2": config.adam_beta2, "adam_weight_decay": config.adam_weight_decay, "adam_epsilon": config.adam_epsilon},
+            "lr_scheduler": lr_scheduler_summary,
             "gradient_checkpointing": gradient_checkpointing,
             "memory_strategy": {"keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed, "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step},
             "dataloader_batches_per_epoch": steps_per_epoch,
@@ -1327,6 +1398,8 @@ def run_real_stage2_pixart_training(
             "applied_transformer_module_selection": selection_result["selection"].to_dict() if selection_result is not None else None,
             "adapter_injection": selection_result["adapter_injection"].to_dict() if selection_result is not None and selection_result["adapter_injection"] is not None else None,
             "trainable_parameter_summary": selection_result["trainable_parameter_summary"] if selection_result is not None else None,
+            "optimizer": {"name": config.optimizer_name, "learning_rate": config.learning_rate, "adam_beta1": config.adam_beta1, "adam_beta2": config.adam_beta2, "adam_weight_decay": config.adam_weight_decay, "adam_epsilon": config.adam_epsilon},
+            "lr_scheduler": lr_scheduler_summary if 'lr_scheduler_summary' in locals() else None,
             "gradient_checkpointing": gradient_checkpointing,
             "memory_strategy": {"keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed, "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step},
             "dataloader_batches_per_epoch": steps_per_epoch,
@@ -1359,6 +1432,7 @@ def _run_real_pixart_train_step(
     transformer: Any,
     batch: dict[str, Any],
     optimizer: Any,
+    lr_scheduler: Any | None,
     accelerator: Any | None,
     device: Any,
     train_dtype: Any,
@@ -1492,8 +1566,9 @@ def _run_real_pixart_train_step(
                     "text_encoder_device": str(text_device),
                 },
             )
+            conditioning_text, dropped_prompt_count = _maybe_apply_conditioning_dropout(batch["conditioning_text"], config=config, torch_module=torch)
             prompt_embeds, prompt_attention_mask, _, _ = pipeline.encode_prompt(
-                prompt=batch["conditioning_text"],
+                prompt=conditioning_text,
                 do_classifier_free_guidance=False,
                 device=device,
                 num_images_per_prompt=1,
@@ -1516,6 +1591,7 @@ def _run_real_pixart_train_step(
                     "prompt_embeds_shape": list(prompt_embeds.shape),
                     "prompt_attention_mask_shape": list(prompt_attention_mask.shape),
                     "text_encoder_device": str(text_device),
+                    "dropped_prompt_count": dropped_prompt_count,
                 },
             )
             if keep_frozen_modules_on_cpu_until_needed and offload_frozen_modules_after_step:
@@ -1609,6 +1685,10 @@ def _run_real_pixart_train_step(
             accelerator.backward(loss)
         else:
             loss.backward()
+        if accelerator is None or accelerator.sync_gradients:
+            grad_norm_value = float(torch.nn.utils.clip_grad_norm_(transformer.parameters(), max(config.max_grad_norm, 0.0)).detach().cpu().item()) if config.max_grad_norm > 0 else None
+        else:
+            grad_norm_value = None
         grad_diagnostics = _record_gradient_diagnostics(module=accelerator.unwrap_model(transformer) if accelerator is not None else transformer, accelerator=accelerator, device=device, memory_log_path=memory_log_path, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, torch_module=torch)
         if not grad_diagnostics["all_gradients_finite"]:
             raise RuntimeError(f"Detected non-finite gradients during Stage 2 training at optimizer step {optimizer_step}: {grad_diagnostics['non_finite_gradient_parameter_names_sample']}")
@@ -1621,15 +1701,17 @@ def _run_real_pixart_train_step(
             epoch=epoch,
             global_step=global_step,
             optimizer_step=optimizer_step,
-            extra={"grad_global_norm": grad_diagnostics["grad_global_norm"], "all_gradients_finite": grad_diagnostics["all_gradients_finite"]},
+            extra={"grad_global_norm": grad_diagnostics["grad_global_norm"], "clipped_grad_norm": grad_norm_value, "all_gradients_finite": grad_diagnostics["all_gradients_finite"]},
         )
         if global_step == 1:
             _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_backward", extra={"optimizer_step": optimizer_step, "grad_global_norm": grad_diagnostics["grad_global_norm"]}, main_process_only=False)
         if accelerator is None or accelerator.sync_gradients:
             optimizer.step()
+            if lr_scheduler is not None:
+                lr_scheduler.step()
             if global_step == 1:
-                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step, "grad_global_norm": grad_diagnostics["grad_global_norm"]}, main_process_only=False)
-        _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="after_pixart_step", torch_module=torch, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra={"pixel_values_shape": list(batch['pixel_values'].shape), "latents_shape": list(latents.shape), "timesteps_shape": list(timesteps.shape), "prompt_embeds_shape": list(prompt_embeds.shape), "prompt_attention_mask_shape": list(prompt_attention_mask.shape)})
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step, "grad_global_norm": grad_diagnostics["grad_global_norm"], "clipped_grad_norm": grad_norm_value, "lr": float(optimizer.param_groups[0]["lr"])}, main_process_only=False)
+        _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="after_pixart_step", torch_module=torch, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra={"pixel_values_shape": list(batch['pixel_values'].shape), "latents_shape": list(latents.shape), "timesteps_shape": list(timesteps.shape), "prompt_embeds_shape": list(prompt_embeds.shape), "prompt_attention_mask_shape": list(prompt_attention_mask.shape), "dropped_prompt_count": dropped_prompt_count, "lr": float(optimizer.param_groups[0]["lr"]), "clipped_grad_norm": grad_norm_value})
         return loss.detach()
 
 

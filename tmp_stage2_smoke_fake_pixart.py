@@ -111,6 +111,10 @@ config = Stage2TrainConfig(
     backbone_name='PixArt-alpha/PixArt-Sigma-XL-2-512-MS',
     training_parameterization='lora',
     trainable_component_groups=['conditioning_transformer'],
+    lr_scheduler='constant_with_warmup',
+    lr_warmup_steps=2,
+    max_grad_norm=0.01,
+    pixart_sigma_prompt_dropout_prob=0.1,
 )
 selection = _freeze_stage2_modules(pipeline, config)
 summary = selection['trainable_parameter_summary']
@@ -124,14 +128,19 @@ loss = _run_real_pixart_train_step(
     transformer=pipeline.transformer,
     batch=batch,
     optimizer=optimizer,
+    lr_scheduler=None,
     accelerator=None,
     device=torch.device('cpu'),
     train_dtype=torch.float32,
     memory_log_path=Path('tmp_stage2_pixart_smoke_memory.jsonl'),
+    component_move_log_path=None,
     epoch=1,
     global_step=1,
     optimizer_step=1,
     config=config,
+    keep_frozen_modules_on_cpu_until_needed=False,
+    offload_frozen_modules_after_step=False,
+    move_state=None,
 )
 print({
     'loss': float(loss.detach().cpu().item()),

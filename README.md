@@ -213,10 +213,16 @@ accelerate launch --num_processes 1 \
   --adapter-alpha 16 \
   --batch-size 1 \
   --gradient-accumulation-steps 4 \
+  --learning-rate 2e-5 \
+  --lr-scheduler constant_with_warmup \
+  --lr-warmup-steps 1000 \
+  --max-grad-norm 0.01 \
+  --adam-weight-decay 0.0 \
+  --pixart-sigma-prompt-dropout-prob 0.1 \
   --epochs 1
 ```
 
-Stage 2 no longer supports prompt-cache preprocessing or cached prompt/text embeddings. Training always runs live prompt encoding on the active backbone path during each step. For PixArt-Σ, the live prompt path keeps the PixArt-family prompt length consistent at 300 tokens.
+Stage 2 no longer supports prompt-cache preprocessing or cached prompt/text embeddings. Training always runs live prompt encoding on the active backbone path during each step. For PixArt-Σ, the live prompt path keeps the PixArt-family prompt length consistent at 300 tokens, and the Stage 2 PixArt path now defaults closer to the official Sigma recipe: low LR, constant-with-warmup scheduling, tight grad clipping, and 0.1 prompt dropout on the canonical-caption conditioning stream.
 
 For remote/server debugging, Stage 2 now emits concise rank-aware progress logs directly to stdout/stderr around the common stall points: backbone load, module freezing/selection, dataloader creation, each `accelerate.prepare(...)` boundary, first batch fetch, first text/VAE encode, first forward/backward/optimizer step, checkpoint writes, explicit non-finite loss detection, and early-step gradient diagnostics. It also writes per-rank JSONL diagnostics under the run directory, typically:
 - `runs/stage2/train/.../rank00_memory_diagnostics.jsonl`
