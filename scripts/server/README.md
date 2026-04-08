@@ -232,7 +232,7 @@ This helper currently:
 - writes a Stage 2 config snapshot and trainer plan
 - records full-transformer fine-tuning intent and module-selection metadata
 - keeps non-transformer top-level modules frozen by default (`freeze_text_encoder=true`, `freeze_vae=true`)
-- keeps frozen VAE/text modules on CPU until first use, but no longer offloads them back to CPU after every step by default
+- keeps frozen VAE/text modules resident on the active training device for the whole run
 
 You can still pass through extra Stage 2 CLI options after the positional helper arguments. For example:
 

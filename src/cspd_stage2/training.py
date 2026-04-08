@@ -193,8 +193,6 @@ class Stage2TrainConfig:
     gradient_accumulation_steps: int = 1
     dataloader_drop_last: bool = False
     enable_gradient_checkpointing: bool = True
-    keep_frozen_modules_on_cpu_until_needed: bool = True
-    offload_frozen_modules_after_step: bool = False
     full_update_fp32_for_pixart: bool = True
 
 
@@ -478,7 +476,6 @@ def _build_stage2_run_summary(
             "trainer_plan": str((run_dir / "trainer_plan.json").resolve()),
             "run_summary": str((run_dir / "stage2_run_summary.json").resolve()),
             "memory_log_pattern": str((run_dir / f"rank*_{config.memory_log_artifact_name}").resolve()),
-            "component_move_diagnostics_pattern": str((run_dir / "rank*_component_move_diagnostics.jsonl").resolve()),
         },
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
@@ -861,7 +858,6 @@ def run_real_stage2_flux_training(
         train_dtype_label = _torch_dtype_label(train_dtype)
         rank_info = _accelerator_rank_info(accelerator, device)
         memory_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_{config.memory_log_artifact_name}"
-        component_move_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_component_move_diagnostics.jsonl"
         _mark_sync_point(phase="accelerator_startup_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"backbone_name": config.backbone_name}, main_process_only=False)
         mark_phase(
             "training_start",
@@ -925,25 +921,21 @@ def run_real_stage2_flux_training(
         _set_module_mode(getattr(pipeline, "text_encoder", None), training=False)
         _set_module_mode(getattr(pipeline, "text_encoder_2", None), training=False)
         _set_module_mode(getattr(pipeline, "image_encoder", None), training=False)
-        if config.keep_frozen_modules_on_cpu_until_needed:
-            _move_named_pipeline_components(
-                pipeline,
-                component_names=["vae", "text_encoder", "text_encoder_2", "image_encoder"],
-                device=torch.device("cpu"),
-                dtype=torch.float32,
-                torch_module=torch,
-                accelerator=accelerator,
-                runtime_device=device,
-                memory_log_path=memory_log_path,
-                component_move_log_path=component_move_log_path,
-                move_state=component_move_state,
-            )
+        _move_named_pipeline_components(
+            pipeline,
+            component_names=["vae", "text_encoder", "text_encoder_2", "image_encoder"],
+            device=device,
+            dtype=train_dtype,
+            torch_module=torch,
+            accelerator=accelerator,
+            runtime_device=device,
+            memory_log_path=memory_log_path,
+        )
         mark_phase(
             "after_gradient_checkpointing_setup",
             extra={
                 "gradient_checkpointing": gradient_checkpointing,
-                "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
-                "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step,
+                "frozen_components_runtime": "always_on_device",
             },
         )
 
@@ -985,7 +977,7 @@ def run_real_stage2_flux_training(
                     "gradient_accumulation_steps": max(config.gradient_accumulation_steps, 1),
                     "dataloader_batches_per_epoch": len(dataloader) if hasattr(dataloader, "__len__") else None,
                     "gradient_checkpointing": gradient_checkpointing,
-                    "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
+                    "frozen_components_runtime": "always_on_device",
                 },
             )
         else:
@@ -1032,13 +1024,9 @@ def run_real_stage2_flux_training(
                     train_dtype=train_dtype,
                     resolution=config.resolution,
                     memory_log_path=memory_log_path,
-                    component_move_log_path=component_move_log_path,
                     epoch=epoch + 1,
                     global_step=global_step + 1,
                     optimizer_step=optimizer_step_count + 1,
-                    keep_frozen_modules_on_cpu_until_needed=config.keep_frozen_modules_on_cpu_until_needed,
-                    offload_frozen_modules_after_step=config.offload_frozen_modules_after_step,
-                    move_state=component_move_state,
                 )
                 global_step += 1
                 sync_gradients = accelerator.sync_gradients if accelerator is not None else True
@@ -1111,8 +1099,7 @@ def run_real_stage2_flux_training(
             },
             "gradient_checkpointing": gradient_checkpointing,
             "memory_strategy": {
-                "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
-                "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step,
+                "frozen_components_runtime": "always_on_device",
             },
             "dataloader_batches_per_epoch": steps_per_epoch,
             "forward_steps": global_step,
@@ -1125,9 +1112,6 @@ def run_real_stage2_flux_training(
             "estimated_total_optimizer_steps": total_optimizer_steps,
             "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
             "memory_log_path": str(memory_log_path.resolve()) if memory_log_path is not None else None,
-            "component_move_log_path": str(component_move_log_path.resolve()) if component_move_log_path is not None else None,
-            "last_component_move_attempt": component_move_state.get("last_component_move_attempt"),
-            "component_move_failures": component_move_state.get("component_move_failures", []),
             "last_known_phase": last_known_phase,
             "phase_history": phase_history,
             "launch_notes": launch_notes,
@@ -1154,8 +1138,7 @@ def run_real_stage2_flux_training(
             "trainable_parameter_summary": selection_result["trainable_parameter_summary"] if selection_result is not None else None,
             "gradient_checkpointing": gradient_checkpointing,
             "memory_strategy": {
-                "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
-                "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step,
+                "frozen_components_runtime": "always_on_device",
             },
             "dataloader_batches_per_epoch": steps_per_epoch,
             "forward_steps": global_step,
@@ -1168,9 +1151,6 @@ def run_real_stage2_flux_training(
             "estimated_total_optimizer_steps": total_optimizer_steps,
             "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
             "memory_log_path": str(memory_log_path.resolve()) if memory_log_path is not None else None,
-            "component_move_log_path": str(component_move_log_path.resolve()) if component_move_log_path is not None else None,
-            "last_component_move_attempt": component_move_state.get("last_component_move_attempt"),
-            "component_move_failures": component_move_state.get("component_move_failures", []),
             "last_known_phase": last_known_phase,
             "phase_history": phase_history,
             "failure_category": _classify_training_failure(exc),
@@ -1214,8 +1194,6 @@ def run_real_stage2_pixart_training(
     total_optimizer_steps = None
     last_known_phase = "preflight"
     phase_history: list[str] = []
-    component_move_log_path: Path | None = None
-    component_move_state: dict[str, Any] = {"component_move_failures": [], "last_component_move_attempt": None}
 
     def mark_phase(phase: str, *, extra: dict[str, Any] | None = None, epoch: int | None = None, global_step_value: int | None = None, optimizer_step_value: int | None = None, main_process_only: bool = True) -> None:
         nonlocal last_known_phase
@@ -1255,7 +1233,6 @@ def run_real_stage2_pixart_training(
         train_dtype_label = _torch_dtype_label(train_dtype)
         rank_info = _accelerator_rank_info(accelerator, device)
         memory_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_{config.memory_log_artifact_name}"
-        component_move_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_component_move_diagnostics.jsonl"
         _mark_sync_point(phase="accelerator_startup_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"backbone_name": config.backbone_name}, main_process_only=False)
         mark_phase("training_start", extra={"backbone_name": config.backbone_name, "manifest_path": str(Path(manifest_path).resolve()), "num_pairs": len(pairs), "load_dtype": load_dtype_label, "train_dtype": train_dtype_label})
 
@@ -1284,20 +1261,17 @@ def run_real_stage2_pixart_training(
         _set_module_mode(getattr(pipeline, "vae", None), training=False)
         _set_module_mode(getattr(pipeline, "text_encoder", None), training=False)
         _set_module_mode(getattr(pipeline, "text_encoder_2", None), training=False)
-        if not config.keep_frozen_modules_on_cpu_until_needed:
-            _move_named_pipeline_components(
-                pipeline,
-                component_names=["vae", "text_encoder", "text_encoder_2"],
-                device=device,
-                dtype=train_dtype,
-                torch_module=torch,
-                accelerator=accelerator,
-                runtime_device=device,
-                memory_log_path=memory_log_path,
-                component_move_log_path=component_move_log_path,
-                move_state=component_move_state,
-            )
-            mark_phase("after_eager_frozen_component_move", extra={"component_names": ["vae", "text_encoder", "text_encoder_2"]})
+        _move_named_pipeline_components(
+            pipeline,
+            component_names=["vae", "text_encoder", "text_encoder_2"],
+            device=device,
+            dtype=train_dtype,
+            torch_module=torch,
+            accelerator=accelerator,
+            runtime_device=device,
+            memory_log_path=memory_log_path,
+        )
+        mark_phase("after_frozen_component_device_setup", extra={"component_names": ["vae", "text_encoder", "text_encoder_2"], "frozen_components_runtime": "always_on_device"})
 
         mark_phase("before_optimizer_setup")
         trainable_parameters = [parameter for parameter in transformer.parameters() if parameter.requires_grad]
@@ -1350,14 +1324,10 @@ def run_real_stage2_pixart_training(
                     device=device,
                     train_dtype=train_dtype,
                     memory_log_path=memory_log_path,
-                    component_move_log_path=component_move_log_path,
                     epoch=epoch + 1,
                     global_step=global_step + 1,
                     optimizer_step=optimizer_step_count + 1,
                     config=config,
-                    keep_frozen_modules_on_cpu_until_needed=config.keep_frozen_modules_on_cpu_until_needed,
-                    offload_frozen_modules_after_step=config.offload_frozen_modules_after_step,
-                    move_state=component_move_state,
                 )
                 global_step += 1
                 sync_gradients = accelerator.sync_gradients if accelerator is not None else True
@@ -1403,7 +1373,7 @@ def run_real_stage2_pixart_training(
             "lr_scheduler": lr_scheduler_summary,
             "gradient_checkpointing": gradient_checkpointing,
             "full_update_fp32": fp32_full_update_summary,
-            "memory_strategy": {"keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed, "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step},
+            "memory_strategy": {"frozen_components_runtime": "always_on_device"},
             "dataloader_batches_per_epoch": steps_per_epoch,
             "forward_steps": global_step,
             "optimizer_steps": optimizer_step_count,
@@ -1415,9 +1385,6 @@ def run_real_stage2_pixart_training(
             "estimated_total_optimizer_steps": total_optimizer_steps,
             "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
             "memory_log_path": str(memory_log_path.resolve()) if memory_log_path is not None else None,
-            "component_move_log_path": str(component_move_log_path.resolve()) if component_move_log_path is not None else None,
-            "last_component_move_attempt": component_move_state.get("last_component_move_attempt"),
-            "component_move_failures": component_move_state.get("component_move_failures", []),
             "last_known_phase": last_known_phase,
             "phase_history": phase_history,
             "launch_notes": ["Uses Hugging Face Accelerate for process setup, dataloader sharding, backward, and main-process-only checkpoint writes.", "PixArt-Σ uses the diffusers PixArtSigmaPipeline contract: prompt_embeds + prompt_attention_mask conditioning, VAE latents, and scheduler.add_noise training timesteps."],
@@ -1446,7 +1413,7 @@ def run_real_stage2_pixart_training(
             "lr_scheduler": lr_scheduler_summary if 'lr_scheduler_summary' in locals() else None,
             "gradient_checkpointing": gradient_checkpointing,
             "full_update_fp32": fp32_full_update_summary,
-            "memory_strategy": {"keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed, "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step},
+            "memory_strategy": {"frozen_components_runtime": "always_on_device"},
             "dataloader_batches_per_epoch": steps_per_epoch,
             "forward_steps": global_step,
             "optimizer_steps": optimizer_step_count,
@@ -1458,9 +1425,6 @@ def run_real_stage2_pixart_training(
             "estimated_total_optimizer_steps": total_optimizer_steps,
             "final_checkpoint_dir": str(final_checkpoint_dir.resolve()),
             "memory_log_path": str(memory_log_path.resolve()) if memory_log_path is not None else None,
-            "component_move_log_path": str(component_move_log_path.resolve()) if component_move_log_path is not None else None,
-            "last_component_move_attempt": component_move_state.get("last_component_move_attempt"),
-            "component_move_failures": component_move_state.get("component_move_failures", []),
             "last_known_phase": last_known_phase,
             "phase_history": phase_history,
             "failure_category": _classify_training_failure(exc),
@@ -1482,14 +1446,10 @@ def _run_real_pixart_train_step(
     device: Any,
     train_dtype: Any,
     memory_log_path: Path,
-    component_move_log_path: Path | None,
     epoch: int,
     global_step: int,
     optimizer_step: int,
     config: Stage2TrainConfig,
-    keep_frozen_modules_on_cpu_until_needed: bool,
-    offload_frozen_modules_after_step: bool,
-    move_state: dict[str, Any] | None,
 ) -> Any:
     import torch
 
@@ -1510,26 +1470,10 @@ def _run_real_pixart_train_step(
             extra={
                 "pixel_values_shape": list(pixel_values.shape),
                 "conditioning_batch_size": len(batch.get("conditioning_text", [])),
-                "keep_frozen_modules_on_cpu_until_needed": keep_frozen_modules_on_cpu_until_needed,
+                "frozen_components_runtime": "always_on_device",
             },
         )
         with torch.no_grad():
-            if keep_frozen_modules_on_cpu_until_needed:
-                _move_named_pipeline_components(
-                    pipeline,
-                    component_names=["vae"],
-                    device=device,
-                    dtype=train_dtype,
-                    torch_module=torch,
-                    accelerator=accelerator,
-                    runtime_device=device,
-                    memory_log_path=memory_log_path,
-                    component_move_log_path=component_move_log_path,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                    move_state=move_state,
-                )
             vae_dtype = next(pipeline.vae.parameters()).dtype
             vae_device = next(pipeline.vae.parameters()).device
             _append_memory_event(
@@ -1561,38 +1505,6 @@ def _run_real_pixart_train_step(
                 optimizer_step=optimizer_step,
                 extra={"latents_shape": list(latents.shape), "vae_device": str(vae_device)},
             )
-            if keep_frozen_modules_on_cpu_until_needed and offload_frozen_modules_after_step:
-                _move_named_pipeline_components(
-                    pipeline,
-                    component_names=["vae"],
-                    device=torch.device("cpu"),
-                    dtype=torch.float32,
-                    torch_module=torch,
-                    accelerator=accelerator,
-                    runtime_device=device,
-                    memory_log_path=memory_log_path,
-                    component_move_log_path=component_move_log_path,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                    move_state=move_state,
-                )
-            if keep_frozen_modules_on_cpu_until_needed:
-                _move_named_pipeline_components(
-                    pipeline,
-                    component_names=["text_encoder", "text_encoder_2"],
-                    device=device,
-                    dtype=train_dtype,
-                    torch_module=torch,
-                    accelerator=accelerator,
-                    runtime_device=device,
-                    memory_log_path=memory_log_path,
-                    component_move_log_path=component_move_log_path,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                    move_state=move_state,
-                )
             if global_step == 1:
                 _emit_stage2_console_event(accelerator=accelerator, device=device, phase="before_first_text_encode", extra={"optimizer_step": optimizer_step}, main_process_only=False)
             text_encoder = getattr(pipeline, "text_encoder", None)
@@ -1639,22 +1551,6 @@ def _run_real_pixart_train_step(
                     "dropped_prompt_count": dropped_prompt_count,
                 },
             )
-            if keep_frozen_modules_on_cpu_until_needed and offload_frozen_modules_after_step:
-                _move_named_pipeline_components(
-                    pipeline,
-                    component_names=["text_encoder", "text_encoder_2"],
-                    device=torch.device("cpu"),
-                    dtype=torch.float32,
-                    torch_module=torch,
-                    accelerator=accelerator,
-                    runtime_device=device,
-                    memory_log_path=memory_log_path,
-                    component_move_log_path=component_move_log_path,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                    move_state=move_state,
-                )
 
         noise = torch.randn_like(latents)
         batch_size = latents.shape[0]
@@ -1786,13 +1682,9 @@ def _run_real_flux_train_step(
     train_dtype: Any,
     resolution: int,
     memory_log_path: Path,
-    component_move_log_path: Path | None,
     epoch: int,
     global_step: int,
     optimizer_step: int,
-    keep_frozen_modules_on_cpu_until_needed: bool,
-    offload_frozen_modules_after_step: bool,
-    move_state: dict[str, Any] | None,
 ) -> Any:
     import torch
 
@@ -1815,36 +1707,10 @@ def _run_real_flux_train_step(
             extra={
                 "pixel_values_shape": list(pixel_values.shape),
                 "conditioning_batch_size": len(batch.get("conditioning_text", [])),
-                "keep_frozen_modules_on_cpu_until_needed": keep_frozen_modules_on_cpu_until_needed,
+                "frozen_components_runtime": "always_on_device",
             },
         )
         with torch.no_grad():
-            if keep_frozen_modules_on_cpu_until_needed:
-                _move_named_pipeline_components(
-                    pipeline,
-                    component_names=["vae"],
-                    device=device,
-                    dtype=train_dtype,
-                    torch_module=torch,
-                    accelerator=accelerator,
-                    runtime_device=device,
-                    memory_log_path=memory_log_path,
-                    component_move_log_path=component_move_log_path,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                    move_state=move_state,
-                )
-                _append_memory_event(
-                    artifact_path=memory_log_path,
-                    accelerator=accelerator,
-                    device=device,
-                    phase="after_vae_move_to_device",
-                    torch_module=torch,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                )
             vae_dtype = next(pipeline.vae.parameters()).dtype
             vae_device = next(pipeline.vae.parameters()).device
             latents = pipeline.vae.encode(pixel_values.to(device=vae_device, dtype=vae_dtype)).latent_dist.sample()
@@ -1864,58 +1730,6 @@ def _run_real_flux_train_step(
                 optimizer_step=optimizer_step,
                 extra={"latents_shape": list(latents.shape)},
             )
-            if keep_frozen_modules_on_cpu_until_needed and offload_frozen_modules_after_step:
-                _move_named_pipeline_components(
-                    pipeline,
-                    component_names=["vae"],
-                    device=torch.device("cpu"),
-                    dtype=torch.float32,
-                    torch_module=torch,
-                    accelerator=accelerator,
-                    runtime_device=device,
-                    memory_log_path=memory_log_path,
-                    component_move_log_path=component_move_log_path,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                    move_state=move_state,
-                )
-                _append_memory_event(
-                    artifact_path=memory_log_path,
-                    accelerator=accelerator,
-                    device=device,
-                    phase="after_vae_offload_to_cpu",
-                    torch_module=torch,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                )
-            if keep_frozen_modules_on_cpu_until_needed:
-                _move_named_pipeline_components(
-                    pipeline,
-                    component_names=["text_encoder", "text_encoder_2", "image_encoder"],
-                    device=device,
-                    dtype=train_dtype,
-                    torch_module=torch,
-                    accelerator=accelerator,
-                    runtime_device=device,
-                    memory_log_path=memory_log_path,
-                    component_move_log_path=component_move_log_path,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                    move_state=move_state,
-                )
-                _append_memory_event(
-                    artifact_path=memory_log_path,
-                    accelerator=accelerator,
-                    device=device,
-                    phase="after_prompt_modules_move_to_device",
-                    torch_module=torch,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                )
             if global_step == 1:
                 _emit_stage2_console_event(accelerator=accelerator, device=device, phase="before_first_text_encode", extra={"optimizer_step": optimizer_step}, main_process_only=False)
             _append_memory_event(
@@ -1956,32 +1770,6 @@ def _run_real_flux_train_step(
                     "text_ids_shape": list(text_ids.shape),
                 },
             )
-            if keep_frozen_modules_on_cpu_until_needed and offload_frozen_modules_after_step:
-                _move_named_pipeline_components(
-                    pipeline,
-                    component_names=["text_encoder", "text_encoder_2", "image_encoder"],
-                    device=torch.device("cpu"),
-                    dtype=torch.float32,
-                    torch_module=torch,
-                    accelerator=accelerator,
-                    runtime_device=device,
-                    memory_log_path=memory_log_path,
-                    component_move_log_path=component_move_log_path,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                    move_state=move_state,
-                )
-                _append_memory_event(
-                    artifact_path=memory_log_path,
-                    accelerator=accelerator,
-                    device=device,
-                    phase="after_prompt_modules_offload_to_cpu",
-                    torch_module=torch,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                )
 
         packed_latents = pipeline._pack_latents(
             latents,
@@ -2668,8 +2456,7 @@ def _build_component_plan(config: Stage2TrainConfig, backbone_runtime: dict[str,
         ),
         "memory_strategy": {
             "enable_gradient_checkpointing": config.enable_gradient_checkpointing,
-            "keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed,
-            "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step,
+            "frozen_components_runtime": "always_on_device",
         },
     }
 
@@ -2955,7 +2742,7 @@ def _build_trainer_plan(
             "Current code records a default policy of freezing non-transformer top-level modules and fine-tuning the full transformer.",
             "When a conditioning-focused transformer submodule group is selected, the real training path now applies that selection to requires_grad before optimization.",
             "The real training path now attempts transformer gradient checkpointing when the loaded FLUX transformer exposes a supported interface.",
-            "Frozen VAE/text components are kept on CPU until first use by default, then optionally offloaded back to CPU after encode so accelerate.prepare does not inherit their device residency up front.",
+            "Frozen VAE/text components now stay on the active runtime device for the whole training run; Stage 2 no longer shuttles them between CPU and GPU.",
             "Real accelerate-based diffusers-backed FLUX-family training is wired conservatively around packed VAE latents and canonical-caption prompt encoding, but successful execution still depends on the local runtime actually loading the requested backbone.",
             "Heavier optimizer/state sharding or FSDP-style offload is still not implemented here.",
         ],
