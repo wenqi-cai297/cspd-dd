@@ -64,14 +64,27 @@ class ModuleTargetingResult:
     selected_parameter_count: int
 
     def to_dict(self) -> dict[str, Any]:
+        module_type_counts: dict[str, int] = {}
+        trainable_parameter_count = 0
+        for item in self.matched_modules:
+            module_type_counts[item.module_type] = module_type_counts.get(item.module_type, 0) + 1
+            trainable_parameter_count += int(item.trainable_parameter_count)
         return {
             "total_modules_seen": self.total_modules_seen,
-            "matched_modules": [item.to_dict() for item in self.matched_modules],
+            "matched_module_count": len(self.matched_modules),
+            "matched_module_samples": [item.to_dict() for item in self.matched_modules[:20]],
+            "matched_module_samples_truncated": len(self.matched_modules) > 20,
             "include_patterns": list(self.include_patterns),
             "exclude_patterns": list(self.exclude_patterns),
-            "selected_module_names": list(self.selected_module_names),
-            "selected_parameter_names": list(self.selected_parameter_names),
+            "selected_module_names_sample": self.selected_module_names[:40],
+            "selected_module_names_count": len(self.selected_module_names),
+            "selected_module_names_truncated": len(self.selected_module_names) > 40,
+            "selected_parameter_names_sample": self.selected_parameter_names[:80],
+            "selected_parameter_names_count": len(self.selected_parameter_names),
+            "selected_parameter_names_truncated": len(self.selected_parameter_names) > 80,
             "selected_parameter_count": self.selected_parameter_count,
+            "selected_trainable_parameter_count": trainable_parameter_count,
+            "matched_module_type_counts": module_type_counts,
         }
 
 
@@ -116,9 +129,15 @@ class AdapterInjectionResult:
             "target_module_type": self.target_module_type,
             "include_patterns": list(self.include_patterns),
             "exclude_patterns": list(self.exclude_patterns),
-            "attempted_module_names": list(self.attempted_module_names),
-            "injected_modules": [item.to_dict() for item in self.injected_modules],
-            "skipped_modules": list(self.skipped_modules),
+            "attempted_module_names_sample": list(self.attempted_module_names[:40]),
+            "attempted_module_names_count": len(self.attempted_module_names),
+            "attempted_module_names_truncated": len(self.attempted_module_names) > 40,
+            "injected_module_count": len(self.injected_modules),
+            "injected_module_samples": [item.to_dict() for item in self.injected_modules[:20]],
+            "injected_module_samples_truncated": len(self.injected_modules) > 20,
+            "skipped_module_count": len(self.skipped_modules),
+            "skipped_module_samples": list(self.skipped_modules[:20]),
+            "skipped_module_samples_truncated": len(self.skipped_modules) > 20,
             "total_adapter_parameter_count": self.total_adapter_parameter_count,
         }
 

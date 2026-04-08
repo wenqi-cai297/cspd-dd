@@ -396,6 +396,28 @@ def _safe_jsonable(value: Any) -> Any:
     return str(value)
 
 
+
+def _sample_sequence(values: list[str] | tuple[str, ...] | None, *, limit: int = 20) -> dict[str, Any]:
+    sequence = list(values or [])
+    return {
+        "count": len(sequence),
+        "sample": sequence[:limit],
+        "truncated": len(sequence) > limit,
+    }
+
+
+
+def _summarize_tensor_like(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    shape = getattr(value, "shape", None)
+    return {
+        "shape": [int(dim) for dim in shape] if shape is not None else None,
+        "dtype": _torch_dtype_label(getattr(value, "dtype", None)) if getattr(value, "dtype", None) is not None else None,
+        "device": str(getattr(value, "device", None)) if getattr(value, "device", None) is not None else None,
+    }
+
+
 def _accelerator_rank_info(accelerator: Any | None, device: Any) -> dict[str, Any]:
     local_rank = getattr(accelerator, "local_process_index", 0) if accelerator is not None else 0
     global_rank = getattr(accelerator, "process_index", 0) if accelerator is not None else 0
@@ -1516,9 +1538,33 @@ def _run_real_pixart_train_step(
         num_train_timesteps = int(getattr(pipeline.scheduler.config, "num_train_timesteps", 1000))
         timesteps = torch.randint(0, num_train_timesteps, (batch_size,), device=device, dtype=torch.long)
         noisy_latents = pipeline.scheduler.add_noise(latents, noise, timesteps)
-        added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
+        latent_height = int(noisy_latents.shape[-2])
+        latent_width = int(noisy_latents.shape[-1])
+        resolution = torch.tensor([[latent_height * 8.0, latent_width * 8.0]], device=device, dtype=torch.float32).repeat(batch_size, 1)
+        aspect_ratio_value = float(latent_width) / float(latent_height) if latent_height > 0 else 1.0
+        aspect_ratio = torch.tensor([[aspect_ratio_value]], device=device, dtype=torch.float32).repeat(batch_size, 1)
+        added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
+        forward_input_summary = {
+            "hidden_states": _summarize_tensor_like(noisy_latents),
+            "encoder_hidden_states": _summarize_tensor_like(prompt_embeds),
+            "encoder_attention_mask": _summarize_tensor_like(prompt_attention_mask),
+            "timestep": _summarize_tensor_like(timesteps),
+            "added_cond_kwargs": {key: _summarize_tensor_like(value) for key, value in added_cond_kwargs.items()},
+            "latent_hw": [latent_height, latent_width],
+        }
+        _append_memory_event(
+            artifact_path=memory_log_path,
+            accelerator=accelerator,
+            device=device,
+            phase="before_pixart_forward_input_prep",
+            torch_module=torch,
+            epoch=epoch,
+            global_step=global_step,
+            optimizer_step=optimizer_step,
+            extra=forward_input_summary,
+        )
         if global_step == 1:
-            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="before_first_forward", extra={"optimizer_step": optimizer_step}, main_process_only=False)
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="before_first_forward", extra={"optimizer_step": optimizer_step, "forward_inputs": forward_input_summary}, main_process_only=False)
         model_output = transformer(hidden_states=noisy_latents, encoder_hidden_states=prompt_embeds, encoder_attention_mask=prompt_attention_mask, timestep=timesteps, added_cond_kwargs=added_cond_kwargs, return_dict=True)
         prediction = model_output.sample if hasattr(model_output, "sample") else model_output[0]
         out_channels = int(getattr(getattr(transformer, "config", None), "out_channels", prediction.shape[1]))
@@ -1526,11 +1572,46 @@ def _run_real_pixart_train_step(
         if out_channels // 2 == latent_channels:
             prediction = prediction.chunk(2, dim=1)[0]
         loss = torch.nn.functional.mse_loss(prediction.float(), noise.float())
+        _append_memory_event(
+            artifact_path=memory_log_path,
+            accelerator=accelerator,
+            device=device,
+            phase="after_pixart_forward",
+            torch_module=torch,
+            epoch=epoch,
+            global_step=global_step,
+            optimizer_step=optimizer_step,
+            extra={
+                "prediction": _summarize_tensor_like(prediction),
+                "loss": float(loss.detach().float().cpu().item()),
+            },
+        )
         if global_step == 1:
-            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_forward", extra={"optimizer_step": optimizer_step, "loss": float(loss.detach().float().cpu().item())}, main_process_only=False)
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_forward", extra={"optimizer_step": optimizer_step, "loss": float(loss.detach().float().cpu().item()), "prediction": _summarize_tensor_like(prediction)}, main_process_only=False)
         optimizer.zero_grad(set_to_none=True)
+        _append_memory_event(
+            artifact_path=memory_log_path,
+            accelerator=accelerator,
+            device=device,
+            phase="before_pixart_backward",
+            torch_module=torch,
+            epoch=epoch,
+            global_step=global_step,
+            optimizer_step=optimizer_step,
+            extra={"loss": float(loss.detach().float().cpu().item())},
+        )
         if accelerator is not None:
             accelerator.backward(loss)
+            _append_memory_event(
+                artifact_path=memory_log_path,
+                accelerator=accelerator,
+                device=device,
+                phase="after_pixart_backward",
+                torch_module=torch,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+            )
             if global_step == 1:
                 _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_backward", extra={"optimizer_step": optimizer_step}, main_process_only=False)
             if accelerator.sync_gradients:
@@ -1539,6 +1620,16 @@ def _run_real_pixart_train_step(
                     _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step}, main_process_only=False)
         else:
             loss.backward()
+            _append_memory_event(
+                artifact_path=memory_log_path,
+                accelerator=accelerator,
+                device=device,
+                phase="after_pixart_backward",
+                torch_module=torch,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+            )
             if global_step == 1:
                 _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_backward", extra={"optimizer_step": optimizer_step}, main_process_only=False)
             optimizer.step()
@@ -2144,17 +2235,27 @@ def _summarize_trainable_parameters(module_or_pipeline: Any) -> dict[str, Any]:
             lora_parameter_names.append(name)
             lora_parameter_count += count
     non_lora_trainable_names = [name for name in trainable_names if ".lora_" not in name and not name.startswith("lora_")]
+    component_trainable_counts: dict[str, int] = {}
+    component_frozen_counts: dict[str, int] = {}
+    for name, parameter in _iter_named_parameters_from_pipeline_or_module(module_or_pipeline):
+        component_name = name.split(".", 1)[0] if "." in name else name
+        if parameter.requires_grad:
+            component_trainable_counts[component_name] = component_trainable_counts.get(component_name, 0) + int(parameter.numel())
+        else:
+            component_frozen_counts[component_name] = component_frozen_counts.get(component_name, 0) + int(parameter.numel())
     return {
         "trainable_parameter_count": trainable_parameter_count,
         "frozen_parameter_count": frozen_parameter_count,
-        "trainable_parameter_names": trainable_names,
-        "frozen_parameter_names": frozen_names,
+        "trainable_parameter_names_sample": _sample_sequence(trainable_names, limit=40),
+        "frozen_parameter_names_sample": _sample_sequence(frozen_names, limit=40),
         "lora_parameter_count": lora_parameter_count,
-        "lora_parameter_names": lora_parameter_names,
-        "non_lora_trainable_parameter_names": non_lora_trainable_names,
+        "lora_parameter_names_sample": _sample_sequence(lora_parameter_names, limit=40),
+        "non_lora_trainable_parameter_names_sample": _sample_sequence(non_lora_trainable_names, limit=40),
         "only_lora_parameters_trainable": bool(trainable_names) and not non_lora_trainable_names,
         "summary_target_type": type(module_or_pipeline).__name__,
         "summary_from_pipeline_components": not hasattr(module_or_pipeline, "named_parameters"),
+        "trainable_parameter_count_by_component": component_trainable_counts,
+        "frozen_parameter_count_by_component": component_frozen_counts,
     }
 
 
