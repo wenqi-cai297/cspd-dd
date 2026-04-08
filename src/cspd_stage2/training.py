@@ -478,6 +478,60 @@ def _append_jsonl_event(artifact_path: Path, payload: dict[str, Any]) -> dict[st
     return safe_payload
 
 
+def _emit_stage2_console_event(
+    *,
+    accelerator: Any | None,
+    device: Any,
+    phase: str,
+    extra: dict[str, Any] | None = None,
+    main_process_only: bool = True,
+) -> dict[str, Any] | None:
+    rank_info = _accelerator_rank_info(accelerator, device)
+    is_main_process = bool(getattr(accelerator, "is_main_process", True)) if accelerator is not None else True
+    if main_process_only and not is_main_process:
+        return None
+    payload: dict[str, Any] = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "phase": phase,
+        "rank": rank_info["global_rank"],
+        "world_size": rank_info["world_size"],
+        "local_rank": rank_info["local_rank"],
+        "device": rank_info["device"],
+        "pid": rank_info["pid"],
+    }
+    if extra:
+        payload["extra"] = _safe_jsonable(extra)
+    message = f"[Stage2][rank {rank_info['global_rank']}/{max(rank_info['world_size'] - 1, 0)}][{rank_info['device']}] {phase}"
+    if extra:
+        compact_items = []
+        for key, value in list(_safe_jsonable(extra).items())[:6]:
+            compact_items.append(f"{key}={value}")
+        if compact_items:
+            message += " | " + ", ".join(compact_items)
+    print(message, flush=True)
+    return payload
+
+
+def _mark_sync_point(
+    *,
+    phase: str,
+    accelerator: Any | None,
+    device: Any,
+    torch_module: Any | None,
+    memory_log_path: Path | None,
+    extra: dict[str, Any] | None = None,
+    main_process_only: bool = False,
+) -> None:
+    _emit_stage2_console_event(accelerator=accelerator, device=device, phase=f"before_{phase}", extra=extra, main_process_only=main_process_only)
+    if torch_module is not None and memory_log_path is not None:
+        _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase=f"before_{phase}", torch_module=torch_module, extra=extra)
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    if torch_module is not None and memory_log_path is not None:
+        _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase=f"after_{phase}", torch_module=torch_module, extra=extra)
+    _emit_stage2_console_event(accelerator=accelerator, device=device, phase=f"after_{phase}", extra=extra, main_process_only=main_process_only)
+
+
 
 def _move_diagnostic_target_label(device: Any, dtype: Any | None) -> str:
     if dtype is None:
@@ -628,7 +682,7 @@ def run_real_stage2_flux_training(
     phase_history: list[str] = []
     component_move_state: dict[str, Any] = {"component_move_events": [], "component_move_failures": [], "last_component_move_attempt": None}
 
-    def mark_phase(phase: str, *, extra: dict[str, Any] | None = None, epoch: int | None = None, global_step_value: int | None = None, optimizer_step_value: int | None = None) -> None:
+    def mark_phase(phase: str, *, extra: dict[str, Any] | None = None, epoch: int | None = None, global_step_value: int | None = None, optimizer_step_value: int | None = None, main_process_only: bool = True) -> None:
         nonlocal last_known_phase
         last_known_phase = phase
         phase_history.append(phase)
@@ -644,6 +698,13 @@ def run_real_stage2_flux_training(
                 optimizer_step=optimizer_step_value,
                 extra=extra,
             )
+        _emit_stage2_console_event(
+            accelerator=accelerator,
+            device=device,
+            phase=phase,
+            extra={"epoch": epoch, "global_step": global_step_value, "optimizer_step": optimizer_step_value, **(extra or {})},
+            main_process_only=main_process_only,
+        )
 
     try:
         if importlib.util.find_spec("torch") is None:
@@ -678,8 +739,7 @@ def run_real_stage2_flux_training(
         rank_info = _accelerator_rank_info(accelerator, device)
         memory_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_{config.memory_log_artifact_name}"
         component_move_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_component_move_diagnostics.jsonl"
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        _mark_sync_point(phase="accelerator_startup_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"backbone_name": config.backbone_name}, main_process_only=False)
         mark_phase(
             "training_start",
             extra={
@@ -818,9 +878,8 @@ def run_real_stage2_flux_training(
         is_main_process = accelerator.is_main_process if accelerator is not None else True
         if is_main_process:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
-        mark_phase("after_checkpoint_dir_ready")
+        _mark_sync_point(phase="checkpoint_dir_ready_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"checkpoint_dir": str(checkpoint_dir.resolve())}, main_process_only=False)
+        mark_phase("after_checkpoint_dir_ready", extra={"checkpoint_dir": str(checkpoint_dir.resolve())})
 
         stop_after = config.max_steps if config.max_steps is not None else None
         steps_per_epoch = len(dataloader) if hasattr(dataloader, "__len__") else None
@@ -834,7 +893,10 @@ def run_real_stage2_flux_training(
                 total_optimizer_steps = min(total_optimizer_steps, stop_after)
 
         for epoch in range(max(config.epochs, 1)):
-            for batch in dataloader:
+            mark_phase("epoch_start", epoch=epoch + 1, extra={"epoch_index": epoch + 1, "planned_epochs": max(config.epochs, 1)})
+            for batch_index, batch in enumerate(dataloader, start=1):
+                if epoch == 0 and batch_index == 1:
+                    mark_phase("first_batch_fetched", epoch=epoch + 1, global_step_value=global_step + 1, optimizer_step_value=optimizer_step_count + 1, extra={"batch_index": batch_index, "batch_size": len(batch.get("conditioning_text", [])) if isinstance(batch, dict) else None}, main_process_only=False)
                 if stop_after is not None and optimizer_step_count >= stop_after:
                     break
                 loss = _run_real_flux_train_step(
@@ -866,17 +928,20 @@ def run_real_stage2_flux_training(
                     losses.append(loss_value)
                     if optimizer_step_count == 1 or optimizer_step_count % max(config.log_every, 1) == 0:
                         logs.append({"step": optimizer_step_count, "epoch": epoch + 1, "loss": loss_value})
+                        mark_phase("optimizer_step_complete", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"loss": loss_value}, main_process_only=True)
                     if is_main_process and optimizer_step_count % max(config.save_every, 1) == 0:
+                        checkpoint_step_dir = checkpoint_dir / f"step_{optimizer_step_count:06d}"
+                        mark_phase("before_checkpoint_save", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"checkpoint_dir": str(checkpoint_step_dir.resolve())})
                         checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
                         _save_transformer_checkpoint(
                             checkpoint_model,
-                            checkpoint_dir / f"step_{optimizer_step_count:06d}",
+                            checkpoint_step_dir,
                         )
+                        mark_phase("after_checkpoint_save", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"checkpoint_dir": str(checkpoint_step_dir.resolve())})
             if stop_after is not None and optimizer_step_count >= stop_after:
                 break
 
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        _mark_sync_point(phase="training_complete_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"global_step": global_step, "optimizer_steps": optimizer_step_count}, main_process_only=False)
         mark_phase(
             "training_loop_complete",
             epoch=max(config.epochs, 1),
@@ -885,8 +950,10 @@ def run_real_stage2_flux_training(
             extra={"loss_count": len(losses)},
         )
         if is_main_process:
+            mark_phase("before_final_checkpoint_save", epoch=max(config.epochs, 1), global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"checkpoint_dir": str(final_checkpoint_dir.resolve())})
             checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
             _save_transformer_checkpoint(checkpoint_model, final_checkpoint_dir)
+            mark_phase("after_final_checkpoint_save", epoch=max(config.epochs, 1), global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"checkpoint_dir": str(final_checkpoint_dir.resolve())})
 
         world_size = accelerator.num_processes if accelerator is not None else 1
         launch_notes = [
@@ -1023,12 +1090,13 @@ def run_real_stage2_pixart_training(
     last_known_phase = "preflight"
     phase_history: list[str] = []
 
-    def mark_phase(phase: str, *, extra: dict[str, Any] | None = None, epoch: int | None = None, global_step_value: int | None = None, optimizer_step_value: int | None = None) -> None:
+    def mark_phase(phase: str, *, extra: dict[str, Any] | None = None, epoch: int | None = None, global_step_value: int | None = None, optimizer_step_value: int | None = None, main_process_only: bool = True) -> None:
         nonlocal last_known_phase
         last_known_phase = phase
         phase_history.append(phase)
         if torch is not None and memory_log_path is not None:
             _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase=phase, torch_module=torch, epoch=epoch, global_step=global_step_value, optimizer_step=optimizer_step_value, extra=extra)
+        _emit_stage2_console_event(accelerator=accelerator, device=device, phase=phase, extra={"epoch": epoch, "global_step": global_step_value, "optimizer_step": optimizer_step_value, **(extra or {})}, main_process_only=main_process_only)
 
     try:
         if importlib.util.find_spec("torch") is None:
@@ -1060,8 +1128,7 @@ def run_real_stage2_pixart_training(
         train_dtype_label = _torch_dtype_label(train_dtype)
         rank_info = _accelerator_rank_info(accelerator, device)
         memory_log_path = run_dir / f"rank{rank_info['global_rank']:02d}_{config.memory_log_artifact_name}"
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        _mark_sync_point(phase="accelerator_startup_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"backbone_name": config.backbone_name}, main_process_only=False)
         mark_phase("training_start", extra={"backbone_name": config.backbone_name, "manifest_path": str(Path(manifest_path).resolve()), "num_pairs": len(pairs), "load_dtype": load_dtype_label, "train_dtype": train_dtype_label})
 
         requested_device_for_load = None if config.use_accelerate else str(device)
@@ -1083,18 +1150,28 @@ def run_real_stage2_pixart_training(
         _set_module_mode(getattr(pipeline, "vae", None), training=False)
         _set_module_mode(getattr(pipeline, "text_encoder", None), training=False)
 
+        mark_phase("before_optimizer_setup")
         optimizer = torch.optim.AdamW((parameter for parameter in transformer.parameters() if parameter.requires_grad), lr=config.learning_rate)
+        mark_phase("after_optimizer_setup")
+        mark_phase("before_dataloader_setup")
         dataloader = make_stage2_dataloader(pairs, resolution=config.resolution, batch_size=config.batch_size, num_workers=config.num_workers, shuffle=True, drop_last=config.dataloader_drop_last)
+        mark_phase("after_dataloader_setup")
         if accelerator is not None:
+            mark_phase("before_accelerate_prepare_transformer")
             transformer = accelerator.prepare(transformer)
             pipeline.transformer = transformer
+            mark_phase("after_accelerate_prepare_transformer")
+            mark_phase("before_accelerate_prepare_optimizer")
             optimizer = accelerator.prepare(optimizer)
+            mark_phase("after_accelerate_prepare_optimizer")
+            mark_phase("before_accelerate_prepare_dataloader")
             dataloader = accelerator.prepare(dataloader)
+            mark_phase("after_accelerate_prepare_dataloader", extra={"dataloader_batches_per_epoch": len(dataloader) if hasattr(dataloader, "__len__") else None})
         is_main_process = accelerator.is_main_process if accelerator is not None else True
         if is_main_process:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        _mark_sync_point(phase="checkpoint_dir_ready_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"checkpoint_dir": str(checkpoint_dir.resolve())}, main_process_only=False)
+        mark_phase("after_checkpoint_dir_ready", extra={"checkpoint_dir": str(checkpoint_dir.resolve())})
 
         stop_after = config.max_steps if config.max_steps is not None else None
         steps_per_epoch = len(dataloader) if hasattr(dataloader, "__len__") else None
@@ -1105,7 +1182,10 @@ def run_real_stage2_pixart_training(
                 total_optimizer_steps = min(total_optimizer_steps, stop_after)
 
         for epoch in range(max(config.epochs, 1)):
-            for batch in dataloader:
+            mark_phase("epoch_start", epoch=epoch + 1, extra={"epoch_index": epoch + 1, "planned_epochs": max(config.epochs, 1)})
+            for batch_index, batch in enumerate(dataloader, start=1):
+                if epoch == 0 and batch_index == 1:
+                    mark_phase("first_batch_fetched", epoch=epoch + 1, global_step_value=global_step + 1, optimizer_step_value=optimizer_step_count + 1, extra={"batch_index": batch_index, "batch_size": len(batch.get("conditioning_text", [])) if isinstance(batch, dict) else None}, main_process_only=False)
                 if stop_after is not None and optimizer_step_count >= stop_after:
                     break
                 loss = _run_real_pixart_train_step(pipeline=pipeline, transformer=transformer, batch=batch, optimizer=optimizer, accelerator=accelerator, device=device, train_dtype=train_dtype, memory_log_path=memory_log_path, epoch=epoch + 1, global_step=global_step + 1, optimizer_step=optimizer_step_count + 1, config=config)
@@ -1117,17 +1197,22 @@ def run_real_stage2_pixart_training(
                     losses.append(loss_value)
                     if optimizer_step_count == 1 or optimizer_step_count % max(config.log_every, 1) == 0:
                         logs.append({"step": optimizer_step_count, "epoch": epoch + 1, "loss": loss_value})
+                        mark_phase("optimizer_step_complete", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"loss": loss_value}, main_process_only=True)
                     if is_main_process and optimizer_step_count % max(config.save_every, 1) == 0:
+                        checkpoint_step_dir = checkpoint_dir / f"step_{optimizer_step_count:06d}"
+                        mark_phase("before_checkpoint_save", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"checkpoint_dir": str(checkpoint_step_dir.resolve())})
                         checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
-                        _save_transformer_checkpoint(checkpoint_model, checkpoint_dir / f"step_{optimizer_step_count:06d}")
+                        _save_transformer_checkpoint(checkpoint_model, checkpoint_step_dir)
+                        mark_phase("after_checkpoint_save", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"checkpoint_dir": str(checkpoint_step_dir.resolve())})
             if stop_after is not None and optimizer_step_count >= stop_after:
                 break
 
-        if accelerator is not None:
-            accelerator.wait_for_everyone()
+        _mark_sync_point(phase="training_complete_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"global_step": global_step, "optimizer_steps": optimizer_step_count}, main_process_only=False)
         if is_main_process:
+            mark_phase("before_final_checkpoint_save", epoch=max(config.epochs, 1), global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"checkpoint_dir": str(final_checkpoint_dir.resolve())})
             checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
             _save_transformer_checkpoint(checkpoint_model, final_checkpoint_dir)
+            mark_phase("after_final_checkpoint_save", epoch=max(config.epochs, 1), global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"checkpoint_dir": str(final_checkpoint_dir.resolve())})
         world_size = accelerator.num_processes if accelerator is not None else 1
         summary = {
             "status": "completed",
@@ -1220,15 +1305,21 @@ def _run_real_pixart_train_step(
 
     accumulation_context = accelerator.accumulate(transformer) if accelerator is not None else nullcontext()
     with accumulation_context:
+        if global_step == 1:
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="before_first_vae_encode", extra={"optimizer_step": optimizer_step}, main_process_only=False)
         pixel_values = batch["pixel_values"].to(device=device, dtype=train_dtype)
         vae_dtype = next(pipeline.vae.parameters()).dtype
         vae_device = next(pipeline.vae.parameters()).device
         with torch.no_grad():
             latents = pipeline.vae.encode(pixel_values.to(device=vae_device, dtype=vae_dtype)).latent_dist.sample()
+            if global_step == 1:
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_vae_encode", extra={"optimizer_step": optimizer_step, "latents_shape": list(latents.shape)}, main_process_only=False)
             scaling_factor = float(getattr(getattr(pipeline.vae, "config", None), "scaling_factor", 0.13025))
             shift_factor = float(getattr(getattr(pipeline.vae, "config", None), "shift_factor", 0.0) or 0.0)
             latents = (latents - shift_factor) * scaling_factor
             latents = latents.to(device=device, dtype=train_dtype)
+            if global_step == 1:
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="before_first_text_encode", extra={"optimizer_step": optimizer_step}, main_process_only=False)
             prompt_embeds, prompt_attention_mask, _, _ = pipeline.encode_prompt(
                 prompt=batch["conditioning_text"],
                 do_classifier_free_guidance=False,
@@ -1238,6 +1329,8 @@ def _run_real_pixart_train_step(
             )
             prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
             prompt_attention_mask = prompt_attention_mask.to(device=device)
+            if global_step == 1:
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_text_encode", extra={"optimizer_step": optimizer_step, "prompt_embeds_shape": list(prompt_embeds.shape)}, main_process_only=False)
 
         noise = torch.randn_like(latents)
         batch_size = latents.shape[0]
@@ -1247,6 +1340,8 @@ def _run_real_pixart_train_step(
         timesteps = torch.randint(0, num_train_timesteps, (batch_size,), device=device, dtype=torch.long)
         noisy_latents = pipeline.scheduler.add_noise(latents, noise, timesteps)
         added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
+        if global_step == 1:
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="before_first_forward", extra={"optimizer_step": optimizer_step}, main_process_only=False)
         model_output = transformer(hidden_states=noisy_latents, encoder_hidden_states=prompt_embeds, encoder_attention_mask=prompt_attention_mask, timestep=timesteps, added_cond_kwargs=added_cond_kwargs, return_dict=True)
         prediction = model_output.sample if hasattr(model_output, "sample") else model_output[0]
         out_channels = int(getattr(getattr(transformer, "config", None), "out_channels", prediction.shape[1]))
@@ -1254,14 +1349,24 @@ def _run_real_pixart_train_step(
         if out_channels // 2 == latent_channels:
             prediction = prediction.chunk(2, dim=1)[0]
         loss = torch.nn.functional.mse_loss(prediction.float(), noise.float())
+        if global_step == 1:
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_forward", extra={"optimizer_step": optimizer_step, "loss": float(loss.detach().float().cpu().item())}, main_process_only=False)
         optimizer.zero_grad(set_to_none=True)
         if accelerator is not None:
             accelerator.backward(loss)
+            if global_step == 1:
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_backward", extra={"optimizer_step": optimizer_step}, main_process_only=False)
             if accelerator.sync_gradients:
                 optimizer.step()
+                if global_step == 1:
+                    _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step}, main_process_only=False)
         else:
             loss.backward()
+            if global_step == 1:
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_backward", extra={"optimizer_step": optimizer_step}, main_process_only=False)
             optimizer.step()
+            if global_step == 1:
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step}, main_process_only=False)
         _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="after_pixart_step", torch_module=torch, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra={"pixel_values_shape": list(batch['pixel_values'].shape), "latents_shape": list(latents.shape), "timesteps_shape": list(timesteps.shape), "prompt_embeds_shape": list(prompt_embeds.shape), "prompt_attention_mask_shape": list(prompt_attention_mask.shape)})
         return loss.detach()
 
@@ -1292,6 +1397,8 @@ def _run_real_flux_train_step(
     accumulation_context = accelerator.accumulate(transformer) if accelerator is not None else nullcontext()
     with accumulation_context:
         pixel_values = batch["pixel_values"].to(device=device, dtype=train_dtype)
+        if global_step == 1:
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="before_first_vae_encode", extra={"optimizer_step": optimizer_step}, main_process_only=False)
         _append_memory_event(
             artifact_path=memory_log_path,
             accelerator=accelerator,
@@ -1340,6 +1447,8 @@ def _run_real_flux_train_step(
             latents = (latents - pipeline.vae.config.shift_factor) * pipeline.vae.config.scaling_factor
             latents = latents.to(device=device, dtype=train_dtype)
             del pixel_values
+            if global_step == 1:
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_vae_encode", extra={"optimizer_step": optimizer_step, "latents_shape": list(latents.shape)}, main_process_only=False)
             _append_memory_event(
                 artifact_path=memory_log_path,
                 accelerator=accelerator,
@@ -1403,6 +1512,8 @@ def _run_real_flux_train_step(
                     global_step=global_step,
                     optimizer_step=optimizer_step,
                 )
+            if global_step == 1:
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="before_first_text_encode", extra={"optimizer_step": optimizer_step}, main_process_only=False)
             _append_memory_event(
                 artifact_path=memory_log_path,
                 accelerator=accelerator,
@@ -1424,6 +1535,8 @@ def _run_real_flux_train_step(
             prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
             pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=train_dtype)
             text_ids = text_ids.to(device=device, dtype=train_dtype)
+            if global_step == 1:
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_text_encode", extra={"optimizer_step": optimizer_step, "prompt_embeds_shape": list(prompt_embeds.shape)}, main_process_only=False)
             _append_memory_event(
                 artifact_path=memory_log_path,
                 accelerator=accelerator,
@@ -1496,6 +1609,8 @@ def _run_real_flux_train_step(
         if getattr(getattr(unwrapped_transformer, "config", None), "guidance_embeds", False):
             guidance = torch.ones((packed_latents.shape[0],), device=device, dtype=torch.float32)
 
+        if global_step == 1:
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="before_first_forward", extra={"optimizer_step": optimizer_step}, main_process_only=False)
         _append_memory_event(
             artifact_path=memory_log_path,
             accelerator=accelerator,
@@ -1526,6 +1641,8 @@ def _run_real_flux_train_step(
         del model_output, prompt_embeds, pooled_prompt_embeds, text_ids
         loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
         del prediction, target, noisy_latents, noise, packed_latents, latent_image_ids, timesteps, sigmas, guidance
+        if global_step == 1:
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_forward", extra={"optimizer_step": optimizer_step, "loss": float(loss.detach().float().cpu().item())}, main_process_only=False)
         _append_memory_event(
             artifact_path=memory_log_path,
             accelerator=accelerator,
@@ -1553,6 +1670,8 @@ def _run_real_flux_train_step(
             accelerator.backward(loss)
         else:
             loss.backward()
+        if global_step == 1:
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_backward", extra={"optimizer_step": optimizer_step}, main_process_only=False)
         _append_memory_event(
             artifact_path=memory_log_path,
             accelerator=accelerator,
@@ -1564,6 +1683,8 @@ def _run_real_flux_train_step(
             optimizer_step=optimizer_step,
         )
         optimizer.step()
+        if global_step == 1:
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step}, main_process_only=False)
     return loss.detach()
 
 

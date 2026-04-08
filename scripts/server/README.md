@@ -235,6 +235,8 @@ This helper currently:
 
 You can still pass through extra Stage 2 CLI options after the positional helper arguments. For example:
 
+During real Stage 2 training, watch the helper log for `[Stage2]` progress lines. The run directory also keeps per-rank JSONL diagnostics such as `rank00_memory_diagnostics.jsonl` plus `training_metrics.json`. If a multi-GPU launch appears hung, the quickest check is usually: find the newest run under `runs/stage2/train/...`, then inspect the last `[Stage2]` stdout line and the tail of each `rank*_memory_diagnostics.jsonl` file to see which phase each rank last completed.
+
 ```bash
 STAGE2_NUM_PROCESSES=2 bash scripts/server/run_stage2_train.sh \
   /data/imagenette/train \

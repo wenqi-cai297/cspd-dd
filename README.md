@@ -218,6 +218,13 @@ accelerate launch --num_processes 1 \
 
 Stage 2 no longer supports prompt-cache preprocessing or cached prompt/text embeddings. Training always runs live prompt encoding on the active backbone path during each step. For PixArt-Σ, the live prompt path keeps the PixArt-family prompt length consistent at 300 tokens.
 
+For remote/server debugging, Stage 2 now emits concise rank-aware progress logs directly to stdout/stderr around the common stall points: backbone load, module freezing/selection, dataloader creation, each `accelerate.prepare(...)` boundary, first batch fetch, first text/VAE encode, first forward/backward/optimizer step, and checkpoint writes. It also writes per-rank JSONL diagnostics under the run directory, typically:
+- `runs/stage2/train/.../rank00_memory_diagnostics.jsonl`
+- `runs/stage2/train/.../rank01_memory_diagnostics.jsonl` (and so on for multi-process runs)
+- `runs/stage2/train/.../training_metrics.json`
+
+When a server run looks stuck, tail the launcher log for `[Stage2]` lines first, then inspect the latest `rank*_memory_diagnostics.jsonl` file to see the last completed phase on each rank.
+
 
 `conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also combine finer groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`. In LoRA mode, these selectors define where adapters are injected; in full mode, they define which real parameters stay trainable.
 
