@@ -135,12 +135,14 @@ def run_case(parameterization: str):
         train_dtype=torch.float32,
         resolution=64,
         memory_log_path=Path('tmp_stage2_smoke_memory.jsonl'),
+        component_move_log_path=None,
         epoch=1,
         global_step=1,
         optimizer_step=1,
         keep_frozen_modules_on_cpu_until_needed=False,
         offload_frozen_modules_after_step=False,
         use_cached_prompt_embeddings=False,
+        move_state={'component_move_events': [], 'component_move_failures': [], 'last_component_move_attempt': None},
     )
     return {
         'parameterization': parameterization,

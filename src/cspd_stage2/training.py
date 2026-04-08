@@ -157,7 +157,7 @@ class Stage2TrainConfig:
     prompt_cache_dir: str | None = None
     precompute_prompt_embeddings: bool = False
     prompt_cache_batch_size: int = 8
-    prompt_cache_max_sequence_length: int = 512
+    prompt_cache_max_sequence_length: int | None = None
     prompt_cache_device: str | None = None
 
 
@@ -310,12 +310,23 @@ def _prepare_prompt_cache_if_requested(*, config: Stage2TrainConfig, run_dir: Pa
     return summary
 
 
+def _effective_prompt_max_sequence_length(config: Stage2TrainConfig) -> int:
+    if config.prompt_cache_max_sequence_length is not None:
+        return int(config.prompt_cache_max_sequence_length)
+    family = infer_backbone_family(config.backbone_name)
+    if family in {"pixart", "pixart_sigma"}:
+        return 300
+    return 512
+
+
+
 def _build_or_validate_prompt_cache(*, config: Stage2TrainConfig, prompt_cache_dir: Path, pairs: list[Any]) -> dict[str, Any]:
     unique_captions = list(dict.fromkeys(str(pair.canonical_caption) for pair in pairs))
     expected_paths = {stable_prompt_cache_key(caption): prompt_cache_dir / f"{stable_prompt_cache_key(caption)}.pt" for caption in unique_captions}
     existing = {key: path for key, path in expected_paths.items() if path.exists()}
     missing = {key: path for key, path in expected_paths.items() if not path.exists()}
     backbone_family = infer_backbone_family(config.backbone_name)
+    effective_max_sequence_length = _effective_prompt_max_sequence_length(config)
     cache_fields = ["prompt_embeds", "pooled_prompt_embeds", "text_ids"] if backbone_family in {"flux", "flux_kontext"} else ["prompt_embeds", "prompt_attention_mask"]
 
     if missing and not config.precompute_prompt_embeddings:
@@ -334,7 +345,7 @@ def _build_or_validate_prompt_cache(*, config: Stage2TrainConfig, prompt_cache_d
             torch_dtype=config.backbone_torch_dtype,
             device=config.prompt_cache_device or config.backbone_device,
             batch_size=config.prompt_cache_batch_size,
-            max_sequence_length=config.prompt_cache_max_sequence_length,
+            max_sequence_length=effective_max_sequence_length,
             local_files_only=config.backbone_local_files_only,
         )
 
@@ -353,7 +364,7 @@ def _build_or_validate_prompt_cache(*, config: Stage2TrainConfig, prompt_cache_d
             for caption in unique_captions
         ],
         "prompt_cache_batch_size": config.prompt_cache_batch_size,
-        "prompt_cache_max_sequence_length": config.prompt_cache_max_sequence_length,
+        "prompt_cache_max_sequence_length": effective_max_sequence_length,
     }
     _safe_write_json(prompt_cache_dir / "prompt_cache_index.json", index_payload)
     return {
@@ -1225,7 +1236,7 @@ def run_real_stage2_pixart_training(
             for batch in dataloader:
                 if stop_after is not None and optimizer_step_count >= stop_after:
                     break
-                loss = _run_real_pixart_train_step(pipeline=pipeline, transformer=transformer, batch=batch, optimizer=optimizer, accelerator=accelerator, device=device, train_dtype=train_dtype, memory_log_path=memory_log_path, epoch=epoch + 1, global_step=global_step + 1, optimizer_step=optimizer_step_count + 1, use_cached_prompt_embeddings=bool(config.prompt_cache_dir))
+                loss = _run_real_pixart_train_step(pipeline=pipeline, transformer=transformer, batch=batch, optimizer=optimizer, accelerator=accelerator, device=device, train_dtype=train_dtype, memory_log_path=memory_log_path, epoch=epoch + 1, global_step=global_step + 1, optimizer_step=optimizer_step_count + 1, use_cached_prompt_embeddings=bool(config.prompt_cache_dir), config=config)
                 global_step += 1
                 sync_gradients = accelerator.sync_gradients if accelerator is not None else True
                 if sync_gradients:
@@ -1332,6 +1343,7 @@ def _run_real_pixart_train_step(
     global_step: int,
     optimizer_step: int,
     use_cached_prompt_embeddings: bool,
+    config: Stage2TrainConfig,
 ) -> Any:
     import torch
 
@@ -1350,7 +1362,13 @@ def _run_real_pixart_train_step(
                 prompt_embeds = batch["cached_prompt_embeds"].to(device=device, dtype=train_dtype)
                 prompt_attention_mask = batch["cached_prompt_attention_mask"].to(device=device)
             else:
-                prompt_embeds, prompt_attention_mask, _, _ = pipeline.encode_prompt(prompt=batch["conditioning_text"], do_classifier_free_guidance=False, device=device, num_images_per_prompt=1, max_sequence_length=300)
+                prompt_embeds, prompt_attention_mask, _, _ = pipeline.encode_prompt(
+                    prompt=batch["conditioning_text"],
+                    do_classifier_free_guidance=False,
+                    device=device,
+                    num_images_per_prompt=1,
+                    max_sequence_length=_effective_prompt_max_sequence_length(config),
+                )
                 prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
                 prompt_attention_mask = prompt_attention_mask.to(device=device)
 

@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from cspd_stage2.backbone import load_module_from_reference, load_real_backbone_module
+from cspd_stage2.backbone import infer_backbone_family, load_module_from_reference, load_real_backbone_module
 from cspd_stage2.training import (
     AdapterPlan,
     CONDITIONING_RELATED_GROUP_PATTERNS,
@@ -213,7 +213,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Before training, build a canonical-caption prompt cache for this Stage 2 run and then consume it during training",
     )
     train_parser.add_argument("--prompt-cache-batch-size", type=int, default=8, help="Batch size for prompt-cache precompute")
-    train_parser.add_argument("--prompt-cache-max-sequence-length", type=int, default=512, help="max_sequence_length used for prompt-cache precompute")
+    train_parser.add_argument(
+        "--prompt-cache-max-sequence-length",
+        type=int,
+        default=None,
+        help="Optional max_sequence_length override used consistently for prompt-cache precompute and live prompt encoding; defaults to a backbone-family-specific value",
+    )
     train_parser.add_argument(
         "--prompt-cache-device",
         default=None,
@@ -253,7 +258,7 @@ def build_parser() -> argparse.ArgumentParser:
     cache_parser.add_argument("--backbone-device", default=None)
     cache_parser.add_argument("--backbone-local-files-only", action="store_true")
     cache_parser.add_argument("--prompt-cache-batch-size", type=int, default=8)
-    cache_parser.add_argument("--prompt-cache-max-sequence-length", type=int, default=512)
+    cache_parser.add_argument("--prompt-cache-max-sequence-length", type=int, default=None)
     cache_parser.add_argument("--prompt-cache-device", default=None)
 
     inspect_parser = subparsers.add_parser(
@@ -389,6 +394,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_conditioning_objective(backbone_name: str, requested_objective: str) -> str:
+    family = infer_backbone_family(backbone_name)
+    if requested_objective == "finetune_full_flux_transformer_on_real_image_and_stage1_canonical_caption_pairs" and family in {"pixart", "pixart_sigma"}:
+        return "finetune_pixart_transformer_on_real_image_and_stage1_canonical_caption_pairs"
+    return requested_objective
+
+
+
 def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
     config = Stage2TrainConfig(
         dataset_root=args.dataset_root,
@@ -418,7 +431,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         freeze_vae=not args.unfreeze_vae,
         train_transformer_core_only=not args.disable_train_transformer_core_only,
         stage2_focus=args.stage2_focus,
-        conditioning_objective=args.conditioning_objective,
+        conditioning_objective=_resolve_conditioning_objective(args.backbone_name, args.conditioning_objective),
         conditioning_text_field=args.conditioning_text_field,
         trainable_component_groups=args.trainable_component_groups or (["conditioning_transformer"] if args.training_parameterization == "lora" else ["full_transformer"]),
         module_include_patterns=args.module_include_patterns or [],

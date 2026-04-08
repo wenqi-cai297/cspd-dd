@@ -216,7 +216,7 @@ accelerate launch --num_processes 1 \
   --epochs 1
 ```
 
-If you want to precompute PixArt prompt conditioning for repeated captions, the prompt cache path also works for PixArt-Σ now; it stores `prompt_embeds` plus `prompt_attention_mask` instead of the FLUX/Kontext triplet:
+If you want to precompute PixArt prompt conditioning for repeated captions, the prompt cache path also works for PixArt-Σ now; it stores `prompt_embeds` plus `prompt_attention_mask` instead of the FLUX/Kontext triplet. The Stage 2 code now uses one backbone-family-consistent prompt length for both cache generation and live training (PixArt defaults to 300 tokens unless you explicitly override `--prompt-cache-max-sequence-length`):
 
 ```bash
 cspd-stage2 cache-prompt-embeds \
