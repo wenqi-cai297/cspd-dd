@@ -109,14 +109,17 @@ config = Stage2TrainConfig(
     render_input='y',
     output_dir='z',
     backbone_name='PixArt-alpha/PixArt-Sigma-XL-2-512-MS',
-    training_parameterization='lora',
-    trainable_component_groups=['conditioning_transformer'],
+    training_parameterization='full',
+    trainable_component_groups=['full_transformer'],
     lr_scheduler='constant_with_warmup',
     lr_warmup_steps=2,
     max_grad_norm=0.01,
     pixart_sigma_prompt_dropout_prob=0.1,
 )
 selection = _freeze_stage2_modules(pipeline, config)
+for parameter in pipeline.transformer.parameters():
+    if parameter.requires_grad:
+        parameter.data = parameter.data.float()
 summary = selection['trainable_parameter_summary']
 optimizer = torch.optim.AdamW((p for p in pipeline.transformer.parameters() if p.requires_grad), lr=1e-3)
 batch = {

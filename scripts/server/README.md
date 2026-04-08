@@ -265,6 +265,29 @@ accelerate launch --num_processes 2 \
 
 If you want to pin a custom run directory, `--output-dir ...` still overrides the default.
 
+For PixArt-Σ, the recommended next rerun path is full transformer training rather than LoRA. The full PixArt path now upcasts trainable transformer weights to FP32 before optimizer setup and performs an immediate post-step trainable-parameter finiteness check, specifically to catch the observed "first optimizer step succeeded, next forward is NaN" failure mode earlier.
+
+```bash
+accelerate launch --num_processes 1 \
+  -m cspd_stage2.cli train \
+  --dataset-root /path/to/dataset_root \
+  --render-input /path/to/stage1_render_records.jsonl \
+  --backbone-name PixArt-alpha/PixArt-Sigma-XL-2-512-MS \
+  --resolution 512 \
+  --backbone-torch-dtype float16 \
+  --training-parameterization full \
+  --trainable-component-group full_transformer \
+  --batch-size 1 \
+  --gradient-accumulation-steps 4 \
+  --learning-rate 2e-5 \
+  --lr-scheduler constant_with_warmup \
+  --lr-warmup-steps 1000 \
+  --max-grad-norm 0.01 \
+  --adam-weight-decay 0.0 \
+  --pixart-sigma-prompt-dropout-prob 0.1 \
+  --epochs 1
+```
+
 For the memory-reduced conditioning-focused path, keep the same CLI and swap the component group:
 
 ```bash

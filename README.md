@@ -197,7 +197,7 @@ accelerate launch --num_processes 2 \
 
 PixArt-Σ is now also wired as a real Stage 2 path for the same `(image, canonical_caption)` objective. This stays in the text-to-image generative framing: real images are VAE-encoded to latents, canonical captions are encoded with the PixArt text stack, and the PixArt transformer is adapted to model those caption-conditioned latents. It is not an image-editing path.
 
-Recommended first practical run on limited hardware: PixArt-Σ LoRA at 512 resolution.
+Recommended next practical run: PixArt-Σ full transformer update at 512 resolution. The full PixArt path now upcasts trainable transformer weights to FP32 by default before optimizer setup, keeps the frozen VAE/text stack on the lighter runtime path, and runs an explicit post-step trainable-parameter finiteness check so the run fails immediately if the first update corrupts weights.
 
 ```bash
 accelerate launch --num_processes 1 \
@@ -207,10 +207,8 @@ accelerate launch --num_processes 1 \
   --backbone-name PixArt-alpha/PixArt-Sigma-XL-2-512-MS \
   --resolution 512 \
   --backbone-torch-dtype float16 \
-  --training-parameterization lora \
-  --trainable-component-group conditioning_transformer \
-  --adapter-rank 16 \
-  --adapter-alpha 16 \
+  --training-parameterization full \
+  --trainable-component-group full_transformer \
   --batch-size 1 \
   --gradient-accumulation-steps 4 \
   --learning-rate 2e-5 \
@@ -222,7 +220,7 @@ accelerate launch --num_processes 1 \
   --epochs 1
 ```
 
-Stage 2 no longer supports prompt-cache preprocessing or cached prompt/text embeddings. Training always runs live prompt encoding on the active backbone path during each step. For PixArt-Σ, the live prompt path keeps the PixArt-family prompt length consistent at 300 tokens, and the Stage 2 PixArt path now defaults closer to the official Sigma recipe: low LR, constant-with-warmup scheduling, tight grad clipping, and 0.1 prompt dropout on the canonical-caption conditioning stream.
+Use LoRA only as the fallback path if the full update still does not fit memory. Stage 2 no longer supports prompt-cache preprocessing or cached prompt/text embeddings. Training always runs live prompt encoding on the active backbone path during each step. For PixArt-Σ, the live prompt path keeps the PixArt-family prompt length consistent at 300 tokens, and the Stage 2 PixArt path now defaults closer to the official Sigma recipe: low LR, constant-with-warmup scheduling, tight grad clipping, and 0.1 prompt dropout on the canonical-caption conditioning stream. If you explicitly want the older mixed-precision full-update behavior, pass `--disable-full-update-fp32-for-pixart`.
 
 For remote/server debugging, Stage 2 now emits concise rank-aware progress logs directly to stdout/stderr around the common stall points: backbone load, module freezing/selection, dataloader creation, each `accelerate.prepare(...)` boundary, first batch fetch, first text/VAE encode, first forward/backward/optimizer step, checkpoint writes, explicit non-finite loss detection, and early-step gradient diagnostics. It also writes per-rank JSONL diagnostics under the run directory, typically:
 - `runs/stage2/train/.../rank00_memory_diagnostics.jsonl`

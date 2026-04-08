@@ -214,6 +214,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable the default memory-saving policy that keeps frozen VAE/text components on CPU until their encode step",
     )
     train_parser.add_argument(
+        "--disable-full-update-fp32-for-pixart",
+        action="store_true",
+        help="Disable the default safer FP32 full-update path for PixArt full-parameter training",
+    )
+    train_parser.add_argument(
         "--offload-frozen-modules-after-step",
         dest="offload_frozen_modules_after_step",
         action="store_true",
@@ -463,6 +468,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         enable_gradient_checkpointing=not args.disable_gradient_checkpointing,
         keep_frozen_modules_on_cpu_until_needed=not args.disable_keep_frozen_modules_on_cpu_until_needed,
         offload_frozen_modules_after_step=bool(args.offload_frozen_modules_after_step) if args.offload_frozen_modules_after_step is not None else False,
+        full_update_fp32_for_pixart=not args.disable_full_update_fp32_for_pixart,
     )
     config.adapter_plan.target_module_patterns = (
         config.adapter_plan.target_module_patterns or resolve_effective_module_selection(config)["effective_include_patterns"]

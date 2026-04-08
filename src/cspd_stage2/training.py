@@ -195,6 +195,7 @@ class Stage2TrainConfig:
     enable_gradient_checkpointing: bool = True
     keep_frozen_modules_on_cpu_until_needed: bool = True
     offload_frozen_modules_after_step: bool = False
+    full_update_fp32_for_pixart: bool = True
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
@@ -334,6 +335,41 @@ def _effective_prompt_max_sequence_length(config: Stage2TrainConfig) -> int:
     if family in {"pixart", "pixart_sigma"}:
         return 300
     return 512
+
+
+def _should_force_full_update_fp32(*, config: Stage2TrainConfig) -> bool:
+    family = infer_backbone_family(config.backbone_name)
+    parameterization = str(getattr(config, "training_parameterization", "full")).strip().lower()
+    return bool(config.full_update_fp32_for_pixart and parameterization == "full" and family in {"pixart", "pixart_sigma"})
+
+
+def _upcast_trainable_parameters_(module: Any, *, dtype: Any) -> dict[str, Any]:
+    converted_parameter_names: list[str] = []
+    converted_parameter_count = 0
+    converted_value_count = 0
+    for name, parameter in module.named_parameters():
+        if not parameter.requires_grad or parameter.dtype == dtype:
+            continue
+        parameter.data = parameter.data.to(dtype=dtype)
+        if parameter.grad is not None:
+            parameter.grad = parameter.grad.to(dtype=dtype)
+        converted_parameter_names.append(name)
+        converted_parameter_count += 1
+        converted_value_count += int(parameter.numel())
+    return {
+        "enabled": converted_parameter_count > 0,
+        "target_dtype": _torch_dtype_label(dtype),
+        "converted_parameter_count": converted_parameter_count,
+        "converted_value_count": converted_value_count,
+        "converted_parameter_names_sample": converted_parameter_names[:20],
+    }
+
+
+def _infer_trainable_parameter_dtype(module: Any, *, fallback: Any) -> Any:
+    for parameter in module.parameters():
+        if parameter.requires_grad:
+            return parameter.dtype
+    return fallback
 
 
 def _build_optimizer(*, parameters: list[Any], config: Stage2TrainConfig, torch_module: Any) -> Any:
@@ -1169,6 +1205,7 @@ def run_real_stage2_pixart_training(
     train_dtype_label: str | None = None
     selection_result: dict[str, Any] | None = None
     gradient_checkpointing: dict[str, Any] = {"enabled": False, "method": None, "attempted_methods": [], "reason": "not_initialized"}
+    fp32_full_update_summary: dict[str, Any] = {"enabled": False, "reason": "not_applicable"}
     logs: list[dict[str, Any]] = []
     losses: list[float] = []
     global_step = 0
@@ -1233,6 +1270,12 @@ def run_real_stage2_pixart_training(
 
         selection_result = _freeze_stage2_modules(pipeline, config)
         transformer = pipeline.transformer
+        if _should_force_full_update_fp32(config=config):
+            fp32_full_update_summary = _upcast_trainable_parameters_(transformer, dtype=torch.float32)
+            if fp32_full_update_summary["enabled"]:
+                mark_phase("after_full_update_fp32_upcast", extra=fp32_full_update_summary)
+            else:
+                fp32_full_update_summary = {**fp32_full_update_summary, "reason": "no_trainable_parameter_dtype_changes_needed"}
         transformer.train()
         if config.enable_gradient_checkpointing:
             gradient_checkpointing = _enable_transformer_gradient_checkpointing(transformer)
@@ -1359,6 +1402,7 @@ def run_real_stage2_pixart_training(
             "optimizer": {"name": config.optimizer_name, "learning_rate": config.learning_rate, "adam_beta1": config.adam_beta1, "adam_beta2": config.adam_beta2, "adam_weight_decay": config.adam_weight_decay, "adam_epsilon": config.adam_epsilon},
             "lr_scheduler": lr_scheduler_summary,
             "gradient_checkpointing": gradient_checkpointing,
+            "full_update_fp32": fp32_full_update_summary,
             "memory_strategy": {"keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed, "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step},
             "dataloader_batches_per_epoch": steps_per_epoch,
             "forward_steps": global_step,
@@ -1401,6 +1445,7 @@ def run_real_stage2_pixart_training(
             "optimizer": {"name": config.optimizer_name, "learning_rate": config.learning_rate, "adam_beta1": config.adam_beta1, "adam_beta2": config.adam_beta2, "adam_weight_decay": config.adam_weight_decay, "adam_epsilon": config.adam_epsilon},
             "lr_scheduler": lr_scheduler_summary if 'lr_scheduler_summary' in locals() else None,
             "gradient_checkpointing": gradient_checkpointing,
+            "full_update_fp32": fp32_full_update_summary,
             "memory_strategy": {"keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed, "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step},
             "dataloader_batches_per_epoch": steps_per_epoch,
             "forward_steps": global_step,
@@ -1618,12 +1663,15 @@ def _run_real_pixart_train_step(
         num_train_timesteps = int(getattr(pipeline.scheduler.config, "num_train_timesteps", 1000))
         timesteps = torch.randint(0, num_train_timesteps, (batch_size,), device=device, dtype=torch.long)
         noisy_latents = pipeline.scheduler.add_noise(latents, noise, timesteps)
+        transformer_train_dtype = _infer_trainable_parameter_dtype(transformer, fallback=train_dtype)
         latent_height = int(noisy_latents.shape[-2])
         latent_width = int(noisy_latents.shape[-1])
         resolution = torch.tensor([[latent_height * 8.0, latent_width * 8.0]], device=device, dtype=torch.float32).repeat(batch_size, 1)
         aspect_ratio_value = float(latent_width) / float(latent_height) if latent_height > 0 else 1.0
         aspect_ratio = torch.tensor([[aspect_ratio_value]], device=device, dtype=torch.float32).repeat(batch_size, 1)
         added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
+        noisy_latents = noisy_latents.to(device=device, dtype=transformer_train_dtype)
+        prompt_embeds = prompt_embeds.to(device=device, dtype=transformer_train_dtype)
         forward_input_summary = {
             "hidden_states": _summarize_tensor_like(noisy_latents),
             "encoder_hidden_states": _summarize_tensor_like(prompt_embeds),
@@ -1631,6 +1679,7 @@ def _run_real_pixart_train_step(
             "timestep": _summarize_tensor_like(timesteps),
             "added_cond_kwargs": {key: _summarize_tensor_like(value) for key, value in added_cond_kwargs.items()},
             "latent_hw": [latent_height, latent_width],
+            "transformer_train_dtype": _torch_dtype_label(transformer_train_dtype),
         }
         _append_memory_event(
             artifact_path=memory_log_path,
@@ -1705,13 +1754,24 @@ def _run_real_pixart_train_step(
         )
         if global_step == 1:
             _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_backward", extra={"optimizer_step": optimizer_step, "grad_global_norm": grad_diagnostics["grad_global_norm"]}, main_process_only=False)
+        parameter_diagnostics = None
         if accelerator is None or accelerator.sync_gradients:
             optimizer.step()
+            parameter_diagnostics = _assert_trainable_parameters_finite(
+                module=accelerator.unwrap_model(transformer) if accelerator is not None else transformer,
+                accelerator=accelerator,
+                device=device,
+                memory_log_path=memory_log_path,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                torch_module=torch,
+            )
             if lr_scheduler is not None:
                 lr_scheduler.step()
             if global_step == 1:
-                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step, "grad_global_norm": grad_diagnostics["grad_global_norm"], "clipped_grad_norm": grad_norm_value, "lr": float(optimizer.param_groups[0]["lr"])}, main_process_only=False)
-        _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="after_pixart_step", torch_module=torch, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra={"pixel_values_shape": list(batch['pixel_values'].shape), "latents_shape": list(latents.shape), "timesteps_shape": list(timesteps.shape), "prompt_embeds_shape": list(prompt_embeds.shape), "prompt_attention_mask_shape": list(prompt_attention_mask.shape), "dropped_prompt_count": dropped_prompt_count, "lr": float(optimizer.param_groups[0]["lr"]), "clipped_grad_norm": grad_norm_value})
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step, "grad_global_norm": grad_diagnostics["grad_global_norm"], "clipped_grad_norm": grad_norm_value, "lr": float(optimizer.param_groups[0]["lr"]), "max_abs_trainable_parameter_value": None if parameter_diagnostics is None else parameter_diagnostics["max_abs_trainable_parameter_value"]}, main_process_only=False)
+        _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="after_pixart_step", torch_module=torch, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra={"pixel_values_shape": list(batch['pixel_values'].shape), "latents_shape": list(latents.shape), "timesteps_shape": list(timesteps.shape), "prompt_embeds_shape": list(prompt_embeds.shape), "prompt_attention_mask_shape": list(prompt_attention_mask.shape), "dropped_prompt_count": dropped_prompt_count, "lr": float(optimizer.param_groups[0]["lr"]), "clipped_grad_norm": grad_norm_value, "transformer_train_dtype": _torch_dtype_label(transformer_train_dtype), "trainable_parameter_diagnostics": parameter_diagnostics})
         return loss.detach()
 
 
@@ -2101,6 +2161,59 @@ def _record_gradient_diagnostics(*, module: Any, accelerator: Any | None, device
         _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="gradient_diagnostics", torch_module=torch_module, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra=diagnostics)
     if force_console or optimizer_step <= 3:
         _emit_stage2_console_event(accelerator=accelerator, device=device, phase="gradient_diagnostics", extra={"optimizer_step": optimizer_step, **diagnostics}, main_process_only=False)
+    return diagnostics
+
+
+def _collect_trainable_parameter_diagnostics(module: Any) -> dict[str, Any]:
+    import torch
+
+    non_finite_parameter_names: list[str] = []
+    sample_parameters: list[dict[str, Any]] = []
+    trainable_parameter_count = 0
+    trainable_value_count = 0
+    max_abs_value = 0.0
+    dtype_counts: dict[str, int] = {}
+    for name, parameter in module.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        values = parameter.detach()
+        finite_mask = torch.isfinite(values)
+        trainable_parameter_count += 1
+        trainable_value_count += int(values.numel())
+        dtype_label = _torch_dtype_label(values.dtype)
+        dtype_counts[dtype_label] = dtype_counts.get(dtype_label, 0) + 1
+        if not bool(finite_mask.all().item()):
+            non_finite_parameter_names.append(name)
+        if values.numel() > 0:
+            max_abs_value = max(max_abs_value, float(values.abs().max().float().cpu().item()))
+        if len(sample_parameters) < 8:
+            sample_parameters.append({
+                "name": name,
+                "shape": list(parameter.shape),
+                "dtype": dtype_label,
+                "abs_max": float(values.abs().max().float().cpu().item()) if values.numel() > 0 else 0.0,
+                "is_finite": bool(finite_mask.all().item()),
+            })
+    return {
+        "trainable_parameter_count": trainable_parameter_count,
+        "trainable_value_count": trainable_value_count,
+        "all_trainable_parameters_finite": not non_finite_parameter_names,
+        "non_finite_parameter_count": len(non_finite_parameter_names),
+        "non_finite_parameter_names_sample": non_finite_parameter_names[:20],
+        "max_abs_trainable_parameter_value": max_abs_value,
+        "trainable_parameter_dtype_counts": dtype_counts,
+        "trainable_parameter_sample": sample_parameters,
+    }
+
+
+def _assert_trainable_parameters_finite(*, module: Any, accelerator: Any | None, device: Any, memory_log_path: Path | None, epoch: int, global_step: int, optimizer_step: int, torch_module: Any, force_console: bool = False) -> dict[str, Any]:
+    diagnostics = _collect_trainable_parameter_diagnostics(module)
+    if memory_log_path is not None:
+        _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="trainable_parameter_diagnostics", torch_module=torch_module, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra=diagnostics)
+    if force_console or optimizer_step <= 3 or not diagnostics["all_trainable_parameters_finite"]:
+        _emit_stage2_console_event(accelerator=accelerator, device=device, phase="trainable_parameter_diagnostics", extra={"optimizer_step": optimizer_step, **diagnostics}, main_process_only=False)
+    if not diagnostics["all_trainable_parameters_finite"]:
+        raise RuntimeError(f"Detected non-finite trainable parameters immediately after optimizer step {optimizer_step}: {diagnostics['non_finite_parameter_names_sample']}")
     return diagnostics
 
 
