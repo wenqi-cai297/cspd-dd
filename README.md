@@ -197,7 +197,7 @@ accelerate launch --num_processes 2 \
 
 PixArt-Σ is now also wired as a real Stage 2 path for the same `(image, canonical_caption)` objective. This stays in the text-to-image generative framing: real images are VAE-encoded to latents, canonical captions are encoded with the PixArt text stack, and the PixArt transformer is adapted to model those caption-conditioned latents. It is not an image-editing path.
 
-Recommended next practical run: PixArt-Σ full transformer update at 512 resolution. The full PixArt path now upcasts trainable transformer weights to FP32 by default before optimizer setup, keeps the frozen VAE/text stack resident on the active training device for the whole run, and runs an explicit post-step trainable-parameter finiteness check so the run fails immediately if the first update corrupts weights.
+Recommended next practical run: PixArt-Σ full transformer update at 512 resolution. The full PixArt path now upcasts trainable transformer weights to FP32 by default before optimizer setup, keeps the frozen VAE/text stack resident on the active training device for the whole run, aligns PixArt forward inputs to the actual boundary-module dtypes (so partial full-update selection no longer trips frozen half-precision `pos_embed` / caption-entry modules), and runs an explicit post-step trainable-parameter finiteness check so the run fails immediately if the first update corrupts weights.
 
 ```bash
 accelerate launch --num_processes 1 \
@@ -220,7 +220,7 @@ accelerate launch --num_processes 1 \
   --epochs 1
 ```
 
-Use LoRA only as the fallback path if the full update still does not fit memory. Stage 2 no longer supports prompt-cache preprocessing or cached prompt/text embeddings. Training always runs live prompt encoding on the active backbone path during each step. For PixArt-Σ, the live prompt path keeps the PixArt-family prompt length consistent at 300 tokens, and the Stage 2 PixArt path now defaults closer to the official Sigma recipe: low LR, constant-with-warmup scheduling, tight grad clipping, and 0.1 prompt dropout on the canonical-caption conditioning stream. If you explicitly want the older mixed-precision full-update behavior, pass `--disable-full-update-fp32-for-pixart`.
+Use LoRA only as the fallback path if the full update still does not fit memory. Stage 2 no longer supports prompt-cache preprocessing or cached prompt/text embeddings. Training always runs live prompt encoding on the active backbone path during each step. For PixArt-Σ, the live prompt path keeps the PixArt-family prompt length consistent at 300 tokens, and the Stage 2 PixArt path now defaults closer to the official Sigma recipe: low LR, constant-with-warmup scheduling, tight grad clipping, and 0.1 prompt dropout on the canonical-caption conditioning stream. Partial full-update selection is now also supported safely for PixArt: frozen early modules can stay fp16 while selected conditioning modules are upcasted to fp32, because the runtime no longer globally forces all transformer inputs to the first trainable dtype. If you explicitly want the older mixed-precision full-update behavior, pass `--disable-full-update-fp32-for-pixart`.
 
 For remote/server debugging, Stage 2 now emits concise rank-aware progress logs directly to stdout/stderr around the common stall points: backbone load, module freezing/selection, dataloader creation, each `accelerate.prepare(...)` boundary, first batch fetch, first text/VAE encode, first forward/backward/optimizer step, checkpoint writes, explicit non-finite loss detection, and early-step gradient diagnostics. It also writes per-rank JSONL diagnostics under the run directory, typically:
 - `runs/stage2/train/.../rank00_memory_diagnostics.jsonl`
@@ -229,8 +229,30 @@ For remote/server debugging, Stage 2 now emits concise rank-aware progress logs 
 
 When a server run looks stuck, tail the launcher log for `[Stage2]` lines first, then inspect the latest `rank*_memory_diagnostics.jsonl` file to see the last completed phase on each rank.
 
+Recommended 2-GPU PixArt conditioning-focused fallback command:
 
-`conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also combine finer groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`. In LoRA mode, these selectors define where adapters are injected; in full mode, they define which real parameters stay trainable.
+```bash
+accelerate launch --num_processes 2 \
+  -m cspd_stage2.cli train \
+  --dataset-root /path/to/imagefolder_dataset \
+  --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
+  --backbone-name PixArt-alpha/PixArt-Sigma-XL-2-512-MS \
+  --resolution 512 \
+  --backbone-torch-dtype float16 \
+  --training-parameterization full \
+  --trainable-component-group conditioning_transformer \
+  --batch-size 1 \
+  --gradient-accumulation-steps 4 \
+  --learning-rate 2e-5 \
+  --lr-scheduler constant_with_warmup \
+  --lr-warmup-steps 1000 \
+  --max-grad-norm 0.01 \
+  --adam-weight-decay 0.0 \
+  --pixart-sigma-prompt-dropout-prob 0.1 \
+  --epochs 1
+```
+
+`conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also combine finer groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`. In LoRA mode, these selectors define where adapters are injected; in full mode, they define which real parameters stay trainable. On PixArt, the full-parameter `conditioning_transformer` path is now the recommended 2-GPU fallback when `full_transformer` does not fit, because the forward path keeps frozen entry modules like `pos_embed` on their native half dtype instead of globally casting the whole transformer input to fp32.
 
 This Stage 2 CLI now implements pairing / manifest generation / run-directory setup plus minimal `accelerate`-managed real FLUX/PixArt training paths. The current default policy is to freeze non-transformer top-level modules and train the full transformer; if memory is insufficient, the first fallback is conditioning-focused real-parameter training and the second fallback is the conservative LoRA path above. The runtime still attempts transformer gradient checkpointing when supported, but frozen VAE/text components now stay on the active training device instead of shuttling between CPU and GPU. The current implementation honestly remains limited: it uses `Accelerator` for process setup / dataloader sharding / backward / unwrap-model checkpointing, and the LoRA path is a conservative linear-layer injection path rather than a full PEFT feature-complete stack; it still does **not** implement heavier state-sharding/FSDP-style offload.
 

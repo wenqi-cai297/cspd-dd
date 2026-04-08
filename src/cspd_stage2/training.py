@@ -370,6 +370,55 @@ def _infer_trainable_parameter_dtype(module: Any, *, fallback: Any) -> Any:
     return fallback
 
 
+def _infer_module_parameter_dtype(module: Any | None, *, fallback: Any) -> Any:
+    if module is None or not hasattr(module, "parameters"):
+        return fallback
+    for parameter in module.parameters():
+        return parameter.dtype
+    return fallback
+
+
+def _infer_pixart_input_boundary_dtypes(transformer: Any, *, fallback: Any) -> dict[str, Any]:
+    hidden_states_dtype = _infer_module_parameter_dtype(getattr(transformer, "pos_embed", None), fallback=fallback)
+    encoder_hidden_states_dtype = _infer_module_parameter_dtype(
+        getattr(transformer, "caption_projection", None),
+        fallback=_infer_module_parameter_dtype(getattr(transformer, "context_embedder", None), fallback=hidden_states_dtype),
+    )
+    added_cond_kwargs_dtype = _infer_module_parameter_dtype(getattr(transformer, "adaln_single", None), fallback=hidden_states_dtype)
+    return {
+        "hidden_states": hidden_states_dtype,
+        "encoder_hidden_states": encoder_hidden_states_dtype,
+        "added_cond_kwargs": added_cond_kwargs_dtype,
+    }
+
+
+def _prepare_pixart_forward_inputs(
+    *,
+    transformer: Any,
+    noisy_latents: Any,
+    prompt_embeds: Any,
+    device: Any,
+    train_dtype: Any,
+) -> dict[str, Any]:
+    import torch
+
+    boundary_dtypes = _infer_pixart_input_boundary_dtypes(transformer, fallback=train_dtype)
+    batch_size = int(noisy_latents.shape[0])
+    latent_height = int(noisy_latents.shape[-2])
+    latent_width = int(noisy_latents.shape[-1])
+    aspect_ratio_value = float(latent_width) / float(latent_height) if latent_height > 0 else 1.0
+    added_cond_dtype = boundary_dtypes["added_cond_kwargs"]
+    resolution = torch.tensor([[latent_height * 8.0, latent_width * 8.0]], device=device, dtype=added_cond_dtype).repeat(batch_size, 1)
+    aspect_ratio = torch.tensor([[aspect_ratio_value]], device=device, dtype=added_cond_dtype).repeat(batch_size, 1)
+    return {
+        "hidden_states": noisy_latents.to(device=device, dtype=boundary_dtypes["hidden_states"]),
+        "encoder_hidden_states": prompt_embeds.to(device=device, dtype=boundary_dtypes["encoder_hidden_states"]),
+        "added_cond_kwargs": {"resolution": resolution, "aspect_ratio": aspect_ratio},
+        "dtype_plan": {key: _torch_dtype_label(value) for key, value in boundary_dtypes.items()},
+        "latent_hw": [latent_height, latent_width],
+    }
+
+
 def _build_optimizer(*, parameters: list[Any], config: Stage2TrainConfig, torch_module: Any) -> Any:
     optimizer_name = config.optimizer_name.strip().lower()
     if optimizer_name != "adamw":
@@ -1559,23 +1608,24 @@ def _run_real_pixart_train_step(
         num_train_timesteps = int(getattr(pipeline.scheduler.config, "num_train_timesteps", 1000))
         timesteps = torch.randint(0, num_train_timesteps, (batch_size,), device=device, dtype=torch.long)
         noisy_latents = pipeline.scheduler.add_noise(latents, noise, timesteps)
-        transformer_train_dtype = _infer_trainable_parameter_dtype(transformer, fallback=train_dtype)
-        latent_height = int(noisy_latents.shape[-2])
-        latent_width = int(noisy_latents.shape[-1])
-        resolution = torch.tensor([[latent_height * 8.0, latent_width * 8.0]], device=device, dtype=torch.float32).repeat(batch_size, 1)
-        aspect_ratio_value = float(latent_width) / float(latent_height) if latent_height > 0 else 1.0
-        aspect_ratio = torch.tensor([[aspect_ratio_value]], device=device, dtype=torch.float32).repeat(batch_size, 1)
-        added_cond_kwargs = {"resolution": resolution, "aspect_ratio": aspect_ratio}
-        noisy_latents = noisy_latents.to(device=device, dtype=transformer_train_dtype)
-        prompt_embeds = prompt_embeds.to(device=device, dtype=transformer_train_dtype)
+        prepared_forward_inputs = _prepare_pixart_forward_inputs(
+            transformer=transformer,
+            noisy_latents=noisy_latents,
+            prompt_embeds=prompt_embeds,
+            device=device,
+            train_dtype=train_dtype,
+        )
+        noisy_latents = prepared_forward_inputs["hidden_states"]
+        prompt_embeds = prepared_forward_inputs["encoder_hidden_states"]
+        added_cond_kwargs = prepared_forward_inputs["added_cond_kwargs"]
         forward_input_summary = {
             "hidden_states": _summarize_tensor_like(noisy_latents),
             "encoder_hidden_states": _summarize_tensor_like(prompt_embeds),
             "encoder_attention_mask": _summarize_tensor_like(prompt_attention_mask),
             "timestep": _summarize_tensor_like(timesteps),
             "added_cond_kwargs": {key: _summarize_tensor_like(value) for key, value in added_cond_kwargs.items()},
-            "latent_hw": [latent_height, latent_width],
-            "transformer_train_dtype": _torch_dtype_label(transformer_train_dtype),
+            "latent_hw": prepared_forward_inputs["latent_hw"],
+            "pixart_input_dtype_plan": prepared_forward_inputs["dtype_plan"],
         }
         _append_memory_event(
             artifact_path=memory_log_path,
