@@ -32,7 +32,7 @@ from cspd_stage2.backbone import (
     load_module_from_reference,
     load_real_backbone_module,
 )
-from cspd_stage2.data import ManifestPaths, build_stage2_pairs, make_stage2_dataloader, stable_prompt_cache_key, write_pairing_artifacts
+from cspd_stage2.data import ManifestPaths, build_stage2_pairs, make_stage2_dataloader, write_pairing_artifacts
 
 
 DEFAULT_TEXT_CONDITIONING_GROUPS = [
@@ -154,11 +154,6 @@ class Stage2TrainConfig:
     enable_gradient_checkpointing: bool = True
     keep_frozen_modules_on_cpu_until_needed: bool = True
     offload_frozen_modules_after_step: bool = True
-    prompt_cache_dir: str | None = None
-    precompute_prompt_embeddings: bool = False
-    prompt_cache_batch_size: int = 8
-    prompt_cache_max_sequence_length: int | None = None
-    prompt_cache_device: str | None = None
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
@@ -215,13 +210,11 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         component_plan = _build_component_plan(config, backbone_runtime)
         last_known_phase = "after_component_plan"
 
-        prompt_cache_summary = _prepare_prompt_cache_if_requested(config=config, run_dir=run_dir, pairs=pairing.pairs)
-
         last_known_phase = "before_write_config_snapshot"
         write_json(run_dir / "stage2_config_snapshot.json", _config_to_dict(config))
         last_known_phase = "after_write_config_snapshot"
 
-        trainer_plan = _build_trainer_plan(config, manifest_paths.manifest_path, len(pairing.pairs), component_plan, prompt_cache_summary)
+        trainer_plan = _build_trainer_plan(config, manifest_paths.manifest_path, len(pairing.pairs), component_plan, None)
         last_known_phase = "before_write_trainer_plan"
         write_json(run_dir / "trainer_plan.json", trainer_plan)
         last_known_phase = "after_write_trainer_plan"
@@ -287,169 +280,17 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         training_result=training_result,
         last_known_phase=training_result.get("last_known_phase", last_known_phase),
         top_level_failure=top_level_failure,
-        prompt_cache_summary=prompt_cache_summary if "prompt_cache_summary" in locals() else None,
     )
     _safe_write_json(run_dir / "stage2_run_summary.json", summary)
     return summary
 
 
 
-def _default_prompt_cache_dir(config: Stage2TrainConfig, run_dir: Path) -> Path:
-    if config.prompt_cache_dir:
-        return Path(config.prompt_cache_dir)
-    return run_dir / "prompt_cache"
-
-
-def _prepare_prompt_cache_if_requested(*, config: Stage2TrainConfig, run_dir: Path, pairs: list[Any]) -> dict[str, Any] | None:
-    if not config.precompute_prompt_embeddings and not config.prompt_cache_dir:
-        return None
-    prompt_cache_dir = _default_prompt_cache_dir(config, run_dir)
-    prompt_cache_dir.mkdir(parents=True, exist_ok=True)
-    summary = _build_or_validate_prompt_cache(config=config, prompt_cache_dir=prompt_cache_dir, pairs=pairs)
-    config.prompt_cache_dir = str(prompt_cache_dir.resolve())
-    return summary
-
-
 def _effective_prompt_max_sequence_length(config: Stage2TrainConfig) -> int:
-    if config.prompt_cache_max_sequence_length is not None:
-        return int(config.prompt_cache_max_sequence_length)
     family = infer_backbone_family(config.backbone_name)
     if family in {"pixart", "pixart_sigma"}:
         return 300
     return 512
-
-
-
-def _build_or_validate_prompt_cache(*, config: Stage2TrainConfig, prompt_cache_dir: Path, pairs: list[Any]) -> dict[str, Any]:
-    unique_captions = list(dict.fromkeys(str(pair.canonical_caption) for pair in pairs))
-    expected_paths = {stable_prompt_cache_key(caption): prompt_cache_dir / f"{stable_prompt_cache_key(caption)}.pt" for caption in unique_captions}
-    existing = {key: path for key, path in expected_paths.items() if path.exists()}
-    missing = {key: path for key, path in expected_paths.items() if not path.exists()}
-    backbone_family = infer_backbone_family(config.backbone_name)
-    effective_max_sequence_length = _effective_prompt_max_sequence_length(config)
-    cache_fields = ["prompt_embeds", "pooled_prompt_embeds", "text_ids"] if backbone_family in {"flux", "flux_kontext"} else ["prompt_embeds", "prompt_attention_mask"]
-
-    if missing and not config.precompute_prompt_embeddings:
-        missing_preview = [str(path) for path in list(missing.values())[:5]]
-        raise FileNotFoundError(
-            "Prompt cache directory is missing canonical-caption embedding files. "
-            f"Expected {len(expected_paths)} entries, found {len(existing)}. Missing examples: {missing_preview}"
-        )
-
-    built_count = 0
-    if missing:
-        built_count = _encode_and_store_prompt_cache(
-            backbone_name=config.backbone_name,
-            captions=unique_captions,
-            prompt_cache_dir=prompt_cache_dir,
-            torch_dtype=config.backbone_torch_dtype,
-            device=config.prompt_cache_device or config.backbone_device,
-            batch_size=config.prompt_cache_batch_size,
-            max_sequence_length=effective_max_sequence_length,
-            local_files_only=config.backbone_local_files_only,
-        )
-
-    index_payload = {
-        "backbone_name": config.backbone_name,
-        "backbone_family_assumption": _infer_backbone_assumptions(config.backbone_name),
-        "cache_format": {
-            "format_version": 2,
-            "fields": cache_fields,
-            "backbone_specific_note": f"Cache tensors are produced from the current diffusers {backbone_family} encode_prompt contract and should be treated as backbone/path-specific.",
-        },
-        "prompt_cache_dir": str(prompt_cache_dir.resolve()),
-        "num_unique_canonical_captions": len(unique_captions),
-        "captions": [
-            {"cache_key": stable_prompt_cache_key(caption), "caption": caption, "path": str((prompt_cache_dir / f'{stable_prompt_cache_key(caption)}.pt').resolve())}
-            for caption in unique_captions
-        ],
-        "prompt_cache_batch_size": config.prompt_cache_batch_size,
-        "prompt_cache_max_sequence_length": effective_max_sequence_length,
-    }
-    _safe_write_json(prompt_cache_dir / "prompt_cache_index.json", index_payload)
-    return {
-        "enabled": True,
-        "prompt_cache_dir": str(prompt_cache_dir.resolve()),
-        "index_path": str((prompt_cache_dir / "prompt_cache_index.json").resolve()),
-        "num_unique_canonical_captions": len(unique_captions),
-        "num_existing_entries": len(existing),
-        "num_built_entries": built_count,
-        "uses_cached_prompt_embeddings_in_training": True,
-        "backbone_specific_note": index_payload["cache_format"]["backbone_specific_note"],
-    }
-
-
-def _encode_and_store_prompt_cache(*, backbone_name: str, captions: list[str], prompt_cache_dir: Path, torch_dtype: str, device: str | None, batch_size: int, max_sequence_length: int, local_files_only: bool) -> int:
-    import torch
-
-    backbone_family = infer_backbone_family(backbone_name)
-    backbone = load_real_backbone_module(
-        backbone_name,
-        torch_dtype=torch_dtype,
-        device=device,
-        device_map=None,
-        local_files_only=local_files_only,
-        component=None,
-        allow_unimplemented=False,
-    )
-    pipeline = backbone.root_module
-    if pipeline is None or not hasattr(pipeline, "encode_prompt"):
-        raise RuntimeError("Loaded backbone does not expose encode_prompt for prompt-cache precompute")
-
-    built_count = 0
-    encode_device = next(pipeline.transformer.parameters()).device if getattr(pipeline, "transformer", None) is not None else torch.device(device or "cpu")
-    for start in range(0, len(captions), max(int(batch_size), 1)):
-        caption_batch = captions[start:start + max(int(batch_size), 1)]
-        if backbone_family in {"flux", "flux_kontext"}:
-            prompt_embeds, pooled_prompt_embeds, text_ids = pipeline.encode_prompt(
-                prompt=caption_batch,
-                prompt_2=caption_batch,
-                device=encode_device,
-                num_images_per_prompt=1,
-                max_sequence_length=max_sequence_length,
-            )
-            prompt_embeds = prompt_embeds.detach().to(device="cpu")
-            pooled_prompt_embeds = pooled_prompt_embeds.detach().to(device="cpu")
-            text_ids = text_ids.detach().to(device="cpu")
-            for index, caption in enumerate(caption_batch):
-                cache_key = stable_prompt_cache_key(caption)
-                payload = {
-                    "caption": caption,
-                    "cache_key": cache_key,
-                    "prompt_embeds": prompt_embeds[index:index + 1].contiguous(),
-                    "pooled_prompt_embeds": pooled_prompt_embeds[index:index + 1].contiguous(),
-                    "text_ids": text_ids.contiguous(),
-                    "max_sequence_length": int(max_sequence_length),
-                    "backbone_name": backbone_name,
-                }
-                torch.save(payload, prompt_cache_dir / f"{cache_key}.pt")
-                built_count += 1
-            del prompt_embeds, pooled_prompt_embeds, text_ids
-        else:
-            prompt_embeds, prompt_attention_mask, _, _ = pipeline.encode_prompt(
-                prompt=caption_batch,
-                do_classifier_free_guidance=False,
-                device=encode_device,
-                num_images_per_prompt=1,
-                max_sequence_length=max_sequence_length,
-            )
-            prompt_embeds = prompt_embeds.detach().to(device="cpu")
-            prompt_attention_mask = prompt_attention_mask.detach().to(device="cpu")
-            for index, caption in enumerate(caption_batch):
-                cache_key = stable_prompt_cache_key(caption)
-                payload = {
-                    "caption": caption,
-                    "cache_key": cache_key,
-                    "prompt_embeds": prompt_embeds[index:index + 1].contiguous(),
-                    "prompt_attention_mask": prompt_attention_mask[index:index + 1].contiguous(),
-                    "max_sequence_length": int(max_sequence_length),
-                    "backbone_name": backbone_name,
-                }
-                torch.save(payload, prompt_cache_dir / f"{cache_key}.pt")
-                built_count += 1
-            del prompt_embeds, prompt_attention_mask
-    del pipeline, backbone
-    return built_count
 
 def _safe_write_json(path: Path, payload: dict[str, Any]) -> None:
     try:
@@ -473,7 +314,6 @@ def _build_stage2_run_summary(
     training_result: dict[str, Any],
     last_known_phase: str,
     top_level_failure: dict[str, Any] | None,
-    prompt_cache_summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
     return {
         "stage": "stage2_v1",
@@ -496,7 +336,6 @@ def _build_stage2_run_summary(
         "num_pairs": num_pairs,
         "pairing_summary": pairing_summary,
         "training": training_result,
-        "prompt_cache": prompt_cache_summary,
         "top_level_failure": top_level_failure,
         "artifacts": {
             "config": str((run_dir / "stage2_config_snapshot.json").resolve()),
@@ -905,7 +744,6 @@ def run_real_stage2_flux_training(
             num_workers=config.num_workers,
             shuffle=True,
             drop_last=config.dataloader_drop_last,
-            prompt_cache_dir=config.prompt_cache_dir,
         )
         mark_phase("after_dataloader_setup")
 
@@ -980,7 +818,6 @@ def run_real_stage2_flux_training(
                     optimizer_step=optimizer_step_count + 1,
                     keep_frozen_modules_on_cpu_until_needed=config.keep_frozen_modules_on_cpu_until_needed,
                     offload_frozen_modules_after_step=config.offload_frozen_modules_after_step,
-                    use_cached_prompt_embeddings=bool(config.prompt_cache_dir),
                     move_state=component_move_state,
                 )
                 global_step += 1
@@ -1212,7 +1049,7 @@ def run_real_stage2_pixart_training(
         _set_module_mode(getattr(pipeline, "text_encoder", None), training=False)
 
         optimizer = torch.optim.AdamW((parameter for parameter in transformer.parameters() if parameter.requires_grad), lr=config.learning_rate)
-        dataloader = make_stage2_dataloader(pairs, resolution=config.resolution, batch_size=config.batch_size, num_workers=config.num_workers, shuffle=True, drop_last=config.dataloader_drop_last, prompt_cache_dir=config.prompt_cache_dir)
+        dataloader = make_stage2_dataloader(pairs, resolution=config.resolution, batch_size=config.batch_size, num_workers=config.num_workers, shuffle=True, drop_last=config.dataloader_drop_last)
         if accelerator is not None:
             transformer = accelerator.prepare(transformer)
             pipeline.transformer = transformer
@@ -1236,7 +1073,7 @@ def run_real_stage2_pixart_training(
             for batch in dataloader:
                 if stop_after is not None and optimizer_step_count >= stop_after:
                     break
-                loss = _run_real_pixart_train_step(pipeline=pipeline, transformer=transformer, batch=batch, optimizer=optimizer, accelerator=accelerator, device=device, train_dtype=train_dtype, memory_log_path=memory_log_path, epoch=epoch + 1, global_step=global_step + 1, optimizer_step=optimizer_step_count + 1, use_cached_prompt_embeddings=bool(config.prompt_cache_dir), config=config)
+                loss = _run_real_pixart_train_step(pipeline=pipeline, transformer=transformer, batch=batch, optimizer=optimizer, accelerator=accelerator, device=device, train_dtype=train_dtype, memory_log_path=memory_log_path, epoch=epoch + 1, global_step=global_step + 1, optimizer_step=optimizer_step_count + 1, config=config)
                 global_step += 1
                 sync_gradients = accelerator.sync_gradients if accelerator is not None else True
                 if sync_gradients:
@@ -1342,7 +1179,6 @@ def _run_real_pixart_train_step(
     epoch: int,
     global_step: int,
     optimizer_step: int,
-    use_cached_prompt_embeddings: bool,
     config: Stage2TrainConfig,
 ) -> Any:
     import torch
@@ -1358,19 +1194,15 @@ def _run_real_pixart_train_step(
             shift_factor = float(getattr(getattr(pipeline.vae, "config", None), "shift_factor", 0.0) or 0.0)
             latents = (latents - shift_factor) * scaling_factor
             latents = latents.to(device=device, dtype=train_dtype)
-            if use_cached_prompt_embeddings:
-                prompt_embeds = batch["cached_prompt_embeds"].to(device=device, dtype=train_dtype)
-                prompt_attention_mask = batch["cached_prompt_attention_mask"].to(device=device)
-            else:
-                prompt_embeds, prompt_attention_mask, _, _ = pipeline.encode_prompt(
-                    prompt=batch["conditioning_text"],
-                    do_classifier_free_guidance=False,
-                    device=device,
-                    num_images_per_prompt=1,
-                    max_sequence_length=_effective_prompt_max_sequence_length(config),
-                )
-                prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
-                prompt_attention_mask = prompt_attention_mask.to(device=device)
+            prompt_embeds, prompt_attention_mask, _, _ = pipeline.encode_prompt(
+                prompt=batch["conditioning_text"],
+                do_classifier_free_guidance=False,
+                device=device,
+                num_images_per_prompt=1,
+                max_sequence_length=_effective_prompt_max_sequence_length(config),
+            )
+            prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
+            prompt_attention_mask = prompt_attention_mask.to(device=device)
 
         noise = torch.randn_like(latents)
         batch_size = latents.shape[0]
@@ -1416,7 +1248,6 @@ def _run_real_flux_train_step(
     optimizer_step: int,
     keep_frozen_modules_on_cpu_until_needed: bool,
     offload_frozen_modules_after_step: bool,
-    use_cached_prompt_embeddings: bool,
     move_state: dict[str, Any] | None,
 ) -> Any:
     import torch
@@ -1511,125 +1342,94 @@ def _run_real_flux_train_step(
                     global_step=global_step,
                     optimizer_step=optimizer_step,
                 )
-            if use_cached_prompt_embeddings:
+            if keep_frozen_modules_on_cpu_until_needed:
+                _move_named_pipeline_components(
+                    pipeline,
+                    component_names=["text_encoder", "text_encoder_2", "image_encoder"],
+                    device=device,
+                    dtype=train_dtype,
+                    torch_module=torch,
+                    accelerator=accelerator,
+                    runtime_device=device,
+                    memory_log_path=memory_log_path,
+                    component_move_log_path=component_move_log_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                    move_state=move_state,
+                )
                 _append_memory_event(
                     artifact_path=memory_log_path,
                     accelerator=accelerator,
                     device=device,
-                    phase="before_cached_prompt_load",
+                    phase="after_prompt_modules_move_to_device",
                     torch_module=torch,
                     epoch=epoch,
                     global_step=global_step,
                     optimizer_step=optimizer_step,
-                    extra={"prompt_cache_keys": batch.get("prompt_cache_key")},
                 )
-                prompt_embeds = batch["cached_prompt_embeds"].to(device=device, dtype=train_dtype)
-                pooled_prompt_embeds = batch["cached_pooled_prompt_embeds"].to(device=device, dtype=train_dtype)
-                text_ids = batch["cached_text_ids"].to(device=device, dtype=train_dtype)
+            _append_memory_event(
+                artifact_path=memory_log_path,
+                accelerator=accelerator,
+                device=device,
+                phase="before_prompt_encode",
+                torch_module=torch,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                extra={"prompt_sample": batch["conditioning_text"][0] if batch.get("conditioning_text") else None},
+            )
+            prompt_embeds, pooled_prompt_embeds, text_ids = pipeline.encode_prompt(
+                prompt=batch["conditioning_text"],
+                prompt_2=batch["conditioning_text"],
+                device=device,
+                num_images_per_prompt=1,
+                max_sequence_length=512,
+            )
+            prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
+            pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=train_dtype)
+            text_ids = text_ids.to(device=device, dtype=train_dtype)
+            _append_memory_event(
+                artifact_path=memory_log_path,
+                accelerator=accelerator,
+                device=device,
+                phase="after_prompt_encode",
+                torch_module=torch,
+                epoch=epoch,
+                global_step=global_step,
+                optimizer_step=optimizer_step,
+                extra={
+                    "prompt_embeds_shape": list(prompt_embeds.shape),
+                    "pooled_prompt_embeds_shape": list(pooled_prompt_embeds.shape),
+                    "text_ids_shape": list(text_ids.shape),
+                },
+            )
+            if keep_frozen_modules_on_cpu_until_needed and offload_frozen_modules_after_step:
+                _move_named_pipeline_components(
+                    pipeline,
+                    component_names=["text_encoder", "text_encoder_2", "image_encoder"],
+                    device=torch.device("cpu"),
+                    dtype=torch.float32,
+                    torch_module=torch,
+                    accelerator=accelerator,
+                    runtime_device=device,
+                    memory_log_path=memory_log_path,
+                    component_move_log_path=component_move_log_path,
+                    epoch=epoch,
+                    global_step=global_step,
+                    optimizer_step=optimizer_step,
+                    move_state=move_state,
+                )
                 _append_memory_event(
                     artifact_path=memory_log_path,
                     accelerator=accelerator,
                     device=device,
-                    phase="after_cached_prompt_load",
+                    phase="after_prompt_modules_offload_to_cpu",
                     torch_module=torch,
                     epoch=epoch,
                     global_step=global_step,
                     optimizer_step=optimizer_step,
-                    extra={
-                        "prompt_embeds_shape": list(prompt_embeds.shape),
-                        "pooled_prompt_embeds_shape": list(pooled_prompt_embeds.shape),
-                        "text_ids_shape": list(text_ids.shape),
-                    },
                 )
-            else:
-                if keep_frozen_modules_on_cpu_until_needed:
-                    _move_named_pipeline_components(
-                        pipeline,
-                        component_names=["text_encoder", "text_encoder_2", "image_encoder"],
-                        device=device,
-                        dtype=train_dtype,
-                        torch_module=torch,
-                        accelerator=accelerator,
-                        runtime_device=device,
-                        memory_log_path=memory_log_path,
-                        component_move_log_path=component_move_log_path,
-                        epoch=epoch,
-                        global_step=global_step,
-                        optimizer_step=optimizer_step,
-                        move_state=move_state,
-                    )
-                    _append_memory_event(
-                        artifact_path=memory_log_path,
-                        accelerator=accelerator,
-                        device=device,
-                        phase="after_prompt_modules_move_to_device",
-                        torch_module=torch,
-                        epoch=epoch,
-                        global_step=global_step,
-                        optimizer_step=optimizer_step,
-                    )
-                _append_memory_event(
-                    artifact_path=memory_log_path,
-                    accelerator=accelerator,
-                    device=device,
-                    phase="before_prompt_encode",
-                    torch_module=torch,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                    extra={"prompt_sample": batch["conditioning_text"][0] if batch.get("conditioning_text") else None},
-                )
-                prompt_embeds, pooled_prompt_embeds, text_ids = pipeline.encode_prompt(
-                    prompt=batch["conditioning_text"],
-                    prompt_2=batch["conditioning_text"],
-                    device=device,
-                    num_images_per_prompt=1,
-                    max_sequence_length=512,
-                )
-                prompt_embeds = prompt_embeds.to(device=device, dtype=train_dtype)
-                pooled_prompt_embeds = pooled_prompt_embeds.to(device=device, dtype=train_dtype)
-                text_ids = text_ids.to(device=device, dtype=train_dtype)
-                _append_memory_event(
-                    artifact_path=memory_log_path,
-                    accelerator=accelerator,
-                    device=device,
-                    phase="after_prompt_encode",
-                    torch_module=torch,
-                    epoch=epoch,
-                    global_step=global_step,
-                    optimizer_step=optimizer_step,
-                    extra={
-                        "prompt_embeds_shape": list(prompt_embeds.shape),
-                        "pooled_prompt_embeds_shape": list(pooled_prompt_embeds.shape),
-                        "text_ids_shape": list(text_ids.shape),
-                    },
-                )
-                if keep_frozen_modules_on_cpu_until_needed and offload_frozen_modules_after_step:
-                    _move_named_pipeline_components(
-                        pipeline,
-                        component_names=["text_encoder", "text_encoder_2", "image_encoder"],
-                        device=torch.device("cpu"),
-                        dtype=torch.float32,
-                        torch_module=torch,
-                        accelerator=accelerator,
-                        runtime_device=device,
-                        memory_log_path=memory_log_path,
-                        component_move_log_path=component_move_log_path,
-                        epoch=epoch,
-                        global_step=global_step,
-                        optimizer_step=optimizer_step,
-                        move_state=move_state,
-                    )
-                    _append_memory_event(
-                        artifact_path=memory_log_path,
-                        accelerator=accelerator,
-                        device=device,
-                        phase="after_prompt_modules_offload_to_cpu",
-                        torch_module=torch,
-                        epoch=epoch,
-                        global_step=global_step,
-                        optimizer_step=optimizer_step,
-                    )
 
         packed_latents = pipeline._pack_latents(
             latents,
@@ -2416,7 +2216,6 @@ def _build_trainer_plan(
     manifest_path: str,
     num_pairs: int,
     component_plan: dict[str, Any],
-    prompt_cache_summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
     return {
         "stage": "stage2_v1",
@@ -2438,7 +2237,6 @@ def _build_trainer_plan(
             "paired_from": "stage1_render.records.jsonl",
         },
         "component_plan": component_plan,
-        "prompt_cache": prompt_cache_summary,
         "freeze_plan": {
             "train_transformer_core_only": config.train_transformer_core_only,
             "freeze_text_encoder": config.freeze_text_encoder,
@@ -2446,7 +2244,6 @@ def _build_trainer_plan(
         },
         "implementation_status": {
             "pairing_manifest": "implemented",
-            "prompt_embedding_cache": "implemented_when_requested",
             "text_conditioning_manifest_fields": "implemented",
             "run_directory_setup": "implemented",
             "config_snapshot": "implemented",
@@ -2466,7 +2263,6 @@ def _build_trainer_plan(
             "The real training path now attempts transformer gradient checkpointing when the loaded FLUX transformer exposes a supported interface.",
             "Frozen VAE/text components are kept on CPU until first use by default, then optionally offloaded back to CPU after encode so accelerate.prepare does not inherit their device residency up front.",
             "Real accelerate-based diffusers-backed FLUX-family training is wired conservatively around packed VAE latents and canonical-caption prompt encoding, but successful execution still depends on the local runtime actually loading the requested backbone.",
-            "When a prompt cache directory is configured, Stage 2 consumes precomputed canonical-caption embeddings and avoids moving prompt/text encoders onto the training device each step.",
             "Heavier optimizer/state sharding or FSDP-style offload is still not implemented here.",
         ],
     }

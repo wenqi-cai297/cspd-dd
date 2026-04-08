@@ -103,52 +103,41 @@ class FakePixArtPipeline(torch.nn.Module):
         return prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask
 
 
-
-def run_case(use_cached_prompt_embeddings: bool):
-    pipeline = FakePixArtPipeline()
-    config = Stage2TrainConfig(
-        dataset_root='x',
-        render_input='y',
-        output_dir='z',
-        backbone_name='PixArt-alpha/PixArt-Sigma-XL-2-512-MS',
-        training_parameterization='lora',
-        trainable_component_groups=['conditioning_transformer'],
-    )
-    selection = _freeze_stage2_modules(pipeline, config)
-    summary = selection['trainable_parameter_summary']
-    optimizer = torch.optim.AdamW((p for p in pipeline.transformer.parameters() if p.requires_grad), lr=1e-3)
-    batch = {
-        'pixel_values': torch.randn(2, 3, 64, 64),
-        'conditioning_text': ['caption a', 'caption b'],
-    }
-    if use_cached_prompt_embeddings:
-        batch['cached_prompt_embeds'] = torch.zeros((2, 5, 16), dtype=torch.float32)
-        batch['cached_prompt_attention_mask'] = torch.ones((2, 5), dtype=torch.long)
-    loss = _run_real_pixart_train_step(
-        pipeline=pipeline,
-        transformer=pipeline.transformer,
-        batch=batch,
-        optimizer=optimizer,
-        accelerator=None,
-        device=torch.device('cpu'),
-        train_dtype=torch.float32,
-        memory_log_path=Path('tmp_stage2_pixart_smoke_memory.jsonl'),
-        epoch=1,
-        global_step=1,
-        optimizer_step=1,
-        use_cached_prompt_embeddings=use_cached_prompt_embeddings,
-        config=config,
-    )
-    return {
-        'use_cached_prompt_embeddings': use_cached_prompt_embeddings,
-        'loss': float(loss.detach().cpu().item()),
-        'trainable_parameter_count': summary['trainable_parameter_count'],
-        'lora_parameter_count': summary['lora_parameter_count'],
-        'only_lora_parameters_trainable': summary['only_lora_parameters_trainable'],
-        'adapter_injection_count': 0 if selection['adapter_injection'] is None else len(selection['adapter_injection'].injected_modules),
-        'encode_prompt_max_sequence_length': pipeline.last_encode_prompt_max_sequence_length,
-    }
-
-
-print(run_case(False))
-print(run_case(True))
+pipeline = FakePixArtPipeline()
+config = Stage2TrainConfig(
+    dataset_root='x',
+    render_input='y',
+    output_dir='z',
+    backbone_name='PixArt-alpha/PixArt-Sigma-XL-2-512-MS',
+    training_parameterization='lora',
+    trainable_component_groups=['conditioning_transformer'],
+)
+selection = _freeze_stage2_modules(pipeline, config)
+summary = selection['trainable_parameter_summary']
+optimizer = torch.optim.AdamW((p for p in pipeline.transformer.parameters() if p.requires_grad), lr=1e-3)
+batch = {
+    'pixel_values': torch.randn(2, 3, 64, 64),
+    'conditioning_text': ['caption a', 'caption b'],
+}
+loss = _run_real_pixart_train_step(
+    pipeline=pipeline,
+    transformer=pipeline.transformer,
+    batch=batch,
+    optimizer=optimizer,
+    accelerator=None,
+    device=torch.device('cpu'),
+    train_dtype=torch.float32,
+    memory_log_path=Path('tmp_stage2_pixart_smoke_memory.jsonl'),
+    epoch=1,
+    global_step=1,
+    optimizer_step=1,
+    config=config,
+)
+print({
+    'loss': float(loss.detach().cpu().item()),
+    'trainable_parameter_count': summary['trainable_parameter_count'],
+    'lora_parameter_count': summary['lora_parameter_count'],
+    'only_lora_parameters_trainable': summary['only_lora_parameters_trainable'],
+    'adapter_injection_count': 0 if selection['adapter_injection'] is None else len(selection['adapter_injection'].injected_modules),
+    'encode_prompt_max_sequence_length': pipeline.last_encode_prompt_max_sequence_length,
+})

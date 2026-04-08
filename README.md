@@ -216,63 +216,8 @@ accelerate launch --num_processes 1 \
   --epochs 1
 ```
 
-If you want to precompute PixArt prompt conditioning for repeated captions, the prompt cache path also works for PixArt-Σ now; it stores `prompt_embeds` plus `prompt_attention_mask` instead of the FLUX/Kontext triplet. The Stage 2 code now uses one backbone-family-consistent prompt length for both cache generation and live training (PixArt defaults to 300 tokens unless you explicitly override `--prompt-cache-max-sequence-length`):
+Stage 2 no longer supports prompt-cache preprocessing or cached prompt/text embeddings. Training always runs live prompt encoding on the active backbone path during each step. For PixArt-Σ, the live prompt path keeps the PixArt-family prompt length consistent at 300 tokens.
 
-```bash
-cspd-stage2 cache-prompt-embeds \
-  --dataset-root /path/to/imagefolder_dataset \
-  --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
-  --output-dir runs/stage2/prompt_cache/my_dataset/pixart_sigma/2026-04-05_020500 \
-  --backbone-name PixArt-alpha/PixArt-Sigma-XL-2-512-MS \
-  --backbone-device cpu
-```
-
-If prompt/text encoder movement is now the memory bottleneck, you can precompute canonical-caption prompt embeddings once and then train from the cache so Stage 2 no longer runs `encode_prompt(...)` each step. The current cache format is honest and backbone-path-specific: it stores the current diffusers FLUX/Kontext `encode_prompt` outputs (`prompt_embeds`, `pooled_prompt_embeds`, `text_ids`) per canonical caption, so you should regenerate it if you change the backbone family or prompt-encoding path.
-
-Explicit preprocessing:
-
-```bash
-cspd-stage2 cache-prompt-embeds \
-  --dataset-root /path/to/imagefolder_dataset \
-  --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
-  --output-dir runs/stage2/prompt_cache/my_dataset/flux_dev/2026-04-05_000000 \
-  --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
-  --backbone-device cpu
-```
-
-Then consume that cache during training:
-
-```bash
-accelerate launch --num_processes 2 \
-  -m cspd_stage2.cli train \
-  --dataset-root /path/to/imagefolder_dataset \
-  --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
-  --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-05_000500_cached \
-  --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
-  --prompt-cache-dir runs/stage2/prompt_cache/my_dataset/flux_dev/2026-04-05_000000 \
-  --training-parameterization lora \
-  --trainable-component-group conditioning_transformer \
-  --adapter-rank 16 \
-  --adapter-alpha 16 \
-  --batch-size 4 \
-  --epochs 1 \
-  --gradient-accumulation-steps 1
-```
-
-Or let `train` build the cache inside its own run directory before the training loop starts:
-
-```bash
-accelerate launch --num_processes 2 \
-  -m cspd_stage2.cli train \
-  --dataset-root /path/to/imagefolder_dataset \
-  --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
-  --output-dir runs/stage2/train/my_dataset/flux_dev/2026-04-05_001000_cached_inline \
-  --backbone-name black-forest-labs/FLUX.1-Kontext-dev \
-  --precompute-prompt-embeddings \
-  --prompt-cache-device cpu \
-  --training-parameterization lora \
-  --trainable-component-group conditioning_transformer
-```
 
 `conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also combine finer groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`. In LoRA mode, these selectors define where adapters are injected; in full mode, they define which real parameters stay trainable.
 
