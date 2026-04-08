@@ -186,7 +186,7 @@ class Stage2TrainConfig:
     dataloader_drop_last: bool = False
     enable_gradient_checkpointing: bool = True
     keep_frozen_modules_on_cpu_until_needed: bool = True
-    offload_frozen_modules_after_step: bool = True
+    offload_frozen_modules_after_step: bool = False
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
@@ -1072,6 +1072,7 @@ def run_real_stage2_flux_training(
             "component_move_failures": component_move_state.get("component_move_failures", []),
             "last_known_phase": last_known_phase,
             "phase_history": phase_history,
+            "failure_category": _classify_training_failure(exc),
             "failure": {
                 "error_type": type(exc).__name__,
                 "error": str(exc),
@@ -1287,6 +1288,7 @@ def run_real_stage2_pixart_training(
             "trainable_parameter_summary": selection_result["trainable_parameter_summary"] if selection_result is not None else None,
             "accelerate": {"enabled": bool(accelerator is not None), "num_processes": world_size, "gradient_accumulation_steps": max(config.gradient_accumulation_steps, 1), "distributed_type": str(getattr(getattr(accelerator, "state", None), "distributed_type", "no")) if accelerator is not None else "no", "requested_device_map_ignored": bool(config.backbone_device_map)},
             "gradient_checkpointing": gradient_checkpointing,
+            "memory_strategy": {"keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed, "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step},
             "dataloader_batches_per_epoch": steps_per_epoch,
             "forward_steps": global_step,
             "optimizer_steps": optimizer_step_count,
@@ -1326,6 +1328,7 @@ def run_real_stage2_pixart_training(
             "adapter_injection": selection_result["adapter_injection"].to_dict() if selection_result is not None and selection_result["adapter_injection"] is not None else None,
             "trainable_parameter_summary": selection_result["trainable_parameter_summary"] if selection_result is not None else None,
             "gradient_checkpointing": gradient_checkpointing,
+            "memory_strategy": {"keep_frozen_modules_on_cpu_until_needed": config.keep_frozen_modules_on_cpu_until_needed, "offload_frozen_modules_after_step": config.offload_frozen_modules_after_step},
             "dataloader_batches_per_epoch": steps_per_epoch,
             "forward_steps": global_step,
             "optimizer_steps": optimizer_step_count,
@@ -1342,6 +1345,7 @@ def run_real_stage2_pixart_training(
             "component_move_failures": component_move_state.get("component_move_failures", []),
             "last_known_phase": last_known_phase,
             "phase_history": phase_history,
+            "failure_category": _classify_training_failure(exc),
             "failure": {"error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc(), "rank_info": _accelerator_rank_info(accelerator, device) if torch is not None else None},
         }
         if is_main_process:
@@ -1572,6 +1576,7 @@ def _run_real_pixart_train_step(
         if out_channels // 2 == latent_channels:
             prediction = prediction.chunk(2, dim=1)[0]
         loss = torch.nn.functional.mse_loss(prediction.float(), noise.float())
+        loss_value = _raise_on_non_finite_scalar(value=loss, name="loss", accelerator=accelerator, device=device, memory_log_path=memory_log_path, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, torch_module=torch, extra={"backbone_family": "pixart"})
         _append_memory_event(
             artifact_path=memory_log_path,
             accelerator=accelerator,
@@ -1583,11 +1588,11 @@ def _run_real_pixart_train_step(
             optimizer_step=optimizer_step,
             extra={
                 "prediction": _summarize_tensor_like(prediction),
-                "loss": float(loss.detach().float().cpu().item()),
+                "loss": loss_value,
             },
         )
         if global_step == 1:
-            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_forward", extra={"optimizer_step": optimizer_step, "loss": float(loss.detach().float().cpu().item()), "prediction": _summarize_tensor_like(prediction)}, main_process_only=False)
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_forward", extra={"optimizer_step": optimizer_step, "loss": loss_value, "prediction": _summarize_tensor_like(prediction)}, main_process_only=False)
         optimizer.zero_grad(set_to_none=True)
         _append_memory_event(
             artifact_path=memory_log_path,
@@ -1598,43 +1603,32 @@ def _run_real_pixart_train_step(
             epoch=epoch,
             global_step=global_step,
             optimizer_step=optimizer_step,
-            extra={"loss": float(loss.detach().float().cpu().item())},
+            extra={"loss": loss_value},
         )
         if accelerator is not None:
             accelerator.backward(loss)
-            _append_memory_event(
-                artifact_path=memory_log_path,
-                accelerator=accelerator,
-                device=device,
-                phase="after_pixart_backward",
-                torch_module=torch,
-                epoch=epoch,
-                global_step=global_step,
-                optimizer_step=optimizer_step,
-            )
-            if global_step == 1:
-                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_backward", extra={"optimizer_step": optimizer_step}, main_process_only=False)
-            if accelerator.sync_gradients:
-                optimizer.step()
-                if global_step == 1:
-                    _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step}, main_process_only=False)
         else:
             loss.backward()
-            _append_memory_event(
-                artifact_path=memory_log_path,
-                accelerator=accelerator,
-                device=device,
-                phase="after_pixart_backward",
-                torch_module=torch,
-                epoch=epoch,
-                global_step=global_step,
-                optimizer_step=optimizer_step,
-            )
-            if global_step == 1:
-                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_backward", extra={"optimizer_step": optimizer_step}, main_process_only=False)
+        grad_diagnostics = _record_gradient_diagnostics(module=accelerator.unwrap_model(transformer) if accelerator is not None else transformer, accelerator=accelerator, device=device, memory_log_path=memory_log_path, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, torch_module=torch)
+        if not grad_diagnostics["all_gradients_finite"]:
+            raise RuntimeError(f"Detected non-finite gradients during Stage 2 training at optimizer step {optimizer_step}: {grad_diagnostics['non_finite_gradient_parameter_names_sample']}")
+        _append_memory_event(
+            artifact_path=memory_log_path,
+            accelerator=accelerator,
+            device=device,
+            phase="after_pixart_backward",
+            torch_module=torch,
+            epoch=epoch,
+            global_step=global_step,
+            optimizer_step=optimizer_step,
+            extra={"grad_global_norm": grad_diagnostics["grad_global_norm"], "all_gradients_finite": grad_diagnostics["all_gradients_finite"]},
+        )
+        if global_step == 1:
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_backward", extra={"optimizer_step": optimizer_step, "grad_global_norm": grad_diagnostics["grad_global_norm"]}, main_process_only=False)
+        if accelerator is None or accelerator.sync_gradients:
             optimizer.step()
             if global_step == 1:
-                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step}, main_process_only=False)
+                _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step, "grad_global_norm": grad_diagnostics["grad_global_norm"]}, main_process_only=False)
         _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="after_pixart_step", torch_module=torch, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra={"pixel_values_shape": list(batch['pixel_values'].shape), "latents_shape": list(latents.shape), "timesteps_shape": list(timesteps.shape), "prompt_embeds_shape": list(prompt_embeds.shape), "prompt_attention_mask_shape": list(prompt_attention_mask.shape)})
         return loss.detach()
 
@@ -1908,9 +1902,10 @@ def _run_real_flux_train_step(
         prediction = model_output.sample if hasattr(model_output, "sample") else model_output[0]
         del model_output, prompt_embeds, pooled_prompt_embeds, text_ids
         loss = torch.nn.functional.mse_loss(prediction.float(), target.float())
+        loss_value = _raise_on_non_finite_scalar(value=loss, name="loss", accelerator=accelerator, device=device, memory_log_path=memory_log_path, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, torch_module=torch, extra={"backbone_family": "flux"})
         del prediction, target, noisy_latents, noise, packed_latents, latent_image_ids, timesteps, sigmas, guidance
         if global_step == 1:
-            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_forward", extra={"optimizer_step": optimizer_step, "loss": float(loss.detach().float().cpu().item())}, main_process_only=False)
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_forward", extra={"optimizer_step": optimizer_step, "loss": loss_value}, main_process_only=False)
         _append_memory_event(
             artifact_path=memory_log_path,
             accelerator=accelerator,
@@ -1920,7 +1915,7 @@ def _run_real_flux_train_step(
             epoch=epoch,
             global_step=global_step,
             optimizer_step=optimizer_step,
-            extra={"loss": float(loss.detach().float().cpu().item())},
+            extra={"loss": loss_value},
         )
 
         optimizer.zero_grad(set_to_none=True)
@@ -1938,8 +1933,11 @@ def _run_real_flux_train_step(
             accelerator.backward(loss)
         else:
             loss.backward()
+        grad_diagnostics = _record_gradient_diagnostics(module=accelerator.unwrap_model(transformer) if accelerator is not None else transformer, accelerator=accelerator, device=device, memory_log_path=memory_log_path, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, torch_module=torch)
+        if not grad_diagnostics["all_gradients_finite"]:
+            raise RuntimeError(f"Detected non-finite gradients during Stage 2 training at optimizer step {optimizer_step}: {grad_diagnostics['non_finite_gradient_parameter_names_sample']}")
         if global_step == 1:
-            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_backward", extra={"optimizer_step": optimizer_step}, main_process_only=False)
+            _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_backward", extra={"optimizer_step": optimizer_step, "grad_global_norm": grad_diagnostics["grad_global_norm"]}, main_process_only=False)
         _append_memory_event(
             artifact_path=memory_log_path,
             accelerator=accelerator,
@@ -1955,6 +1953,73 @@ def _run_real_flux_train_step(
             _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step}, main_process_only=False)
     return loss.detach()
 
+
+
+def _classify_training_failure(exc: Exception) -> str:
+    message = str(exc).lower()
+    if "non-finite" in message or "nan" in message or "inf" in message:
+        return "non_finite_values"
+    if "out of memory" in message:
+        return "out_of_memory"
+    return "runtime_error"
+
+
+def _raise_on_non_finite_scalar(*, value: Any, name: str, accelerator: Any | None, device: Any, memory_log_path: Path | None, epoch: int, global_step: int, optimizer_step: int, torch_module: Any, extra: dict[str, Any] | None = None) -> float:
+    scalar = float(value.detach().float().cpu().item()) if hasattr(value, "detach") else float(value)
+    if math.isfinite(scalar):
+        return scalar
+    payload = {"name": name, "value": scalar, **(extra or {})}
+    if memory_log_path is not None:
+        _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase=f"non_finite_{name}", torch_module=torch_module, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra=payload)
+    _emit_stage2_console_event(accelerator=accelerator, device=device, phase=f"non_finite_{name}", extra=payload, main_process_only=False)
+    raise RuntimeError(f"Detected non-finite {name} during Stage 2 training: {scalar}")
+
+
+def _collect_gradient_diagnostics(module: Any) -> dict[str, Any]:
+    import torch
+
+    grad_norm_sq = 0.0
+    grad_parameter_count = 0
+    grad_value_count = 0
+    non_finite_gradient_parameter_names: list[str] = []
+    sample_gradients: list[dict[str, Any]] = []
+    for name, parameter in module.named_parameters():
+        if not parameter.requires_grad or parameter.grad is None:
+            continue
+        grad = parameter.grad.detach()
+        grad_parameter_count += 1
+        grad_value_count += int(grad.numel())
+        finite_mask = torch.isfinite(grad)
+        if not bool(finite_mask.all().item()):
+            non_finite_gradient_parameter_names.append(name)
+        grad_norm_sq += float(torch.sum(torch.square(grad.float())).detach().cpu().item())
+        if len(sample_gradients) < 8:
+            sample_gradients.append({
+                "name": name,
+                "shape": list(parameter.shape),
+                "grad_norm": float(torch.linalg.vector_norm(grad.float()).detach().cpu().item()),
+                "grad_abs_max": float(grad.detach().abs().max().float().cpu().item()),
+                "grad_is_finite": bool(finite_mask.all().item()),
+            })
+    return {
+        "has_gradients": grad_parameter_count > 0,
+        "grad_parameter_count": grad_parameter_count,
+        "grad_value_count": grad_value_count,
+        "grad_global_norm": math.sqrt(max(grad_norm_sq, 0.0)),
+        "all_gradients_finite": not non_finite_gradient_parameter_names,
+        "non_finite_gradient_parameter_count": len(non_finite_gradient_parameter_names),
+        "non_finite_gradient_parameter_names_sample": non_finite_gradient_parameter_names[:20],
+        "gradient_sample": sample_gradients,
+    }
+
+
+def _record_gradient_diagnostics(*, module: Any, accelerator: Any | None, device: Any, memory_log_path: Path | None, epoch: int, global_step: int, optimizer_step: int, torch_module: Any, force_console: bool = False) -> dict[str, Any]:
+    diagnostics = _collect_gradient_diagnostics(module)
+    if memory_log_path is not None:
+        _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="gradient_diagnostics", torch_module=torch_module, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra=diagnostics)
+    if force_console or optimizer_step <= 3:
+        _emit_stage2_console_event(accelerator=accelerator, device=device, phase="gradient_diagnostics", extra={"optimizer_step": optimizer_step, **diagnostics}, main_process_only=False)
+    return diagnostics
 
 
 def _sample_flux_flow_matching_timesteps(*, batch_size: int, device: Any, dtype: Any) -> tuple[Any, Any]:

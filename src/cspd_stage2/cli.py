@@ -206,9 +206,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable the default memory-saving policy that keeps frozen VAE/text components on CPU until their encode step",
     )
     train_parser.add_argument(
-        "--disable-offload-frozen-modules-after-step",
+        "--offload-frozen-modules-after-step",
+        dest="offload_frozen_modules_after_step",
         action="store_true",
-        help="Disable the default policy that offloads frozen VAE/text components back to CPU after their no-grad encode step",
+        default=None,
+        help="Opt into per-step offload of frozen VAE/text components back to CPU after their no-grad encode step (disabled by default for better single-GPU throughput)",
+    )
+    train_parser.add_argument(
+        "--disable-offload-frozen-modules-after-step",
+        dest="offload_frozen_modules_after_step",
+        action="store_false",
+        help="Disable per-step offload of frozen VAE/text components back to CPU after their no-grad encode step",
     )
     train_parser.add_argument(
         "--inspect-limit",
@@ -438,7 +446,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         dataloader_drop_last=args.dataloader_drop_last,
         enable_gradient_checkpointing=not args.disable_gradient_checkpointing,
         keep_frozen_modules_on_cpu_until_needed=not args.disable_keep_frozen_modules_on_cpu_until_needed,
-        offload_frozen_modules_after_step=not args.disable_offload_frozen_modules_after_step,
+        offload_frozen_modules_after_step=bool(args.offload_frozen_modules_after_step) if args.offload_frozen_modules_after_step is not None else False,
     )
     config.adapter_plan.target_module_patterns = (
         config.adapter_plan.target_module_patterns or resolve_effective_module_selection(config)["effective_include_patterns"]
