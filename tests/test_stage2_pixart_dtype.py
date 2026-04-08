@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import torch
 
+from cspd_stage2.backbone import LoRALinearAdapter
 from cspd_stage2.training import (
     Stage2TrainConfig,
     _prepare_pixart_forward_inputs,
+    _resolve_lora_master_weight_dtype,
     _resolve_pixart_partial_full_update_fp32_exclude_patterns,
     _upcast_trainable_parameters_,
 )
@@ -106,3 +108,36 @@ def test_resolve_pixart_partial_full_update_fp32_exclude_patterns() -> None:
     )
 
     assert _resolve_pixart_partial_full_update_fp32_exclude_patterns(config=config) == ["adaln_single.*"]
+
+
+def test_resolve_pixart_lora_master_weight_dtype_defaults_to_fp32() -> None:
+    config = Stage2TrainConfig(
+        dataset_root="/tmp/dataset",
+        render_input="/tmp/render.jsonl",
+        output_dir="/tmp/output",
+        backbone_name="PixArt-alpha/PixArt-Sigma-XL-2-512-MS",
+        training_parameterization="lora",
+        trainable_component_groups=["full_transformer"],
+        lora_fp32_for_pixart=True,
+    )
+
+    assert _resolve_lora_master_weight_dtype(config=config) == "float32"
+
+
+def test_lora_linear_adapter_supports_fp32_master_weights_over_fp16_base() -> None:
+    base = torch.nn.Linear(8, 4, bias=False, dtype=torch.float16)
+    adapter = LoRALinearAdapter(base, rank=2, alpha=2.0, dropout=0.0, adapter_dtype="float32")
+    inputs = torch.randn(3, 8, dtype=torch.float16)
+
+    outputs = adapter(inputs)
+
+    assert adapter.base_layer.weight.dtype == torch.float16
+    assert adapter.lora_A.weight.dtype == torch.float32
+    assert adapter.lora_B.weight.dtype == torch.float32
+    assert outputs.dtype == torch.float16
+    loss = outputs.float().sum()
+    loss.backward()
+    assert adapter.lora_A.weight.grad is not None
+    assert adapter.lora_B.weight.grad is not None
+    assert adapter.lora_A.weight.grad.dtype == torch.float32
+    assert adapter.lora_B.weight.grad.dtype == torch.float32

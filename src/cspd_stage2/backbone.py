@@ -194,7 +194,7 @@ if importlib.util.find_spec("torch") is not None:
     import torch
 
     class LoRALinearAdapter(torch.nn.Module):
-        def __init__(self, base_layer: Any, *, rank: int, alpha: float, dropout: float) -> None:
+        def __init__(self, base_layer: Any, *, rank: int, alpha: float, dropout: float, adapter_dtype: Any | None = None) -> None:
             super().__init__()
             if rank <= 0:
                 raise ValueError("Adapter rank must be positive")
@@ -209,7 +209,23 @@ if importlib.util.find_spec("torch") is not None:
 
             target_weight = base_layer.weight
             target_device = target_weight.device
-            target_dtype = target_weight.dtype
+            target_dtype = adapter_dtype or target_weight.dtype
+            if isinstance(target_dtype, str):
+                normalized_dtype = target_dtype.strip().lower()
+                dtype_map = {
+                    "float16": torch.float16,
+                    "fp16": torch.float16,
+                    "half": torch.float16,
+                    "bfloat16": torch.bfloat16,
+                    "bf16": torch.bfloat16,
+                    "float32": torch.float32,
+                    "fp32": torch.float32,
+                }
+                if normalized_dtype not in dtype_map:
+                    raise ValueError(f"Unsupported LoRA adapter dtype label: {adapter_dtype}")
+                target_dtype = dtype_map[normalized_dtype]
+            self.adapter_dtype = target_dtype
+            self.base_dtype = target_weight.dtype
             self.lora_A = torch.nn.Linear(base_layer.in_features, rank, bias=False, device=target_device, dtype=target_dtype)
             self.lora_B = torch.nn.Linear(rank, base_layer.out_features, bias=False, device=target_device, dtype=target_dtype)
             torch.nn.init.kaiming_uniform_(self.lora_A.weight, a=5**0.5)
@@ -428,6 +444,7 @@ def inject_lora_adapters(
     rank: int = 16,
     alpha: float = 16.0,
     dropout: float = 0.0,
+    adapter_dtype: Any | None = None,
 ) -> AdapterInjectionResult:
     """Inject lightweight LoRA adapters into matching real torch submodules."""
 
@@ -468,7 +485,7 @@ def inject_lora_adapters(
             continue
 
         base_parameter_count = sum(parameter.numel() for parameter in target_module.parameters())
-        adapted = LoRALinearAdapter(target_module, rank=rank, alpha=alpha, dropout=dropout)
+        adapted = LoRALinearAdapter(target_module, rank=rank, alpha=alpha, dropout=dropout, adapter_dtype=adapter_dtype)
         setattr(parent_module, child_name, adapted)
         adapter_parameter_count = sum(parameter.numel() for name, parameter in adapted.named_parameters() if ".lora_" in name or name.startswith("lora_"))
         total_adapter_parameter_count += int(adapter_parameter_count)

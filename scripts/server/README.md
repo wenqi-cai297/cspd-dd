@@ -265,30 +265,7 @@ accelerate launch --num_processes 2 \
 
 If you want to pin a custom run directory, `--output-dir ...` still overrides the default.
 
-For PixArt-Σ, the recommended next rerun path is full transformer training rather than LoRA. The full PixArt path now upcasts trainable transformer weights to FP32 before optimizer setup, aligns forward inputs to the actual entry-module dtypes instead of blindly casting everything to the first trainable dtype, and performs an immediate post-step trainable-parameter finiteness check, specifically to catch the observed "first optimizer step succeeded, next forward is NaN" failure mode earlier.
-
-```bash
-accelerate launch --num_processes 1 \
-  -m cspd_stage2.cli train \
-  --dataset-root /path/to/dataset_root \
-  --render-input /path/to/stage1_render_records.jsonl \
-  --backbone-name PixArt-alpha/PixArt-Sigma-XL-2-512-MS \
-  --resolution 512 \
-  --backbone-torch-dtype float16 \
-  --training-parameterization full \
-  --trainable-component-group full_transformer \
-  --batch-size 1 \
-  --gradient-accumulation-steps 4 \
-  --learning-rate 2e-5 \
-  --lr-scheduler constant_with_warmup \
-  --lr-warmup-steps 1000 \
-  --max-grad-norm 0.01 \
-  --adam-weight-decay 0.0 \
-  --pixart-sigma-prompt-dropout-prob 0.1 \
-  --epochs 1
-```
-
-For the memory-reduced conditioning-focused path, keep the same CLI and swap the component group. For PixArt-Σ, this full-parameter `conditioning_transformer` command is now the recommended 2-GPU server fallback when `full_transformer` does not fit:
+For PixArt-Σ, the recommended rerun path is now the dual-GPU full-transformer LoRA command again. The key fix is that PixArt LoRA adapter weights now default to FP32 master/update dtype before optimizer setup, while the frozen base transformer stays on its original runtime dtype. That keeps the successful forward/backward path intact but stops the first AdamW step from updating LoRA weights in float16. Stage 2 still performs an immediate post-step trainable-parameter finiteness check, specifically to catch the observed "first optimizer step succeeded, next forward is NaN" failure mode earlier.
 
 ```bash
 accelerate launch --num_processes 2 \
@@ -298,8 +275,10 @@ accelerate launch --num_processes 2 \
   --backbone-name PixArt-alpha/PixArt-Sigma-XL-2-512-MS \
   --resolution 512 \
   --backbone-torch-dtype float16 \
-  --training-parameterization full \
-  --trainable-component-group conditioning_transformer \
+  --training-parameterization lora \
+  --trainable-component-group full_transformer \
+  --adapter-rank 16 \
+  --adapter-alpha 16 \
   --batch-size 1 \
   --gradient-accumulation-steps 4 \
   --learning-rate 2e-5 \
@@ -311,7 +290,7 @@ accelerate launch --num_processes 2 \
   --epochs 1
 ```
 
-`conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also compose narrower groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`. On PixArt, this path now works with the safer FP32 partial-full-update strategy because frozen entry modules such as `pos_embed` keep their native half-precision boundary, the boundary-sensitive `adaln_single` timestep block also stays at that native dtype, and the remaining selected conditioning modules can still be upcasted to FP32.
+If you need a narrower fallback, keep the same CLI and swap the component group to `conditioning_transformer`. `conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also compose narrower groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`. If you explicitly want the older all-float16 PixArt LoRA adapter path for comparison only, add `--disable-lora-fp32-for-pixart`. The full-parameter PixArt path still keeps the safer boundary-aware FP32 update strategy for targeted real-parameter experiments.
 
 Important scope note:
 - the pairing/manifest/run scaffold is implemented now

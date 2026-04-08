@@ -133,6 +133,7 @@ class AdapterPlan:
     target_module_patterns: list[str] = field(default_factory=list)
     exclude_module_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE_PATTERNS))
     bias: str = "none"
+    master_weight_dtype: str | None = None
     task_note: str = "placeholder adapter config until a concrete backbone-specific training stack is integrated"
 
 
@@ -195,6 +196,7 @@ class Stage2TrainConfig:
     dataloader_drop_last: bool = False
     enable_gradient_checkpointing: bool = True
     full_update_fp32_for_pixart: bool = True
+    lora_fp32_for_pixart: bool = True
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
@@ -340,6 +342,16 @@ def _should_force_full_update_fp32(*, config: Stage2TrainConfig) -> bool:
     family = infer_backbone_family(config.backbone_name)
     parameterization = str(getattr(config, "training_parameterization", "full")).strip().lower()
     return bool(config.full_update_fp32_for_pixart and parameterization == "full" and family in {"pixart", "pixart_sigma"})
+
+
+def _resolve_lora_master_weight_dtype(*, config: Stage2TrainConfig) -> str | None:
+    family = infer_backbone_family(config.backbone_name)
+    parameterization = str(getattr(config, "training_parameterization", "full")).strip().lower()
+    if parameterization != "lora":
+        return None
+    if family in {"pixart", "pixart_sigma"} and bool(getattr(config, "lora_fp32_for_pixart", True)):
+        return "float32"
+    return None
 
 
 def _upcast_trainable_parameters_(module: Any, *, dtype: Any, exclude_patterns: list[str] | None = None) -> dict[str, Any]:
@@ -2275,6 +2287,7 @@ def _freeze_stage2_modules(pipeline: Any, config: Stage2TrainConfig) -> dict[str
             raise ValueError("LoRA training_parameterization currently requires adapter_plan.adapter_type='lora'")
         adapter_plan = config.adapter_plan
         target_patterns = adapter_plan.target_module_patterns or selection["effective_include_patterns"]
+        adapter_master_weight_dtype = adapter_plan.master_weight_dtype or _resolve_lora_master_weight_dtype(config=config)
         adapter_injection = inject_lora_adapters(
             transformer,
             include_patterns=target_patterns,
@@ -2282,6 +2295,7 @@ def _freeze_stage2_modules(pipeline: Any, config: Stage2TrainConfig) -> dict[str
             rank=adapter_plan.rank,
             alpha=adapter_plan.alpha,
             dropout=adapter_plan.dropout,
+            adapter_dtype=adapter_master_weight_dtype,
         )
         targeting = inspect_target_modules(
             transformer,
@@ -2627,6 +2641,7 @@ def _build_backbone_runtime_summary(config: Stage2TrainConfig) -> dict[str, Any]
                 rank=adapter_plan.rank,
                 alpha=adapter_plan.alpha,
                 dropout=adapter_plan.dropout,
+                adapter_dtype=adapter_plan.master_weight_dtype,
             )
             summary["adapter_injection_applied"] = True
             summary["adapter_injection"] = injection.to_dict()
@@ -2756,6 +2771,7 @@ def inspect_stage2_backbone_targets(
             rank=active_plan.rank,
             alpha=active_plan.alpha,
             dropout=active_plan.dropout,
+            adapter_dtype=active_plan.master_weight_dtype,
         )
         summary["inject_adapters"] = True
         summary["adapter_plan"] = asdict(active_plan)

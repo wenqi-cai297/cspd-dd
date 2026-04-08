@@ -214,6 +214,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable the default safer FP32 full-update path for PixArt full-parameter training",
     )
     train_parser.add_argument(
+        "--disable-lora-fp32-for-pixart",
+        action="store_true",
+        help="Disable the default safer FP32 LoRA adapter-weight path for PixArt LoRA training",
+    )
+    train_parser.add_argument(
         "--inspect-limit",
         type=int,
         default=200,
@@ -427,6 +432,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
             alpha=args.adapter_alpha,
             dropout=args.adapter_dropout,
             bias=args.adapter_bias,
+            master_weight_dtype=(None if args.disable_lora_fp32_for_pixart else "float32") if args.training_parameterization == "lora" and "pixart" in args.backbone_name.lower() else None,
             target_module_patterns=args.module_include_patterns or [],
             exclude_module_patterns=args.module_exclude_patterns or [
                 "vae",
@@ -449,6 +455,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         dataloader_drop_last=args.dataloader_drop_last,
         enable_gradient_checkpointing=not args.disable_gradient_checkpointing,
         full_update_fp32_for_pixart=not args.disable_full_update_fp32_for_pixart,
+        lora_fp32_for_pixart=not args.disable_lora_fp32_for_pixart,
     )
     config.adapter_plan.target_module_patterns = (
         config.adapter_plan.target_module_patterns or resolve_effective_module_selection(config)["effective_include_patterns"]
