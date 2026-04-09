@@ -129,6 +129,14 @@ def derive_stage2_output_dir(dataset_root: str | os.PathLike[str], backbone_name
     return str(Path("runs") / "stage2" / "train" / dataset_label / backbone_slug / resolved_timestamp)
 
 
+def derive_stage2_baseline_sample_output_dir(dataset_root: str | os.PathLike[str], backbone_name: str, *, timestamp: str | None = None) -> str:
+    """Return the default run directory for standalone baseline sampling outputs."""
+    resolved_timestamp = timestamp or datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    dataset_label = derive_stage2_dataset_label(dataset_root)
+    backbone_slug = sanitize_stage2_backbone_slug(backbone_name)
+    return str(Path("runs") / "stage2" / "baseline_samples" / dataset_label / backbone_slug / resolved_timestamp)
+
+
 @dataclass(slots=True)
 class AdapterPlan:
     adapter_type: str = "lora"
@@ -163,8 +171,8 @@ class Stage2TrainConfig:
     sample_prompt_file: str | None = None
     sample_prompts: list[str] = field(default_factory=list)
     sample_num_prompts: int = 4
-    sample_num_inference_steps: int = 20
-    sample_guidance_scale: float = 4.5
+    sample_num_inference_steps: int = 50
+    sample_guidance_scale: float = 7.0
     sample_seed: int = 42
     batch_size: int = 4
     learning_rate: float = 2e-5
@@ -459,6 +467,121 @@ def _run_pixart_wandb_sampling(*, pipeline: Any, transformer: Any, accelerator: 
             resolved_transformer.train(training_mode)
     result["saved_images"] = [str(path.resolve()) for path in image_paths]
     return result
+
+
+def run_stage2_pixart_baseline_sampling(
+    *,
+    dataset_root: str,
+    backbone_name: str,
+    output_dir: str | None = None,
+    sample_prompt_file: str | None = None,
+    sample_prompts: list[str] | None = None,
+    sample_num_prompts: int = 4,
+    sample_num_inference_steps: int = 50,
+    sample_guidance_scale: float = 7.0,
+    sample_seed: int = 42,
+    resolution: int = 512,
+    backbone_torch_dtype: str = "float16",
+    backbone_device: str | None = None,
+    backbone_device_map: str | None = None,
+    backbone_local_files_only: bool = False,
+) -> dict[str, Any]:
+    """Run standalone PixArt baseline sampling outside the training loop."""
+    family = infer_backbone_family(backbone_name)
+    if family not in {"pixart", "pixart_sigma"}:
+        raise ValueError(f"Standalone baseline sampling currently supports PixArt backbones only, got: {backbone_name}")
+
+    config = Stage2TrainConfig(
+        dataset_root=dataset_root,
+        render_input="baseline_sampling",
+        output_dir=output_dir or derive_stage2_baseline_sample_output_dir(dataset_root, backbone_name),
+        backbone_name=backbone_name,
+        sample_prompt_file=sample_prompt_file,
+        sample_prompts=list(sample_prompts or []),
+        sample_num_prompts=sample_num_prompts,
+        sample_num_inference_steps=sample_num_inference_steps,
+        sample_guidance_scale=sample_guidance_scale,
+        sample_seed=sample_seed,
+        resolution=resolution,
+        backbone_torch_dtype=backbone_torch_dtype,
+        backbone_device=backbone_device,
+        backbone_device_map=backbone_device_map,
+        backbone_local_files_only=backbone_local_files_only,
+    )
+    run_dir = Path(config.output_dir or derive_stage2_baseline_sample_output_dir(dataset_root, backbone_name))
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    prompts = _resolve_sample_prompts(config=config, pairs=[])
+    if not prompts:
+        raise ValueError("No baseline sampling prompts resolved. Provide --sample-prompt-file or --sample-prompt.")
+
+    backbone = load_real_backbone_module(
+        backbone_name,
+        torch_dtype=backbone_torch_dtype,
+        device=backbone_device,
+        device_map=backbone_device_map,
+        local_files_only=backbone_local_files_only,
+        component=None,
+        allow_unimplemented=False,
+    )
+    pipeline = backbone.root_module
+    if pipeline is None:
+        raise RuntimeError("Real PixArt backbone load did not return a pipeline root module")
+    transformer = getattr(pipeline, "transformer", None)
+    if transformer is None:
+        raise RuntimeError("Loaded PixArt pipeline does not expose a transformer component")
+
+    import torch
+
+    if backbone_device is not None:
+        pipeline.to(backbone_device)
+        runtime_device = torch.device(backbone_device)
+    else:
+        runtime_device = next(transformer.parameters()).device
+        if runtime_device.type == "cpu" and getattr(pipeline, "_execution_device", None) is not None:
+            execution_device = getattr(pipeline, "_execution_device")
+            runtime_device = execution_device if isinstance(execution_device, torch.device) else torch.device(str(execution_device))
+
+    sample_event = _run_pixart_wandb_sampling(
+        pipeline=pipeline,
+        transformer=transformer,
+        accelerator=None,
+        config=config,
+        run_dir=run_dir,
+        epoch=0,
+        optimizer_step=0,
+        prompts=prompts,
+        device=runtime_device,
+        train_dtype=getattr(torch, backbone_torch_dtype, torch.float16),
+        wandb_run=None,
+    )
+
+    summary = {
+        "status": sample_event.get("status", "unknown"),
+        "mode": "standalone_pixart_baseline_sampling",
+        "dataset_root": str(Path(dataset_root).expanduser().resolve()),
+        "output_dir": str(run_dir.resolve()),
+        "backbone_name": backbone_name,
+        "backbone_family": family,
+        "loader": backbone.loader_name,
+        "loader_status": backbone.implementation_status,
+        "resolved_module_name": backbone.resolved_module_name,
+        "resolved_module_type": backbone.resolved_module_type,
+        "sample_prompt_file": str(Path(sample_prompt_file).expanduser().resolve()) if sample_prompt_file else None,
+        "sample_prompts": prompts,
+        "sample_num_prompts": len(prompts),
+        "sample_num_inference_steps": sample_num_inference_steps,
+        "sample_guidance_scale": sample_guidance_scale,
+        "sample_seed": sample_seed,
+        "resolution": resolution,
+        "backbone_torch_dtype": backbone_torch_dtype,
+        "backbone_device": backbone_device,
+        "backbone_device_map": backbone_device_map,
+        "backbone_local_files_only": backbone_local_files_only,
+        "sample_event": sample_event,
+    }
+    (run_dir / "baseline_sampling_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return summary
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:

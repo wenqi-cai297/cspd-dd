@@ -12,9 +12,11 @@ from cspd_stage2.training import (
     AdapterPlan,
     CONDITIONING_RELATED_GROUP_PATTERNS,
     Stage2TrainConfig,
+    derive_stage2_baseline_sample_output_dir,
     derive_stage2_output_dir,
     inspect_stage2_backbone_targets,
     resolve_effective_module_selection,
+    run_stage2_pixart_baseline_sampling,
     run_stage2_training,
 )
 
@@ -231,8 +233,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--sample-prompt-file", default=None, help="Optional text/json/jsonl file of sample prompts for PixArt periodic inference")
     train_parser.add_argument("--sample-prompt", action="append", dest="sample_prompts", default=None, help="Inline sample prompt; may be repeated")
     train_parser.add_argument("--sample-num-prompts", type=int, default=4, help="Maximum number of sample prompts to use per PixArt sampling event")
-    train_parser.add_argument("--sample-num-inference-steps", type=int, default=20, help="Number of inference steps for PixArt sample generation")
-    train_parser.add_argument("--sample-guidance-scale", type=float, default=4.5, help="Guidance scale for PixArt sample generation")
+    train_parser.add_argument("--sample-num-inference-steps", type=int, default=50, help="Number of inference steps for PixArt sample generation")
+    train_parser.add_argument("--sample-guidance-scale", type=float, default=7.0, help="Guidance scale for PixArt sample generation")
     train_parser.add_argument("--sample-seed", type=int, default=42, help="Base RNG seed for PixArt sample generation")
     train_parser.add_argument(
         "--inspect-limit",
@@ -321,6 +323,32 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--adapter-alpha", type=float, default=16.0, help="Adapter alpha for optional injection")
     inspect_parser.add_argument("--adapter-dropout", type=float, default=0.0, help="Adapter dropout for optional injection")
     inspect_parser.add_argument("--adapter-bias", default="none", help="Adapter bias label for metadata")
+
+    baseline_parser = subparsers.add_parser(
+        "sample-baseline",
+        help="Run standalone pretrained PixArt baseline sampling outside the training loop",
+    )
+    baseline_parser.add_argument("--dataset-root", required=True, help="Dataset root used only to derive the default baseline run directory label")
+    baseline_parser.add_argument("--backbone-name", default="PixArt-alpha/PixArt-Sigma-XL-2-512-MS", help="PixArt backbone identifier to sample from")
+    baseline_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            "Optional output directory for standalone baseline samples. Defaults to "
+            "runs/stage2/baseline_samples/<dataset_label>/<backbone_slug>/<timestamp>."
+        ),
+    )
+    baseline_parser.add_argument("--sample-prompt-file", default=None, help="Text/json/jsonl prompt file used for standalone baseline sampling")
+    baseline_parser.add_argument("--sample-prompt", action="append", dest="sample_prompts", default=None, help="Inline prompt; may be repeated")
+    baseline_parser.add_argument("--sample-num-prompts", type=int, default=4, help="Maximum number of prompts to sample in one standalone run")
+    baseline_parser.add_argument("--sample-num-inference-steps", type=int, default=50, help="Number of inference steps for standalone PixArt baseline sampling")
+    baseline_parser.add_argument("--sample-guidance-scale", type=float, default=7.0, help="Guidance scale for standalone PixArt baseline sampling")
+    baseline_parser.add_argument("--sample-seed", type=int, default=42, help="Base RNG seed for standalone PixArt baseline sampling")
+    baseline_parser.add_argument("--resolution", type=int, default=512, help="Output image resolution")
+    baseline_parser.add_argument("--backbone-torch-dtype", default="float16", help="Torch dtype label used when loading the pretrained PixArt backbone")
+    baseline_parser.add_argument("--backbone-device", default=None, help="Optional device passed to pipeline.to(...) after load, e.g. cuda")
+    baseline_parser.add_argument("--backbone-device-map", default=None, help="Optional device_map forwarded to diffusers from_pretrained")
+    baseline_parser.add_argument("--backbone-local-files-only", action="store_true", help="Require the backbone load to use only the local Hugging Face cache")
 
     dump_parser = subparsers.add_parser(
         "dump-modules",
@@ -713,6 +741,26 @@ def main() -> None:
             device_map=args.device_map,
             local_files_only=args.local_files_only,
             component=args.component,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "sample-baseline":
+        summary = run_stage2_pixart_baseline_sampling(
+            dataset_root=args.dataset_root,
+            backbone_name=args.backbone_name,
+            output_dir=args.output_dir or derive_stage2_baseline_sample_output_dir(args.dataset_root, args.backbone_name),
+            sample_prompt_file=args.sample_prompt_file,
+            sample_prompts=args.sample_prompts or [],
+            sample_num_prompts=args.sample_num_prompts,
+            sample_num_inference_steps=args.sample_num_inference_steps,
+            sample_guidance_scale=args.sample_guidance_scale,
+            sample_seed=args.sample_seed,
+            resolution=args.resolution,
+            backbone_torch_dtype=args.backbone_torch_dtype,
+            backbone_device=args.backbone_device,
+            backbone_device_map=args.backbone_device_map,
+            backbone_local_files_only=args.backbone_local_files_only,
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
