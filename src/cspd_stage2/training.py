@@ -25,6 +25,11 @@ import math
 import re
 from contextlib import nullcontext
 
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover - optional runtime dependency
+    tqdm = None
+
 from cspd_stage1.io_utils import write_json
 from cspd_stage2.backbone import (
     apply_trainable_parameter_selection,
@@ -939,6 +944,62 @@ def _append_jsonl_event(artifact_path: Path, payload: dict[str, Any]) -> dict[st
     return safe_payload
 
 
+QUIET_STAGE2_CONSOLE_PHASES = {
+    "training_start",
+    "after_backbone_load",
+    "after_frozen_component_device_setup",
+    "after_gradient_checkpointing_setup",
+    "after_dataloader_setup",
+    "after_accelerate_prepare_dataloader",
+    "after_checkpoint_dir_ready",
+    "after_lr_scheduler_setup",
+    "epoch_start",
+    "optimizer_step_complete",
+    "before_checkpoint_save",
+    "after_checkpoint_save",
+    "before_final_checkpoint_save",
+    "after_final_checkpoint_save",
+    "training_loop_complete",
+}
+
+
+def _should_emit_stage2_console_phase(phase: str) -> bool:
+    lowered = str(phase).strip().lower()
+    if lowered.startswith("non_finite_"):
+        return True
+    if "failed" in lowered or "error" in lowered or "exception" in lowered:
+        return True
+    return phase in QUIET_STAGE2_CONSOLE_PHASES
+
+
+def _summarize_console_extra(phase: str, extra: dict[str, Any] | None) -> str:
+    if not extra:
+        return ""
+    safe_extra = _safe_jsonable(extra)
+    if phase == "epoch_start":
+        epoch = safe_extra.get("epoch") or safe_extra.get("epoch_index")
+        planned_epochs = safe_extra.get("planned_epochs")
+        parts = []
+        if epoch is not None:
+            parts.append(f"epoch={epoch}")
+        if planned_epochs is not None:
+            parts.append(f"planned_epochs={planned_epochs}")
+        return ", ".join(parts)
+    if phase == "optimizer_step_complete":
+        selected_keys = ["epoch", "optimizer_step", "global_step", "loss"]
+    elif phase in {"before_checkpoint_save", "after_checkpoint_save", "before_final_checkpoint_save", "after_final_checkpoint_save"}:
+        selected_keys = ["epoch", "optimizer_step", "checkpoint_dir"]
+    elif phase in {"training_start", "after_backbone_load", "after_frozen_component_device_setup", "after_gradient_checkpointing_setup", "after_dataloader_setup", "after_accelerate_prepare_dataloader", "after_checkpoint_dir_ready", "after_lr_scheduler_setup", "training_loop_complete"}:
+        selected_keys = ["backbone_name", "num_pairs", "batch_size", "gradient_accumulation_steps", "dataloader_batches_per_epoch", "learning_rate", "loss_count", "checkpoint_dir", "name", "warmup_steps", "epoch", "optimizer_step", "global_step"]
+    else:
+        selected_keys = list(safe_extra.keys())[:4]
+    compact_items = []
+    for key in selected_keys:
+        if key in safe_extra and safe_extra[key] is not None:
+            compact_items.append(f"{key}={safe_extra[key]}")
+    return ", ".join(compact_items[:6])
+
+
 def _emit_stage2_console_event(
     *,
     accelerator: Any | None,
@@ -962,13 +1023,12 @@ def _emit_stage2_console_event(
     }
     if extra:
         payload["extra"] = _safe_jsonable(extra)
+    if not _should_emit_stage2_console_phase(phase):
+        return payload
     message = f"[Stage2][rank {rank_info['global_rank']}/{max(rank_info['world_size'] - 1, 0)}][{rank_info['device']}] {phase}"
-    if extra:
-        compact_items = []
-        for key, value in list(_safe_jsonable(extra).items())[:6]:
-            compact_items.append(f"{key}={value}")
-        if compact_items:
-            message += " | " + ", ".join(compact_items)
+    extra_summary = _summarize_console_extra(phase, extra)
+    if extra_summary:
+        message += " | " + extra_summary
     print(message, flush=True)
     return payload
 
@@ -1670,63 +1730,74 @@ def run_real_stage2_pixart_training(
 
         for epoch in range(max(config.epochs, 1)):
             mark_phase("epoch_start", epoch=epoch + 1, extra={"epoch_index": epoch + 1, "planned_epochs": max(config.epochs, 1)})
-            for batch_index, batch in enumerate(dataloader, start=1):
-                if epoch == 0 and batch_index == 1:
-                    mark_phase("first_batch_fetched", epoch=epoch + 1, global_step_value=global_step + 1, optimizer_step_value=optimizer_step_count + 1, extra={"batch_index": batch_index, "batch_size": len(batch.get("conditioning_text", [])) if isinstance(batch, dict) else None}, main_process_only=False)
+            progress_bar = None
+            dataloader_iterable = dataloader
+            if is_main_process and tqdm is not None and hasattr(dataloader, "__len__"):
+                progress_bar = tqdm(dataloader, desc=f"Stage2 Epoch {epoch + 1}/{max(config.epochs, 1)}", leave=True, dynamic_ncols=True)
+                dataloader_iterable = progress_bar
+            try:
+                for batch_index, batch in enumerate(dataloader_iterable, start=1):
+                    if epoch == 0 and batch_index == 1:
+                        mark_phase("first_batch_fetched", epoch=epoch + 1, global_step_value=global_step + 1, optimizer_step_value=optimizer_step_count + 1, extra={"batch_index": batch_index, "batch_size": len(batch.get("conditioning_text", [])) if isinstance(batch, dict) else None}, main_process_only=False)
+                    if stop_after is not None and optimizer_step_count >= stop_after:
+                        break
+                    step_result = _run_real_pixart_train_step(
+                        pipeline=pipeline,
+                        transformer=transformer,
+                        batch=batch,
+                        optimizer=optimizer,
+                        lr_scheduler=lr_scheduler,
+                        accelerator=accelerator,
+                        device=device,
+                        train_dtype=train_dtype,
+                        memory_log_path=memory_log_path,
+                        epoch=epoch + 1,
+                        global_step=global_step + 1,
+                        optimizer_step=optimizer_step_count + 1,
+                        config=config,
+                    )
+                    loss = step_result["loss"]
+                    global_step += 1
+                    sync_gradients = accelerator.sync_gradients if accelerator is not None else True
+                    if sync_gradients:
+                        optimizer_step_count += 1
+                        loss_value = float(accelerator.gather_for_metrics(loss.detach().reshape(1)).mean().item()) if accelerator is not None else float(loss.detach().cpu().item())
+                        losses.append(loss_value)
+                        if progress_bar is not None:
+                            progress_bar.set_postfix(loss=f"{loss_value:.4f}", opt_step=optimizer_step_count)
+                        step_metrics = dict(step_result.get("step_metrics") or {})
+                        if step_metrics:
+                            _wandb_log(wandb_run, {f"train/{key}": value for key, value in step_metrics.items()}, step=optimizer_step_count)
+                        if is_main_process and config.sample_every > 0 and optimizer_step_count % max(config.sample_every, 1) == 0:
+                            sample_event = _run_pixart_wandb_sampling(
+                                pipeline=pipeline,
+                                transformer=transformer,
+                                accelerator=accelerator,
+                                config=config,
+                                run_dir=run_dir,
+                                epoch=epoch + 1,
+                                optimizer_step=optimizer_step_count,
+                                prompts=sample_prompts,
+                                device=device,
+                                train_dtype=train_dtype,
+                                wandb_run=wandb_run,
+                            )
+                            sample_events.append(sample_event)
+                            _wandb_log(wandb_run, {"samples/last_status": sample_event.get("status"), "samples/last_prompt_count": sample_event.get("prompt_count")}, step=optimizer_step_count)
+                        if optimizer_step_count == 1 or optimizer_step_count % max(config.log_every, 1) == 0:
+                            logs.append({"step": optimizer_step_count, "epoch": epoch + 1, "loss": loss_value})
+                            mark_phase("optimizer_step_complete", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"loss": loss_value}, main_process_only=True)
+                        if is_main_process and optimizer_step_count % max(config.save_every, 1) == 0:
+                            checkpoint_step_dir = checkpoint_dir / f"step_{optimizer_step_count:06d}"
+                            mark_phase("before_checkpoint_save", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"checkpoint_dir": str(checkpoint_step_dir.resolve())})
+                            checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
+                            _save_transformer_checkpoint(checkpoint_model, checkpoint_step_dir)
+                            mark_phase("after_checkpoint_save", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"checkpoint_dir": str(checkpoint_step_dir.resolve())})
                 if stop_after is not None and optimizer_step_count >= stop_after:
                     break
-                step_result = _run_real_pixart_train_step(
-                    pipeline=pipeline,
-                    transformer=transformer,
-                    batch=batch,
-                    optimizer=optimizer,
-                    lr_scheduler=lr_scheduler,
-                    accelerator=accelerator,
-                    device=device,
-                    train_dtype=train_dtype,
-                    memory_log_path=memory_log_path,
-                    epoch=epoch + 1,
-                    global_step=global_step + 1,
-                    optimizer_step=optimizer_step_count + 1,
-                    config=config,
-                )
-                loss = step_result["loss"]
-                global_step += 1
-                sync_gradients = accelerator.sync_gradients if accelerator is not None else True
-                if sync_gradients:
-                    optimizer_step_count += 1
-                    loss_value = float(accelerator.gather_for_metrics(loss.detach().reshape(1)).mean().item()) if accelerator is not None else float(loss.detach().cpu().item())
-                    losses.append(loss_value)
-                    step_metrics = dict(step_result.get("step_metrics") or {})
-                    if step_metrics:
-                        _wandb_log(wandb_run, {f"train/{key}": value for key, value in step_metrics.items()}, step=optimizer_step_count)
-                    if is_main_process and config.sample_every > 0 and optimizer_step_count % max(config.sample_every, 1) == 0:
-                        sample_event = _run_pixart_wandb_sampling(
-                            pipeline=pipeline,
-                            transformer=transformer,
-                            accelerator=accelerator,
-                            config=config,
-                            run_dir=run_dir,
-                            epoch=epoch + 1,
-                            optimizer_step=optimizer_step_count,
-                            prompts=sample_prompts,
-                            device=device,
-                            train_dtype=train_dtype,
-                            wandb_run=wandb_run,
-                        )
-                        sample_events.append(sample_event)
-                        _wandb_log(wandb_run, {"samples/last_status": sample_event.get("status"), "samples/last_prompt_count": sample_event.get("prompt_count")}, step=optimizer_step_count)
-                    if optimizer_step_count == 1 or optimizer_step_count % max(config.log_every, 1) == 0:
-                        logs.append({"step": optimizer_step_count, "epoch": epoch + 1, "loss": loss_value})
-                        mark_phase("optimizer_step_complete", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"loss": loss_value}, main_process_only=True)
-                    if is_main_process and optimizer_step_count % max(config.save_every, 1) == 0:
-                        checkpoint_step_dir = checkpoint_dir / f"step_{optimizer_step_count:06d}"
-                        mark_phase("before_checkpoint_save", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"checkpoint_dir": str(checkpoint_step_dir.resolve())})
-                        checkpoint_model = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
-                        _save_transformer_checkpoint(checkpoint_model, checkpoint_step_dir)
-                        mark_phase("after_checkpoint_save", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"checkpoint_dir": str(checkpoint_step_dir.resolve())})
-            if stop_after is not None and optimizer_step_count >= stop_after:
-                break
+            finally:
+                if progress_bar is not None:
+                    progress_bar.close()
 
         _mark_sync_point(phase="training_complete_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"global_step": global_step, "optimizer_steps": optimizer_step_count}, main_process_only=False)
         if is_main_process:
