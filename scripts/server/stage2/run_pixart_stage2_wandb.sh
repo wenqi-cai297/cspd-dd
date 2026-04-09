@@ -24,7 +24,7 @@ set -euo pipefail
 #   GRADIENT_ACCUMULATION_STEPS=4
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ENV_NAME="${ENV_NAME:-cspd-dd}"
 
 DATASET_ROOT="${DATASET_ROOT:-/media/4T_HDD/cai/datasets/ImageNette/train}"
