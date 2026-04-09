@@ -990,7 +990,7 @@ def _summarize_console_extra(phase: str, extra: dict[str, Any] | None) -> str:
     elif phase in {"before_checkpoint_save", "after_checkpoint_save", "before_final_checkpoint_save", "after_final_checkpoint_save"}:
         selected_keys = ["epoch", "optimizer_step", "checkpoint_dir"]
     elif phase in {"training_start", "after_backbone_load", "after_frozen_component_device_setup", "after_gradient_checkpointing_setup", "after_dataloader_setup", "after_accelerate_prepare_dataloader", "after_checkpoint_dir_ready", "after_lr_scheduler_setup", "training_loop_complete"}:
-        selected_keys = ["backbone_name", "num_pairs", "batch_size", "gradient_accumulation_steps", "dataloader_batches_per_epoch", "learning_rate", "loss_count", "checkpoint_dir", "name", "warmup_steps", "epoch", "optimizer_step", "global_step"]
+        selected_keys = ["backbone_name", "num_pairs", "batch_size", "gradient_accumulation_steps", "dataloader_batches_per_epoch", "learning_rate", "loss_count", "loss_mean", "loss_last", "optimizer_steps", "checkpoint_dir", "name", "warmup_steps", "epoch", "optimizer_step", "global_step"]
     else:
         selected_keys = list(safe_extra.keys())[:4]
     compact_items = []
@@ -1728,7 +1728,10 @@ def run_real_stage2_pixart_training(
         lr_scheduler, lr_scheduler_summary = _build_lr_scheduler(optimizer=optimizer, config=config, total_optimizer_steps=total_optimizer_steps)
         mark_phase("after_lr_scheduler_setup", extra=lr_scheduler_summary)
 
+        epoch_summaries: list[dict[str, Any]] = []
         for epoch in range(max(config.epochs, 1)):
+            epoch_losses: list[float] = []
+            epoch_optimizer_steps_start = optimizer_step_count
             mark_phase("epoch_start", epoch=epoch + 1, extra={"epoch_index": epoch + 1, "planned_epochs": max(config.epochs, 1)})
             progress_bar = None
             dataloader_iterable = dataloader
@@ -1763,6 +1766,7 @@ def run_real_stage2_pixart_training(
                         optimizer_step_count += 1
                         loss_value = float(accelerator.gather_for_metrics(loss.detach().reshape(1)).mean().item()) if accelerator is not None else float(loss.detach().cpu().item())
                         losses.append(loss_value)
+                        epoch_losses.append(loss_value)
                         if progress_bar is not None:
                             progress_bar.set_postfix(loss=f"{loss_value:.4f}", opt_step=optimizer_step_count)
                         step_metrics = dict(step_result.get("step_metrics") or {})
@@ -1798,6 +1802,28 @@ def run_real_stage2_pixart_training(
             finally:
                 if progress_bar is not None:
                     progress_bar.close()
+            epoch_optimizer_steps = optimizer_step_count - epoch_optimizer_steps_start
+            epoch_summary = {
+                "epoch": epoch + 1,
+                "optimizer_steps": epoch_optimizer_steps,
+                "loss_mean": float(sum(epoch_losses) / len(epoch_losses)) if epoch_losses else None,
+                "loss_min": float(min(epoch_losses)) if epoch_losses else None,
+                "loss_max": float(max(epoch_losses)) if epoch_losses else None,
+                "loss_last": float(epoch_losses[-1]) if epoch_losses else None,
+            }
+            epoch_summaries.append(epoch_summary)
+            if is_main_process and epoch_optimizer_steps > 0:
+                epoch_wandb_payload = {
+                    "epoch/index": epoch + 1,
+                    "epoch/optimizer_steps": epoch_optimizer_steps,
+                }
+                if epoch_summary["loss_mean"] is not None:
+                    epoch_wandb_payload["epoch/loss_mean"] = epoch_summary["loss_mean"]
+                    epoch_wandb_payload["epoch/loss_min"] = epoch_summary["loss_min"]
+                    epoch_wandb_payload["epoch/loss_max"] = epoch_summary["loss_max"]
+                    epoch_wandb_payload["epoch/loss_last"] = epoch_summary["loss_last"]
+                _wandb_log(wandb_run, epoch_wandb_payload, step=max(optimizer_step_count, 1))
+                mark_phase("training_loop_complete", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"loss_mean": epoch_summary["loss_mean"], "loss_last": epoch_summary["loss_last"], "optimizer_steps": epoch_optimizer_steps}, main_process_only=True)
 
         _mark_sync_point(phase="training_complete_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"global_step": global_step, "optimizer_steps": optimizer_step_count}, main_process_only=False)
         if is_main_process:
@@ -1843,6 +1869,7 @@ def run_real_stage2_pixart_training(
             "wandb": wandb_state,
             "sample_prompts": sample_prompts,
             "sample_events": sample_events,
+            "epoch_summaries": epoch_summaries,
         }
         if is_main_process:
             _safe_write_json(run_dir / "training_metrics.json", summary)
