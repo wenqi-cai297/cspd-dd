@@ -116,15 +116,14 @@ CMD=(
   --training-parameterization lora
   --batch-size "$BATCH_SIZE"
   --epochs "$EPOCHS"
-  --resolution 1024
+  --resolution 512
   --sdxl-mixed-precision fp16
   --sdxl-lr-scheduler constant
   --sdxl-report-to none
 )
 
-if [[ -n "${STAGE2_NUM_PROCESSES:-}" ]]; then
-  CMD+=(--sdxl-num-processes "$STAGE2_NUM_PROCESSES")
-fi
+STAGE2_NUM_PROCESSES="${STAGE2_NUM_PROCESSES:-2}"
+CMD+=(--sdxl-num-processes "$STAGE2_NUM_PROCESSES")
 
 if [[ -n "${STAGE2_ACCELERATE_EXTRA_ARGS:-}" ]]; then
   # shellcheck disable=SC2206
