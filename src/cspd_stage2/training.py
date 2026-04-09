@@ -1728,6 +1728,24 @@ def run_real_stage2_pixart_training(
         lr_scheduler, lr_scheduler_summary = _build_lr_scheduler(optimizer=optimizer, config=config, total_optimizer_steps=total_optimizer_steps)
         mark_phase("after_lr_scheduler_setup", extra=lr_scheduler_summary)
 
+        if is_main_process and config.sample_every > 0 and sample_prompts:
+            initial_sample_event = _run_pixart_wandb_sampling(
+                pipeline=pipeline,
+                transformer=transformer,
+                accelerator=accelerator,
+                config=config,
+                run_dir=run_dir,
+                epoch=0,
+                optimizer_step=0,
+                prompts=sample_prompts,
+                device=device,
+                train_dtype=train_dtype,
+                wandb_run=wandb_run,
+            )
+            sample_events.append(initial_sample_event)
+            _wandb_log(wandb_run, {"samples/last_status": initial_sample_event.get("status"), "samples/last_prompt_count": initial_sample_event.get("prompt_count")}, step=0)
+            mark_phase("training_loop_complete", epoch=0, global_step_value=0, optimizer_step_value=0, extra={"loss_total": None, "loss_last": None, "optimizer_steps": 0}, main_process_only=True)
+
         epoch_summaries: list[dict[str, Any]] = []
         for epoch in range(max(config.epochs, 1)):
             epoch_losses: list[float] = []
