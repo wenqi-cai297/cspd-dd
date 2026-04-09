@@ -533,6 +533,9 @@ def run_stage2_pixart_baseline_sampling(
 
     import torch
 
+    if backbone_device is None and torch.cuda.is_available():
+        backbone_device = "cuda"
+
     if backbone_device is not None:
         pipeline.to(backbone_device)
         runtime_device = torch.device(backbone_device)

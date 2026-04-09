@@ -346,7 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_parser.add_argument("--sample-seed", type=int, default=42, help="Base RNG seed for standalone PixArt baseline sampling")
     baseline_parser.add_argument("--resolution", type=int, default=512, help="Output image resolution")
     baseline_parser.add_argument("--backbone-torch-dtype", default="float16", help="Torch dtype label used when loading the pretrained PixArt backbone")
-    baseline_parser.add_argument("--backbone-device", default=None, help="Optional device passed to pipeline.to(...) after load, e.g. cuda")
+    baseline_parser.add_argument("--backbone-device", default=None, help="Optional device passed to pipeline.to(...) after load, e.g. cuda. If omitted and CUDA is available, baseline sampling now defaults to cuda.")
     baseline_parser.add_argument("--backbone-device-map", default=None, help="Optional device_map forwarded to diffusers from_pretrained")
     baseline_parser.add_argument("--backbone-local-files-only", action="store_true", help="Require the backbone load to use only the local Hugging Face cache")
 
