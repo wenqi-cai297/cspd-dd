@@ -64,20 +64,38 @@ SAMPLE_SEED="${SAMPLE_SEED:-42}"
 
 EXTRA_ARGS=("$@")
 
+resolve_repo_path() {
+  local raw_path="$1"
+  if [[ -z "$raw_path" ]]; then
+    printf '%s\n' "$raw_path"
+    return
+  fi
+  if [[ "$raw_path" = /* ]]; then
+    printf '%s\n' "$raw_path"
+    return
+  fi
+  printf '%s\n' "$REPO_ROOT/$raw_path"
+}
+
+cd "$REPO_ROOT"
+
+RESOLVED_RENDER_INPUT="$(resolve_repo_path "$RENDER_INPUT")"
+RESOLVED_SAMPLE_PROMPT_FILE="$(resolve_repo_path "$SAMPLE_PROMPT_FILE")"
+
 if [[ ! -d "$DATASET_ROOT" ]]; then
   echo "[ERROR] Dataset root not found: $DATASET_ROOT"
   exit 1
 fi
 
-cd "$REPO_ROOT"
-
-if [[ ! -f "$RENDER_INPUT" ]]; then
+if [[ ! -f "$RESOLVED_RENDER_INPUT" ]]; then
   echo "[ERROR] Stage 1 render input not found: $RENDER_INPUT"
+  echo "[ERROR] Resolved path: $RESOLVED_RENDER_INPUT"
   exit 1
 fi
 
-if [[ ! -f "$SAMPLE_PROMPT_FILE" ]]; then
+if [[ ! -f "$RESOLVED_SAMPLE_PROMPT_FILE" ]]; then
   echo "[ERROR] Sample prompt file not found: $SAMPLE_PROMPT_FILE"
+  echo "[ERROR] Resolved path: $RESOLVED_SAMPLE_PROMPT_FILE"
   exit 1
 fi
 
@@ -89,7 +107,7 @@ CMD=(
   --num_processes "${STAGE2_NUM_PROCESSES:-2}"
   -m cspd_stage2.cli train
   --dataset-root "$DATASET_ROOT"
-  --render-input "$RENDER_INPUT"
+  --render-input "$RESOLVED_RENDER_INPUT"
   --backbone-name "$BACKBONE_NAME"
   --resolution "$RESOLUTION"
   --backbone-torch-dtype "$BACKBONE_TORCH_DTYPE"
@@ -112,7 +130,7 @@ CMD=(
   --wandb-run-name "$WANDB_RUN_NAME"
   --wandb-mode "$WANDB_MODE"
   --sample-every "$SAMPLE_EVERY"
-  --sample-prompt-file "$SAMPLE_PROMPT_FILE"
+  --sample-prompt-file "$RESOLVED_SAMPLE_PROMPT_FILE"
   --sample-num-prompts "$SAMPLE_NUM_PROMPTS"
   --sample-num-inference-steps "$SAMPLE_NUM_INFERENCE_STEPS"
   --sample-guidance-scale "$SAMPLE_GUIDANCE_SCALE"
@@ -146,6 +164,7 @@ fi
 echo "[INFO] repo_root:                 $REPO_ROOT"
 echo "[INFO] dataset_root:              $DATASET_ROOT"
 echo "[INFO] render_input:              $RENDER_INPUT"
+echo "[INFO] resolved_render_input:     $RESOLVED_RENDER_INPUT"
 echo "[INFO] backbone_name:             $BACKBONE_NAME"
 echo "[INFO] batch_size:                $BATCH_SIZE"
 echo "[INFO] gradient_accumulation:     $GRADIENT_ACCUMULATION_STEPS"
@@ -155,6 +174,7 @@ echo "[INFO] wandb_project:             $WANDB_PROJECT"
 echo "[INFO] wandb_run_name:            $WANDB_RUN_NAME"
 echo "[INFO] sample_every:              $SAMPLE_EVERY"
 echo "[INFO] sample_prompt_file:        $SAMPLE_PROMPT_FILE"
+echo "[INFO] resolved_sample_prompt:    $RESOLVED_SAMPLE_PROMPT_FILE"
 echo "[INFO] launch cmd:                ${CMD[*]}"
 
 "${CMD[@]}"
