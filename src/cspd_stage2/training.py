@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import hashlib
 import math
 import re
 from contextlib import nullcontext
@@ -144,6 +145,22 @@ class Stage2TrainConfig:
     output_dir: str | None = None
     backbone_name: str = "black-forest-labs/FLUX.1-Kontext-dev"
     memory_log_artifact_name: str = "memory_diagnostics.jsonl"
+    wandb_enabled: bool = False
+    wandb_project: str = "cspd-stage2"
+    wandb_entity: str | None = None
+    wandb_run_name: str | None = None
+    wandb_tags: list[str] = field(default_factory=list)
+    wandb_mode: str = "online"
+    wandb_dir: str | None = None
+    wandb_resume: str | None = None
+    wandb_run_id: str | None = None
+    sample_every: int = 0
+    sample_prompt_file: str | None = None
+    sample_prompts: list[str] = field(default_factory=list)
+    sample_num_prompts: int = 4
+    sample_num_inference_steps: int = 20
+    sample_guidance_scale: float = 4.5
+    sample_seed: int = 42
     batch_size: int = 4
     learning_rate: float = 2e-5
     epochs: int = 1
@@ -197,6 +214,246 @@ class Stage2TrainConfig:
     enable_gradient_checkpointing: bool = True
     full_update_fp32_for_pixart: bool = True
     lora_fp32_for_pixart: bool = True
+
+
+def _try_import_wandb() -> Any | None:
+    try:
+        import wandb  # type: ignore
+    except Exception:
+        return None
+    return wandb
+
+
+def _resolve_wandb_dir(config: Stage2TrainConfig, run_dir: Path) -> str:
+    return str((Path(config.wandb_dir).expanduser() if config.wandb_dir else (run_dir / "wandb")).resolve())
+
+
+def _init_wandb_run(*, config: Stage2TrainConfig, run_dir: Path, is_main_process: bool) -> tuple[Any | None, dict[str, Any] | None]:
+    if not config.wandb_enabled or not is_main_process:
+        return None, None
+    wandb = _try_import_wandb()
+    if wandb is None:
+        return None, {"enabled": False, "requested": True, "status": "wandb_not_installed"}
+    wandb_dir = _resolve_wandb_dir(config, run_dir)
+    run = wandb.init(
+        project=config.wandb_project,
+        entity=config.wandb_entity,
+        name=config.wandb_run_name,
+        tags=config.wandb_tags or None,
+        mode=config.wandb_mode,
+        dir=wandb_dir,
+        resume=config.wandb_resume,
+        id=config.wandb_run_id,
+        config=_config_to_dict(config),
+        settings=wandb.Settings(start_method="thread"),
+    )
+    return run, {
+        "enabled": True,
+        "requested": True,
+        "status": "initialized",
+        "project": config.wandb_project,
+        "entity": config.wandb_entity,
+        "name": getattr(run, "name", None),
+        "id": getattr(run, "id", None),
+        "url": getattr(run, "url", None),
+        "mode": config.wandb_mode,
+        "dir": wandb_dir,
+        "tags": list(config.wandb_tags),
+    }
+
+
+def _finish_wandb_run(run: Any | None, summary: dict[str, Any] | None = None) -> None:
+    if run is None:
+        return
+    if summary:
+        for key, value in summary.items():
+            try:
+                run.summary[key] = value
+            except Exception:
+                continue
+    try:
+        run.finish()
+    except Exception:
+        pass
+
+
+def _collect_step_metrics(*, loss_value: float, optimizer: Any, grad_diagnostics: dict[str, Any] | None = None, parameter_diagnostics: dict[str, Any] | None = None, memory_stats: dict[str, Any] | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    metrics: dict[str, Any] = {"loss": float(loss_value), "lr": float(optimizer.param_groups[0]["lr"])}
+    if grad_diagnostics is not None:
+        metrics["grad_global_norm"] = grad_diagnostics.get("grad_global_norm")
+        metrics["grad_parameter_count"] = grad_diagnostics.get("grad_parameter_count")
+        metrics["grad_value_count"] = grad_diagnostics.get("grad_value_count")
+    if parameter_diagnostics is not None:
+        metrics["trainable_parameter_count"] = parameter_diagnostics.get("trainable_parameter_count")
+        metrics["trainable_value_count"] = parameter_diagnostics.get("trainable_value_count")
+        metrics["max_abs_trainable_parameter_value"] = parameter_diagnostics.get("max_abs_trainable_parameter_value")
+        metrics["all_trainable_parameters_finite"] = 1.0 if parameter_diagnostics.get("all_trainable_parameters_finite") else 0.0
+        for dtype_label, count in sorted((parameter_diagnostics.get("trainable_parameter_dtype_counts") or {}).items()):
+            metrics[f"trainable_parameter_dtype_count/{dtype_label}"] = count
+    if memory_stats is not None and memory_stats.get("memory_stats_available"):
+        metrics["cuda_memory_allocated_bytes"] = memory_stats.get("allocated_bytes")
+        metrics["cuda_memory_reserved_bytes"] = memory_stats.get("reserved_bytes")
+        metrics["cuda_memory_max_allocated_bytes"] = memory_stats.get("max_allocated_bytes")
+        metrics["cuda_memory_max_reserved_bytes"] = memory_stats.get("max_reserved_bytes")
+    if extra:
+        metrics.update(extra)
+    return {key: value for key, value in metrics.items() if value is not None}
+
+
+def _wandb_log(run: Any | None, payload: dict[str, Any], *, step: int) -> None:
+    if run is None or not payload:
+        return
+    try:
+        run.log(payload, step=step)
+    except Exception:
+        pass
+
+
+def _read_sample_prompts_from_file(path: str | Path) -> list[str]:
+    prompt_path = Path(path)
+    if not prompt_path.exists():
+        raise FileNotFoundError(f"Sample prompt file not found: {prompt_path}")
+    suffix = prompt_path.suffix.lower()
+    if suffix in {".json", ".jsonl"}:
+        rows: list[str] = []
+        with prompt_path.open("r", encoding="utf-8-sig") as handle:
+            if suffix == ".json":
+                payload = json.load(handle)
+                if isinstance(payload, list):
+                    for item in payload:
+                        if isinstance(item, str) and item.strip():
+                            rows.append(item.strip())
+                        elif isinstance(item, dict):
+                            prompt = str(item.get("prompt") or item.get("text") or "").strip()
+                            if prompt:
+                                rows.append(prompt)
+                else:
+                    raise ValueError(f"Expected a list in sample prompt JSON file: {prompt_path}")
+            else:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    payload = json.loads(line)
+                    if isinstance(payload, str) and payload.strip():
+                        rows.append(payload.strip())
+                    elif isinstance(payload, dict):
+                        prompt = str(payload.get("prompt") or payload.get("text") or "").strip()
+                        if prompt:
+                            rows.append(prompt)
+        return rows
+    prompts: list[str] = []
+    with prompt_path.open("r", encoding="utf-8-sig") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                prompts.append(line)
+    return prompts
+
+
+def _resolve_sample_prompts(*, config: Stage2TrainConfig, pairs: list[Any]) -> list[str]:
+    prompts: list[str] = []
+    if config.sample_prompt_file:
+        prompts.extend(_read_sample_prompts_from_file(config.sample_prompt_file))
+    prompts.extend([prompt.strip() for prompt in config.sample_prompts if str(prompt).strip()])
+    if not prompts:
+        for pair in pairs:
+            caption = str(getattr(pair, "canonical_caption", "") or "").strip()
+            if caption:
+                prompts.append(caption)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for prompt in prompts:
+        if prompt not in seen:
+            deduped.append(prompt)
+            seen.add(prompt)
+    limit = max(int(config.sample_num_prompts), 0) or len(deduped)
+    return deduped[:limit]
+
+
+def _prompt_slug(prompt: str, *, limit: int = 48) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", prompt.strip()).strip("_").lower()
+    if not cleaned:
+        cleaned = hashlib.md5(prompt.encode("utf-8")).hexdigest()[:8]
+    return cleaned[:limit]
+
+
+def _save_pil_like_image(image: Any, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if hasattr(image, "save"):
+        image.save(path)
+        return path
+    try:
+        from PIL import Image
+        import numpy as np
+        array = image
+        if hasattr(array, "detach"):
+            array = array.detach().cpu().numpy()
+        array = np.asarray(array)
+        if array.ndim == 3 and array.shape[0] in {1, 3}:
+            array = np.transpose(array, (1, 2, 0))
+        if array.dtype != np.uint8:
+            array = np.clip(array, 0.0, 1.0)
+            array = (array * 255.0).astype(np.uint8)
+        Image.fromarray(array).save(path)
+        return path
+    except Exception as exc:
+        raise RuntimeError(f"Could not save sample image to {path}: {exc}") from exc
+
+
+def _run_pixart_wandb_sampling(*, pipeline: Any, transformer: Any, accelerator: Any | None, config: Stage2TrainConfig, run_dir: Path, epoch: int, optimizer_step: int, prompts: list[str], device: Any, train_dtype: Any, wandb_run: Any | None) -> dict[str, Any]:
+    result: dict[str, Any] = {"enabled": True, "attempted": True, "optimizer_step": optimizer_step, "epoch": epoch, "prompt_count": len(prompts)}
+    if not prompts:
+        result.update({"status": "skipped", "reason": "no_prompts"})
+        return result
+    import torch
+    sample_dir = run_dir / "samples" / f"step_{optimizer_step:06d}"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    resolved_transformer = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
+    original_transformer = pipeline.transformer
+    training_mode = resolved_transformer.training if hasattr(resolved_transformer, "training") else None
+    resolved_transformer.eval()
+    pipeline.transformer = resolved_transformer
+    image_paths: list[Path] = []
+    table_rows: list[list[Any]] = []
+    try:
+        generator = torch.Generator(device=device.type if hasattr(device, "type") else "cpu")
+        generator.manual_seed(int(config.sample_seed) + int(optimizer_step))
+        with torch.no_grad():
+            outputs = pipeline(
+                prompt=prompts,
+                num_inference_steps=max(int(config.sample_num_inference_steps), 1),
+                guidance_scale=float(config.sample_guidance_scale),
+                height=int(config.resolution),
+                width=int(config.resolution),
+                generator=generator,
+                output_type="pil",
+            )
+        images = list(getattr(outputs, "images", []) or [])
+        if len(images) != len(prompts):
+            raise RuntimeError(f"PixArt sampling returned {len(images)} images for {len(prompts)} prompts")
+        result["status"] = "completed"
+        result["sample_dir"] = str(sample_dir.resolve())
+        for index, (prompt, image) in enumerate(zip(prompts, images), start=1):
+            image_path = sample_dir / f"{index:02d}_{_prompt_slug(prompt)}.png"
+            _save_pil_like_image(image, image_path)
+            image_paths.append(image_path)
+            table_rows.append([optimizer_step, epoch, prompt, str(image_path.resolve())])
+        if wandb_run is not None:
+            wandb = _try_import_wandb()
+            if wandb is not None:
+                images_payload = [wandb.Image(str(image_path), caption=prompt) for image_path, prompt in zip(image_paths, prompts)]
+                _wandb_log(wandb_run, {"samples/images": images_payload}, step=optimizer_step)
+                table = wandb.Table(columns=["optimizer_step", "epoch", "prompt", "image_path"], data=table_rows)
+                _wandb_log(wandb_run, {"samples/table": table}, step=optimizer_step)
+    except Exception as exc:
+        result.update({"status": "failed", "error_type": type(exc).__name__, "error": str(exc)})
+    finally:
+        pipeline.transformer = original_transformer
+        if training_mode is not None:
+            resolved_transformer.train(training_mode)
+    result["saved_images"] = [str(path.resolve()) for path in image_paths]
+    return result
 
 
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
@@ -885,6 +1142,8 @@ def run_real_stage2_flux_training(
     last_known_phase = "preflight"
     phase_history: list[str] = []
     component_move_state: dict[str, Any] = {"component_move_events": [], "component_move_failures": [], "last_component_move_attempt": None}
+    wandb_run = None
+    wandb_state: dict[str, Any] | None = None
 
     def mark_phase(phase: str, *, extra: dict[str, Any] | None = None, epoch: int | None = None, global_step_value: int | None = None, optimizer_step_value: int | None = None, main_process_only: bool = True) -> None:
         nonlocal last_known_phase
@@ -1075,6 +1334,7 @@ def run_real_stage2_flux_training(
             )
 
         is_main_process = accelerator.is_main_process if accelerator is not None else True
+        wandb_run, wandb_state = _init_wandb_run(config=config, run_dir=run_dir, is_main_process=is_main_process)
         if is_main_process:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
         _mark_sync_point(phase="checkpoint_dir_ready_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"checkpoint_dir": str(checkpoint_dir.resolve())}, main_process_only=False)
@@ -1098,7 +1358,7 @@ def run_real_stage2_flux_training(
                     mark_phase("first_batch_fetched", epoch=epoch + 1, global_step_value=global_step + 1, optimizer_step_value=optimizer_step_count + 1, extra={"batch_index": batch_index, "batch_size": len(batch.get("conditioning_text", [])) if isinstance(batch, dict) else None}, main_process_only=False)
                 if stop_after is not None and optimizer_step_count >= stop_after:
                     break
-                loss = _run_real_flux_train_step(
+                step_result = _run_real_flux_train_step(
                     pipeline=pipeline,
                     transformer=transformer,
                     batch=batch,
@@ -1112,6 +1372,7 @@ def run_real_stage2_flux_training(
                     global_step=global_step + 1,
                     optimizer_step=optimizer_step_count + 1,
                 )
+                loss = step_result["loss"]
                 global_step += 1
                 sync_gradients = accelerator.sync_gradients if accelerator is not None else True
                 if sync_gradients:
@@ -1121,6 +1382,9 @@ def run_real_stage2_flux_training(
                     else:
                         loss_value = float(loss.detach().cpu().item())
                     losses.append(loss_value)
+                    step_metrics = dict(step_result.get("step_metrics") or {})
+                    if step_metrics:
+                        _wandb_log(wandb_run, {f"train/{key}": value for key, value in step_metrics.items()}, step=optimizer_step_count)
                     if optimizer_step_count == 1 or optimizer_step_count % max(config.log_every, 1) == 0:
                         logs.append({"step": optimizer_step_count, "epoch": epoch + 1, "loss": loss_value})
                         mark_phase("optimizer_step_complete", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"loss": loss_value}, main_process_only=True)
@@ -1199,9 +1463,11 @@ def run_real_stage2_flux_training(
             "last_known_phase": last_known_phase,
             "phase_history": phase_history,
             "launch_notes": launch_notes,
+            "wandb": wandb_state,
         }
         if is_main_process:
             _safe_write_json(run_dir / "training_metrics.json", summary)
+            _finish_wandb_run(wandb_run, {"status": summary["status"], "optimizer_steps": optimizer_step_count, "last_loss": losses[-1] if losses else None})
         if accelerator is not None:
             accelerator.wait_for_everyone()
         return summary
@@ -1244,9 +1510,11 @@ def run_real_stage2_flux_training(
                 "traceback": traceback.format_exc(),
                 "rank_info": _accelerator_rank_info(accelerator, device) if torch is not None else None,
             },
+            "wandb": wandb_state,
         }
         if is_main_process:
             _safe_write_json(run_dir / "training_metrics.json", failure_summary)
+            _finish_wandb_run(wandb_run, {"status": failure_summary["status"], "failure_category": failure_summary["failure_category"]})
         return failure_summary
 
 
@@ -1278,6 +1546,10 @@ def run_real_stage2_pixart_training(
     total_optimizer_steps = None
     last_known_phase = "preflight"
     phase_history: list[str] = []
+    wandb_run = None
+    wandb_state: dict[str, Any] | None = None
+    sample_prompts: list[str] = []
+    sample_events: list[dict[str, Any]] = []
 
     def mark_phase(phase: str, *, extra: dict[str, Any] | None = None, epoch: int | None = None, global_step_value: int | None = None, optimizer_step_value: int | None = None, main_process_only: bool = True) -> None:
         nonlocal last_known_phase
@@ -1377,7 +1649,11 @@ def run_real_stage2_pixart_training(
             dataloader = accelerator.prepare(dataloader)
             mark_phase("after_accelerate_prepare_dataloader", extra={"dataloader_batches_per_epoch": len(dataloader) if hasattr(dataloader, "__len__") else None})
         is_main_process = accelerator.is_main_process if accelerator is not None else True
+        wandb_run, wandb_state = _init_wandb_run(config=config, run_dir=run_dir, is_main_process=is_main_process)
         if is_main_process:
+            sample_prompts = _resolve_sample_prompts(config=config, pairs=pairs)
+            if wandb_run is not None and sample_prompts:
+                _wandb_log(wandb_run, {"samples/prompts": "\\n".join(sample_prompts)}, step=0)
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
         _mark_sync_point(phase="checkpoint_dir_ready_barrier", accelerator=accelerator, device=device, torch_module=torch, memory_log_path=memory_log_path, extra={"checkpoint_dir": str(checkpoint_dir.resolve())}, main_process_only=False)
         mark_phase("after_checkpoint_dir_ready", extra={"checkpoint_dir": str(checkpoint_dir.resolve())})
@@ -1399,7 +1675,7 @@ def run_real_stage2_pixart_training(
                     mark_phase("first_batch_fetched", epoch=epoch + 1, global_step_value=global_step + 1, optimizer_step_value=optimizer_step_count + 1, extra={"batch_index": batch_index, "batch_size": len(batch.get("conditioning_text", [])) if isinstance(batch, dict) else None}, main_process_only=False)
                 if stop_after is not None and optimizer_step_count >= stop_after:
                     break
-                loss = _run_real_pixart_train_step(
+                step_result = _run_real_pixart_train_step(
                     pipeline=pipeline,
                     transformer=transformer,
                     batch=batch,
@@ -1414,12 +1690,32 @@ def run_real_stage2_pixart_training(
                     optimizer_step=optimizer_step_count + 1,
                     config=config,
                 )
+                loss = step_result["loss"]
                 global_step += 1
                 sync_gradients = accelerator.sync_gradients if accelerator is not None else True
                 if sync_gradients:
                     optimizer_step_count += 1
                     loss_value = float(accelerator.gather_for_metrics(loss.detach().reshape(1)).mean().item()) if accelerator is not None else float(loss.detach().cpu().item())
                     losses.append(loss_value)
+                    step_metrics = dict(step_result.get("step_metrics") or {})
+                    if step_metrics:
+                        _wandb_log(wandb_run, {f"train/{key}": value for key, value in step_metrics.items()}, step=optimizer_step_count)
+                    if is_main_process and config.sample_every > 0 and optimizer_step_count % max(config.sample_every, 1) == 0:
+                        sample_event = _run_pixart_wandb_sampling(
+                            pipeline=pipeline,
+                            transformer=transformer,
+                            accelerator=accelerator,
+                            config=config,
+                            run_dir=run_dir,
+                            epoch=epoch + 1,
+                            optimizer_step=optimizer_step_count,
+                            prompts=sample_prompts,
+                            device=device,
+                            train_dtype=train_dtype,
+                            wandb_run=wandb_run,
+                        )
+                        sample_events.append(sample_event)
+                        _wandb_log(wandb_run, {"samples/last_status": sample_event.get("status"), "samples/last_prompt_count": sample_event.get("prompt_count")}, step=optimizer_step_count)
                     if optimizer_step_count == 1 or optimizer_step_count % max(config.log_every, 1) == 0:
                         logs.append({"step": optimizer_step_count, "epoch": epoch + 1, "loss": loss_value})
                         mark_phase("optimizer_step_complete", epoch=epoch + 1, global_step_value=global_step, optimizer_step_value=optimizer_step_count, extra={"loss": loss_value}, main_process_only=True)
@@ -1473,9 +1769,13 @@ def run_real_stage2_pixart_training(
             "last_known_phase": last_known_phase,
             "phase_history": phase_history,
             "launch_notes": ["Uses Hugging Face Accelerate for process setup, dataloader sharding, backward, and main-process-only checkpoint writes.", "PixArt-Σ uses the diffusers PixArtSigmaPipeline contract: prompt_embeds + prompt_attention_mask conditioning, VAE latents, and scheduler.add_noise training timesteps."],
+            "wandb": wandb_state,
+            "sample_prompts": sample_prompts,
+            "sample_events": sample_events,
         }
         if is_main_process:
             _safe_write_json(run_dir / "training_metrics.json", summary)
+            _finish_wandb_run(wandb_run, {"status": summary["status"], "optimizer_steps": optimizer_step_count, "last_loss": losses[-1] if losses else None})
         if accelerator is not None:
             accelerator.wait_for_everyone()
         return summary
@@ -1514,9 +1814,13 @@ def run_real_stage2_pixart_training(
             "phase_history": phase_history,
             "failure_category": _classify_training_failure(exc),
             "failure": {"error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc(), "rank_info": _accelerator_rank_info(accelerator, device) if torch is not None else None},
+            "wandb": wandb_state,
+            "sample_prompts": sample_prompts,
+            "sample_events": sample_events,
         }
         if is_main_process:
             _safe_write_json(run_dir / "training_metrics.json", failure_summary)
+            _finish_wandb_run(wandb_run, {"status": failure_summary["status"], "failure_category": failure_summary["failure_category"]})
         return failure_summary
 
 
@@ -1760,8 +2064,9 @@ def _run_real_pixart_train_step(
                 transformer_train_dtype_label = next(iter(dtype_counts))
             elif dtype_counts:
                 transformer_train_dtype_label = f"mixed:{dtype_counts}"
+        memory_stats = _collect_cuda_memory_stats(torch, device)
         _append_memory_event(artifact_path=memory_log_path, accelerator=accelerator, device=device, phase="after_pixart_step", torch_module=torch, epoch=epoch, global_step=global_step, optimizer_step=optimizer_step, extra={"pixel_values_shape": list(batch['pixel_values'].shape), "latents_shape": list(latents.shape), "timesteps_shape": list(timesteps.shape), "prompt_embeds_shape": list(prompt_embeds.shape), "prompt_attention_mask_shape": list(prompt_attention_mask.shape), "dropped_prompt_count": dropped_prompt_count, "lr": float(optimizer.param_groups[0]["lr"]), "clipped_grad_norm": grad_norm_value, "transformer_train_dtype": transformer_train_dtype_label, "trainable_parameter_diagnostics": parameter_diagnostics})
-        return loss.detach()
+        return {"loss": loss.detach(), "step_metrics": _collect_step_metrics(loss_value=loss_value, optimizer=optimizer, grad_diagnostics=grad_diagnostics, parameter_diagnostics=parameter_diagnostics, memory_stats=memory_stats, extra={"clipped_grad_norm": grad_norm_value, "dropped_prompt_count": dropped_prompt_count})}
 
 
 def _run_real_flux_train_step(
@@ -1972,9 +2277,11 @@ def _run_real_flux_train_step(
             optimizer_step=optimizer_step,
         )
         optimizer.step()
+        parameter_diagnostics = _collect_trainable_parameter_diagnostics(accelerator.unwrap_model(transformer) if accelerator is not None else transformer)
+        memory_stats = _collect_cuda_memory_stats(torch, device)
         if global_step == 1:
             _emit_stage2_console_event(accelerator=accelerator, device=device, phase="after_first_optimizer_step", extra={"optimizer_step": optimizer_step}, main_process_only=False)
-    return loss.detach()
+    return {"loss": loss.detach(), "step_metrics": _collect_step_metrics(loss_value=loss_value, optimizer=optimizer, grad_diagnostics=grad_diagnostics, parameter_diagnostics=parameter_diagnostics, memory_stats=memory_stats)}
 
 
 

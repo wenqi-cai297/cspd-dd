@@ -218,6 +218,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable the default safer FP32 LoRA adapter-weight path for PixArt LoRA training",
     )
+    train_parser.add_argument("--wandb", action="store_true", help="Enable optional Weights & Biases logging when wandb is installed")
+    train_parser.add_argument("--wandb-project", default="cspd-stage2", help="W&B project name")
+    train_parser.add_argument("--wandb-entity", default=None, help="Optional W&B entity/team")
+    train_parser.add_argument("--wandb-run-name", default=None, help="Optional W&B run name override")
+    train_parser.add_argument("--wandb-tag", action="append", dest="wandb_tags", default=None, help="Optional W&B tag; may be repeated")
+    train_parser.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online", help="W&B mode passed to wandb.init")
+    train_parser.add_argument("--wandb-dir", default=None, help="Optional local W&B run directory")
+    train_parser.add_argument("--wandb-resume", default=None, help="Optional W&B resume mode, e.g. allow or must")
+    train_parser.add_argument("--wandb-run-id", default=None, help="Optional explicit W&B run id for resume/reuse")
+    train_parser.add_argument("--sample-every", type=int, default=0, help="Run PixArt sample inference every X optimizer steps; 0 disables sampling")
+    train_parser.add_argument("--sample-prompt-file", default=None, help="Optional text/json/jsonl file of sample prompts for PixArt periodic inference")
+    train_parser.add_argument("--sample-prompt", action="append", dest="sample_prompts", default=None, help="Inline sample prompt; may be repeated")
+    train_parser.add_argument("--sample-num-prompts", type=int, default=4, help="Maximum number of sample prompts to use per PixArt sampling event")
+    train_parser.add_argument("--sample-num-inference-steps", type=int, default=20, help="Number of inference steps for PixArt sample generation")
+    train_parser.add_argument("--sample-guidance-scale", type=float, default=4.5, help="Guidance scale for PixArt sample generation")
+    train_parser.add_argument("--sample-seed", type=int, default=42, help="Base RNG seed for PixArt sample generation")
     train_parser.add_argument(
         "--inspect-limit",
         type=int,
@@ -384,6 +400,22 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         render_input=args.render_input,
         output_dir=output_dir,
         backbone_name=args.backbone_name,
+        wandb_enabled=args.wandb and args.wandb_mode != "disabled",
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_run_name=args.wandb_run_name,
+        wandb_tags=args.wandb_tags or [],
+        wandb_mode=args.wandb_mode,
+        wandb_dir=args.wandb_dir,
+        wandb_resume=args.wandb_resume,
+        wandb_run_id=args.wandb_run_id,
+        sample_every=args.sample_every,
+        sample_prompt_file=args.sample_prompt_file,
+        sample_prompts=args.sample_prompts or [],
+        sample_num_prompts=args.sample_num_prompts,
+        sample_num_inference_steps=args.sample_num_inference_steps,
+        sample_guidance_scale=args.sample_guidance_scale,
+        sample_seed=args.sample_seed,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         lr_scheduler=args.lr_scheduler,
