@@ -3,6 +3,7 @@ from __future__ import annotations
 """PixArt-family Stage 2 training and sampling helpers."""
 
 import importlib.util
+import json
 import math
 import traceback
 from contextlib import nullcontext

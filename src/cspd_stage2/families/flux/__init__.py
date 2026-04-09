@@ -1,5 +1,10 @@
 """FLUX-family Stage 2 helpers."""
 
-from .training import run_real_stage2_flux_training
+from .backbone import default_flux_loader_name, infer_flux_family, load_flux_pipeline, resolve_flux_pipeline_class_name
 
-__all__ = ["run_real_stage2_flux_training"]
+__all__ = [
+    "default_flux_loader_name",
+    "infer_flux_family",
+    "load_flux_pipeline",
+    "resolve_flux_pipeline_class_name",
+]

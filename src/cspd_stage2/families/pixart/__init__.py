@@ -1,8 +1,10 @@
 """PixArt-family Stage 2 helpers."""
 
-from .training import run_real_stage2_pixart_training, run_stage2_pixart_baseline_sampling
+from .backbone import default_pixart_loader_name, infer_pixart_family, load_pixart_pipeline, resolve_pixart_pipeline_class_name
 
 __all__ = [
-    "run_real_stage2_pixart_training",
-    "run_stage2_pixart_baseline_sampling",
+    "default_pixart_loader_name",
+    "infer_pixart_family",
+    "load_pixart_pipeline",
+    "resolve_pixart_pipeline_class_name",
 ]
