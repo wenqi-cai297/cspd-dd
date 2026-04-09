@@ -40,6 +40,7 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 
 ### Main server helper scripts
 
+- `bash scripts/server/check_stage2_sdxl_env.sh [optional_explicit_sdxl_script_path]`
 - `bash scripts/server/stage2/run_sdxl_stage2_official.sh ...`
 - `bash scripts/server/prepare_stage1_metadata.sh ...`
 - `bash scripts/server/run_stage1_qwen_local.sh ...`

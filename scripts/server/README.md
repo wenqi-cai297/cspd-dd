@@ -214,6 +214,14 @@ Recommended helper:
 bash scripts/server/run_stage2_train.sh /path/to/dataset_root /path/to/stage1_render_records.jsonl
 ```
 
+For the SDXL official-diffusers path specifically, first check the environment and script resolution:
+
+```bash
+bash scripts/server/check_stage2_sdxl_env.sh
+# or point it explicitly at the diffusers example script
+bash scripts/server/check_stage2_sdxl_env.sh /path/to/diffusers/examples/text_to_image/train_text_to_image_lora_sdxl.py
+```
+
 Example:
 
 ```bash
@@ -291,6 +299,27 @@ accelerate launch --num_processes 2 \
 ```
 
 If you need a narrower fallback, keep the same CLI and swap the component group to `conditioning_transformer`. `conditioning_transformer` resolves to conditioning-related transformer internals around `context_embedder`, `time_text_embed*`, `transformer_blocks.*.norm1_context*`, `transformer_blocks.*.attn.add_{q,k,v}_proj`, `transformer_blocks.*.attn.to_add_out`, and `ff_context*`. You can also compose narrower groups such as `conditioning_context_embedder`, `conditioning_time_text_embed`, `conditioning_norm1_context`, `conditioning_added_kv_attention`, and `conditioning_ff_context`. If you explicitly want the older all-float16 PixArt LoRA adapter path for comparison only, add `--disable-lora-fp32-for-pixart`. The full-parameter PixArt path still keeps the safer boundary-aware FP32 update strategy for targeted real-parameter experiments.
+
+For an SDXL server run in the same script-first style, use:
+
+```bash
+bash scripts/server/check_stage2_sdxl_env.sh
+export DIFFUSERS_REPO_ROOT=/path/to/diffusers   # or export CSPD_STAGE2_SDXL_SCRIPT=/path/to/train_text_to_image_lora_sdxl.py
+STAGE2_NUM_PROCESSES=2 bash scripts/server/stage2/run_sdxl_stage2_official.sh \
+  /data/imagenette/train \
+  runs/stage1/render/imagenette/qwen_local/2026-04-02_010203/records.jsonl \
+  1 \
+  1 \
+  --learning-rate 1e-4 \
+  --gradient-accumulation-steps 4
+```
+
+This helper now:
+- activates the shared conda env
+- runs the dedicated SDXL environment check first
+- resolves the official diffusers script from `--sdxl-official-script`, `CSPD_STAGE2_SDXL_SCRIPT`, `DIFFUSERS_REPO_ROOT/examples/text_to_image/`, `DIFFUSERS_HOME/examples/text_to_image/`, or `PATH`
+- writes an explicit SDXL launch preflight into `sdxl_official_launch_plan.json` before any long training launch
+- keeps the run output under `runs/stage2/train/<dataset_label>/stabilityai__stable-diffusion-xl-base-1.0/<timestamp>/` unless `STAGE2_OUTPUT_DIR` is set
 
 Important scope note:
 - the pairing/manifest/run scaffold is implemented now

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Thin SDXL Stage 2 orchestration around the official diffusers LoRA trainer."""
 
+import importlib.util
 import json
 import os
 import shutil
@@ -82,14 +83,36 @@ def materialize_sdxl_training_dataset(*, pairs: list[Any], output_dir: str | Pat
     }
 
 
+def _candidate_official_sdxl_script_paths(config: Any) -> list[str]:
+    candidates: list[str] = []
+    explicit = str(getattr(config, 'sdxl_official_script', '') or '').strip()
+    env_value = str(os.environ.get('CSPD_STAGE2_SDXL_SCRIPT', '')).strip()
+    diffusers_roots = [
+        str(os.environ.get('DIFFUSERS_REPO_ROOT', '')).strip(),
+        str(os.environ.get('DIFFUSERS_HOME', '')).strip(),
+    ]
+
+    for value in [explicit, env_value]:
+        if value:
+            candidates.append(value)
+
+    for root in diffusers_roots:
+        if root:
+            candidates.append(str(Path(root).expanduser() / 'examples' / 'text_to_image' / 'train_text_to_image_lora_sdxl.py'))
+
+    candidates.append('train_text_to_image_lora_sdxl.py')
+    return candidates
+
+
 def _resolve_official_sdxl_script(config: Any) -> str:
     """Resolve the official diffusers SDXL LoRA training script path."""
-    explicit = str(getattr(config, 'sdxl_official_script', '') or '').strip()
-    if explicit:
-        return explicit
-    env_value = str(os.environ.get('CSPD_STAGE2_SDXL_SCRIPT', '')).strip()
-    if env_value:
-        return env_value
+    for candidate in _candidate_official_sdxl_script_paths(config):
+        candidate_path = Path(candidate).expanduser()
+        if candidate_path.exists():
+            return str(candidate_path.resolve())
+        resolved_on_path = shutil.which(candidate)
+        if resolved_on_path:
+            return str(Path(resolved_on_path).resolve())
     return 'train_text_to_image_lora_sdxl.py'
 
 
@@ -104,6 +127,73 @@ def _build_accelerate_prefix(config: Any) -> list[str]:
     extra_args = list(getattr(config, 'sdxl_accelerate_extra_args', []) or [])
     prefix.extend(extra_args)
     return prefix
+
+
+def _build_sdxl_launch_preflight(*, config: Any, script_path: str, materialized: dict[str, Any]) -> dict[str, Any]:
+    accelerate_required = bool(getattr(config, 'use_accelerate', True))
+    diffusers_installed = importlib.util.find_spec('diffusers') is not None
+    accelerate_installed = importlib.util.find_spec('accelerate') is not None
+    script_exists = Path(script_path).expanduser().exists()
+    script_on_path = shutil.which(script_path) if not script_exists else str(Path(script_path).expanduser().resolve())
+    metadata_path = Path(materialized['metadata_path'])
+    dataset_dir = Path(materialized['dataset_dir'])
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not diffusers_installed:
+        errors.append('diffusers is not installed in the active Python environment.')
+    if accelerate_required and not accelerate_installed:
+        errors.append('accelerate is required for the default SDXL path but is not installed in the active Python environment.')
+    if accelerate_required and shutil.which('accelerate') is None:
+        errors.append('accelerate CLI is not available on PATH; install/activate the intended environment before launching.')
+    if not script_exists and not script_on_path:
+        errors.append(
+            'Could not resolve the official diffusers SDXL LoRA script. Set --sdxl-official-script, '
+            'export CSPD_STAGE2_SDXL_SCRIPT=/path/to/train_text_to_image_lora_sdxl.py, '
+            'or export DIFFUSERS_REPO_ROOT=/path/to/diffusers.'
+        )
+    if not dataset_dir.exists():
+        errors.append(f'Materialized SDXL dataset directory is missing: {dataset_dir}')
+    if not metadata_path.exists():
+        errors.append(f'Materialized metadata.jsonl is missing: {metadata_path}')
+    if int(materialized.get('num_examples', 0)) <= 0:
+        errors.append('Materialized SDXL dataset is empty; no examples were paired for training.')
+
+    backbone_name = str(getattr(config, 'backbone_name', '') or '')
+    if 'stable-diffusion-xl' not in backbone_name.lower() and 'sdxl' not in backbone_name.lower():
+        warnings.append(
+            'backbone_name does not obviously look like an SDXL base model; the official trainer usually expects an SDXL-compatible pretrained model.'
+        )
+    if not accelerate_required:
+        warnings.append('Accelerate is disabled; the SDXL official path will run as a direct single-process Python launch.')
+
+    return {
+        'ok': not errors,
+        'errors': errors,
+        'warnings': warnings,
+        'environment': {
+            'python_executable': sys.executable,
+            'diffusers_installed': diffusers_installed,
+            'accelerate_installed': accelerate_installed,
+            'accelerate_cli_path': shutil.which('accelerate'),
+        },
+        'script_resolution': {
+            'requested': str(getattr(config, 'sdxl_official_script', '') or ''),
+            'env_CSPD_STAGE2_SDXL_SCRIPT': str(os.environ.get('CSPD_STAGE2_SDXL_SCRIPT', '') or ''),
+            'env_DIFFUSERS_REPO_ROOT': str(os.environ.get('DIFFUSERS_REPO_ROOT', '') or ''),
+            'env_DIFFUSERS_HOME': str(os.environ.get('DIFFUSERS_HOME', '') or ''),
+            'resolved_script_path': script_path,
+            'script_exists': script_exists,
+            'script_on_path': script_on_path,
+            'candidate_paths': _candidate_official_sdxl_script_paths(config),
+        },
+        'materialized_dataset': {
+            'dataset_dir': str(dataset_dir.resolve()),
+            'metadata_path': str(metadata_path.resolve()),
+            'num_examples': int(materialized.get('num_examples', 0)),
+        },
+    }
 
 
 def _build_sdxl_official_command(*, config: Any, script_path: str, materialized: dict[str, Any], run_dir: Path) -> list[str]:
@@ -169,6 +259,7 @@ def run_stage2_sdxl_official_training(*, config: Any, pairs: list[Any], run_dir:
     """Materialize SDXL training data and launch the official diffusers SDXL LoRA trainer."""
     materialized = materialize_sdxl_training_dataset(pairs=pairs, output_dir=run_dir / 'sdxl_materialized_dataset')
     script_path = _resolve_official_sdxl_script(config)
+    preflight = _build_sdxl_launch_preflight(config=config, script_path=script_path, materialized=materialized)
     command = _build_sdxl_official_command(config=config, script_path=script_path, materialized=materialized, run_dir=run_dir)
     launch_plan = {
         'family': 'sdxl',
@@ -176,15 +267,30 @@ def run_stage2_sdxl_official_training(*, config: Any, pairs: list[Any], run_dir:
         'script_path': script_path,
         'manifest_path': str(Path(manifest_path).resolve()),
         'materialized_dataset': materialized,
+        'preflight': preflight,
         'command': command,
         'command_string': subprocess.list2cmdline(command),
         'output_dir': str((run_dir / 'official_output').resolve()),
         'assumptions': [
-            'The official diffusers SDXL LoRA training script is available either on PATH, via --sdxl-official-script, or via CSPD_STAGE2_SDXL_SCRIPT.',
+            'The official diffusers SDXL LoRA training script is available either on PATH, via --sdxl-official-script, via CSPD_STAGE2_SDXL_SCRIPT, or under DIFFUSERS_REPO_ROOT/examples/text_to_image/.',
             'This Stage 2 path delegates SDXL training internals to diffusers and only owns pairing, materialization, run structure, and launch orchestration.',
         ],
     }
     write_json(run_dir / 'sdxl_official_launch_plan.json', launch_plan)
+
+    if not preflight['ok']:
+        return {
+            'status': 'failed_before_training',
+            'implemented_training': False,
+            'placeholder_training': False,
+            'family': 'sdxl',
+            'message': 'Official diffusers SDXL LoRA launch preflight failed before training could start.',
+            'materialized_dataset': materialized,
+            'official_launch_plan_path': str((run_dir / 'sdxl_official_launch_plan.json').resolve()),
+            'launch_command': command,
+            'preflight': preflight,
+            'last_known_phase': 'sdxl_preflight_failed',
+        }
 
     if bool(getattr(config, 'dry_run', False)) or bool(getattr(config, 'generate_manifest_only', False)):
         return {
@@ -196,6 +302,7 @@ def run_stage2_sdxl_official_training(*, config: Any, pairs: list[Any], run_dir:
             'materialized_dataset': materialized,
             'official_launch_plan_path': str((run_dir / 'sdxl_official_launch_plan.json').resolve()),
             'launch_command': command,
+            'preflight': preflight,
             'last_known_phase': 'sdxl_launch_plan_ready',
         }
 
@@ -213,6 +320,7 @@ def run_stage2_sdxl_official_training(*, config: Any, pairs: list[Any], run_dir:
         'materialized_dataset': materialized,
         'official_launch_plan_path': str((run_dir / 'sdxl_official_launch_plan.json').resolve()),
         'launch_command': command,
+        'preflight': preflight,
         'returncode': int(completed.returncode),
         'stdout_path': str(stdout_path.resolve()),
         'stderr_path': str(stderr_path.resolve()),
