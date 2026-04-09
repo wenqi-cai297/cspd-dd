@@ -41,7 +41,9 @@ from cspd_stage2.backbone import (
     load_real_backbone_module,
 )
 from cspd_stage2.data import ManifestPaths, build_stage2_pairs, make_stage2_dataloader, write_pairing_artifacts
+from cspd_stage2.families.sdxl.training import run_stage2_sdxl_official_training
 from cspd_stage2.training_common import (
+    CONDITIONING_RELATED_GROUP_PATTERNS,
     DEFAULT_EXCLUDE_PATTERNS,
     DEFAULT_LORA_TARGET_GROUPS,
     DEFAULT_TEXT_CONDITIONING_GROUPS,
@@ -152,6 +154,22 @@ class Stage2TrainConfig:
     enable_gradient_checkpointing: bool = True
     full_update_fp32_for_pixart: bool = True
     lora_fp32_for_pixart: bool = True
+    sdxl_official_script: str | None = None
+    sdxl_num_processes: int | None = None
+    sdxl_accelerate_extra_args: list[str] = field(default_factory=list)
+    sdxl_mixed_precision: str = "fp16"
+    sdxl_lr_scheduler: str = "constant"
+    sdxl_lr_warmup_steps: int = 0
+    sdxl_validation_epochs: int = 1
+    sdxl_validation_prompt: str | None = None
+    sdxl_report_to: str = "none"
+    sdxl_use_8bit_adam: bool = False
+    sdxl_enable_xformers: bool = False
+    sdxl_gradient_checkpointing: bool = True
+    sdxl_train_text_encoder: bool = False
+    sdxl_caption_dropout_probability: float | None = None
+    sdxl_noise_offset: float | None = None
+    sdxl_extra_args: list[str] = field(default_factory=list)
 
 
 def _try_import_wandb() -> Any | None:
@@ -432,15 +450,24 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         write_json(run_dir / "trainer_plan.json", trainer_plan)
         last_known_phase = "after_write_trainer_plan"
 
-        if not config.generate_manifest_only and not config.dry_run:
+        should_enter_training_dispatch = infer_backbone_family(config.backbone_name) == 'sdxl' or (not config.generate_manifest_only and not config.dry_run)
+        if should_enter_training_dispatch:
             try:
                 last_known_phase = "before_real_training"
-                training_result = run_real_stage2_backbone_training(
-                    config=config,
-                    pairs=pairing.pairs,
-                    run_dir=run_dir,
-                    manifest_path=manifest_paths.manifest_path,
-                )
+                if infer_backbone_family(config.backbone_name) == 'sdxl':
+                    training_result = run_stage2_sdxl_official_training(
+                        config=config,
+                        pairs=pairing.pairs,
+                        run_dir=run_dir,
+                        manifest_path=manifest_paths.manifest_path,
+                    )
+                else:
+                    training_result = run_real_stage2_backbone_training(
+                        config=config,
+                        pairs=pairing.pairs,
+                        run_dir=run_dir,
+                        manifest_path=manifest_paths.manifest_path,
+                    )
                 last_known_phase = training_result.get("last_known_phase", "after_real_training")
             except Exception as exc:  # noqa: BLE001
                 last_known_phase = "real_training_exception"
@@ -562,7 +589,7 @@ def _build_stage2_run_summary(
 ) -> dict[str, Any]:
     return {
         "stage": "stage2_v1",
-        "definition": "full-transformer fine-tuning of the selected generative backbone with Stage 1 canonical-caption conditioning",
+        "definition": "Stage 2 canonical-caption-conditioned backbone adaptation with Stage 1 canonical-caption conditioning",
         "backbone_name": config.backbone_name,
         "run_dir": str(run_dir.resolve()),
         "stage2_focus": config.stage2_focus,

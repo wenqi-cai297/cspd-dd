@@ -29,6 +29,12 @@ from cspd_stage2.families.pixart.backbone import (
     load_pixart_pipeline,
     resolve_pixart_pipeline_class_name,
 )
+from cspd_stage2.families.sdxl.backbone import (
+    default_sdxl_loader_name,
+    infer_sdxl_family,
+    load_sdxl_pipeline,
+    resolve_sdxl_pipeline_class_name,
+)
 
 
 @dataclass(slots=True)
@@ -265,6 +271,8 @@ def infer_backbone_family(backbone_name: str) -> str:
         return infer_pixart_family(backbone_name)
     if "flux" in lowered:
         return infer_flux_family(backbone_name)
+    if "sdxl" in lowered or "stable-diffusion-xl" in lowered:
+        return infer_sdxl_family(backbone_name)
     return "generic_diffusion_backbone"
 
 
@@ -296,7 +304,7 @@ def load_generative_backbone(
             ],
         )
 
-    if loader_name in {"diffusers_flux_kontext", "diffusers_flux", "diffusers_pixart_sigma", "diffusers_pixart"}:
+    if loader_name in {"diffusers_flux_kontext", "diffusers_flux", "diffusers_pixart_sigma", "diffusers_pixart", "diffusers_sdxl"}:
         try:
             return _load_diffusers_backbone(
                 backbone_name,
@@ -549,6 +557,8 @@ def _default_loader_name(family: str) -> str:
         return default_flux_loader_name(family=family)
     if family in {"pixart_sigma", "pixart"}:
         return default_pixart_loader_name(family=family)
+    if family in {"sdxl"}:
+        return default_sdxl_loader_name(family=family)
     return "generic_python_loader"
 
 
@@ -620,6 +630,8 @@ def _resolve_pipeline_class_name(family: str) -> str:
         return resolve_flux_pipeline_class_name(family=family)
     if family in {"pixart_sigma", "pixart"}:
         return resolve_pixart_pipeline_class_name(family=family)
+    if family in {"sdxl"}:
+        return resolve_sdxl_pipeline_class_name(family=family)
     raise RuntimeError(f"Unsupported diffusers backbone family: {family}")
 
 
@@ -650,6 +662,13 @@ def _load_family_diffusers_pipeline(
             resolved_dtype=resolved_dtype,
             diffusers_module=diffusers_module,
             local_files_only=local_files_only,
+        )
+    if family in {"sdxl"}:
+        return load_sdxl_pipeline(
+            backbone_name,
+            family=family,
+            pipeline_class=pipeline_class,
+            load_kwargs=load_kwargs,
         )
     raise RuntimeError(f"Unsupported diffusers backbone family: {family}")
 

@@ -40,6 +40,7 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 
 ### Main server helper scripts
 
+- `bash scripts/server/stage2/run_sdxl_stage2_official.sh ...`
 - `bash scripts/server/prepare_stage1_metadata.sh ...`
 - `bash scripts/server/run_stage1_qwen_local.sh ...`
 - `bash scripts/server/run_stage1_normalization.sh ...`
@@ -53,6 +54,7 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 - Stage 1 attributes: `runs/stage1/attributes/<dataset_name>/<backend>/<timestamp>`
 - Stage 1 render: `runs/stage1/render/<dataset_name>/<backend>/<timestamp>`
 - Stage 2 train scaffold: `runs/stage2/train/<dataset_label>/<backbone>/<timestamp>`
+- Stage 2 SDXL official wrapper materializes a diffusers imagefolder dataset under each run at `sdxl_materialized_dataset/` with `metadata.jsonl` and copied training images
   - default dataset label is the dataset-root basename, except split-only roots like `.../train` become `<parent>_train` (same for `val`/`valid`/`validation`/`test`/`testing`)
   - optional override: set `STAGE2_DATASET_LABEL=...` before `bash scripts/server/run_stage2_train.sh ...`
 
@@ -197,7 +199,9 @@ accelerate launch --num_processes 2 \
 
 PixArt-Σ is now also wired as a real Stage 2 path for the same `(image, canonical_caption)` objective. This stays in the text-to-image generative framing: real images are VAE-encoded to latents, canonical captions are encoded with the PixArt text stack, and the PixArt transformer is adapted to model those caption-conditioned latents. It is not an image-editing path.
 
-Recommended next practical run: PixArt-Σ dual-GPU full-transformer LoRA at 512 resolution. The PixArt LoRA path now keeps the frozen base transformer/text/VAE runtime unchanged, but promotes the injected LoRA adapter weights to FP32 by default before optimizer setup so AdamW state and the first update no longer run in float16. The adapter forward path still casts inputs/outputs conservatively at the module boundary, and Stage 2 keeps the explicit post-step trainable-parameter finiteness check so the run fails immediately if an optimizer update corrupts trainable weights.
+Recommended current practical baseline: PixArt-Σ dual-GPU **full-transformer LoRA** at 512 resolution. The PixArt LoRA path now keeps the frozen base transformer/text/VAE runtime unchanged, but promotes the injected LoRA adapter weights to FP32 by default before optimizer setup so AdamW state and the first update no longer run in float16. The adapter forward path still casts inputs/outputs conservatively at the module boundary, and Stage 2 keeps the explicit post-step trainable-parameter finiteness check so the run fails immediately if an optimizer update corrupts trainable weights.
+
+Proven stable baseline command:
 
 ```bash
 accelerate launch --num_processes 2 \
@@ -209,8 +213,8 @@ accelerate launch --num_processes 2 \
   --backbone-torch-dtype float16 \
   --training-parameterization lora \
   --trainable-component-group full_transformer \
-  --adapter-rank 16 \
-  --adapter-alpha 16 \
+  --adapter-rank 64 \
+  --adapter-alpha 64 \
   --batch-size 1 \
   --gradient-accumulation-steps 4 \
   --learning-rate 2e-5 \
@@ -221,6 +225,64 @@ accelerate launch --num_processes 2 \
   --pixart-sigma-prompt-dropout-prob 0.1 \
   --epochs 1
 ```
+
+If GPU memory headroom remains comfortable on the target server, the first reasonable throughput/stability tuning step is to try the same command with `--batch-size 2`.
+
+Stage 2 also now supports optional Weights & Biases logging without making `wandb` a hard dependency. Enable it only when you actually want remote experiment tracking and the package is installed in the runtime environment. Example PixArt run with scalar logging plus periodic sample uploads:
+
+```bash
+accelerate launch --num_processes 2 \
+  -m cspd_stage2.cli train \
+  --dataset-root /path/to/imagefolder_dataset \
+  --render-input runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
+  --backbone-name PixArt-alpha/PixArt-Sigma-XL-2-512-MS \
+  --resolution 512 \
+  --backbone-torch-dtype float16 \
+  --training-parameterization lora \
+  --trainable-component-group full_transformer \
+  --adapter-rank 64 \
+  --adapter-alpha 64 \
+  --batch-size 1 \
+  --gradient-accumulation-steps 4 \
+  --learning-rate 2e-5 \
+  --lr-scheduler constant_with_warmup \
+  --lr-warmup-steps 1000 \
+  --max-grad-norm 0.01 \
+  --adam-weight-decay 0.0 \
+  --pixart-sigma-prompt-dropout-prob 0.1 \
+  --wandb \
+  --wandb-project cspd-stage2 \
+  --wandb-run-name imagenette_pixart_stage2 \
+  --wandb-tag pixart \
+  --wandb-tag stage2 \
+  --sample-every 100 \
+  --sample-prompt-file configs/stage2/sample_prompts_imagenette.txt \
+  --sample-num-inference-steps 50 \
+  --sample-guidance-scale 7 \
+  --epochs 1
+```
+
+When W&B is enabled, the Stage 2 trainer logs loss / lr / gradient norm / trainable-parameter diagnostics / dtype counts / CUDA memory stats (when available) on the main process. For PixArt runs, `--sample-every` triggers local sample generation under `runs/stage2/train/.../samples/step_<step>/` and uploads those images to W&B. Prompt sources are resolved in this order: `--sample-prompt-file`, repeated `--sample-prompt`, then the first paired Stage 1 canonical captions if no explicit prompts were provided. The default training-time PixArt sampling knobs now match a more evaluation-like comparison setup: `--sample-num-inference-steps 50` and `--sample-guidance-scale 7`.
+
+For detached comparison against step-0 / periodic training-path samples, you can now run standalone pretrained PixArt sampling with the same prompt-file flow:
+
+```bash
+bash scripts/server/stage2/run_pixart_stage2_baseline_sampling.sh
+```
+
+Direct CLI equivalent:
+
+```bash
+python -m cspd_stage2.cli sample-baseline \
+  --dataset-root /path/to/imagefolder_dataset \
+  --backbone-name PixArt-alpha/PixArt-Sigma-XL-2-512-MS \
+  --sample-prompt-file configs/stage2/sample_prompts_imagenette.txt \
+  --sample-num-prompts 8 \
+  --sample-num-inference-steps 50 \
+  --sample-guidance-scale 7
+```
+
+Standalone baseline outputs default to `runs/stage2/baseline_samples/<dataset_label>/<backbone_slug>/<timestamp>/`, with images saved under `samples/step_000000/` plus a `baseline_sampling_summary.json` metadata file.
 
 Stage 2 no longer supports prompt-cache preprocessing or cached prompt/text embeddings. Training always runs live prompt encoding on the active backbone path during each step. For PixArt-Σ, the live prompt path keeps the PixArt-family prompt length consistent at 300 tokens, and the Stage 2 PixArt path now defaults closer to the official Sigma recipe: low LR, constant-with-warmup scheduling, tight grad clipping, and 0.1 prompt dropout on the canonical-caption conditioning stream. In LoRA mode, PixArt now defaults to FP32 adapter master/update weights even when the loaded backbone stays float16; if you explicitly want the older all-float16 LoRA adapter path, pass `--disable-lora-fp32-for-pixart`. The full-parameter PixArt path still keeps the safer FP32 trainable-parameter option too; disable that older override only with `--disable-full-update-fp32-for-pixart`.
 

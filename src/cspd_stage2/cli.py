@@ -253,6 +253,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="If --inspect-module-reference is provided, inject lightweight LoRA adapters into matching real torch modules",
     )
 
+    train_parser.add_argument('--sdxl-official-script', default=None, help='Path to the official diffusers SDXL LoRA training script; defaults to CSPD_STAGE2_SDXL_SCRIPT or train_text_to_image_lora_sdxl.py on PATH')
+    train_parser.add_argument('--sdxl-num-processes', type=int, default=None, help='Optional accelerate --num_processes override for the official SDXL launch path')
+    train_parser.add_argument('--sdxl-accelerate-extra-arg', action='append', dest='sdxl_accelerate_extra_args', default=None, help='Extra argument forwarded to accelerate launch for the SDXL official path; may be repeated')
+    train_parser.add_argument('--sdxl-mixed-precision', default='fp16', help='mixed_precision value for the official diffusers SDXL launch path')
+    train_parser.add_argument('--sdxl-lr-scheduler', default='constant', help='Learning-rate scheduler forwarded to the official diffusers SDXL script')
+    train_parser.add_argument('--sdxl-lr-warmup-steps', type=int, default=0, help='Warmup steps forwarded to the official diffusers SDXL script')
+    train_parser.add_argument('--sdxl-validation-epochs', type=int, default=1, help='validation_epochs forwarded to the official diffusers SDXL script')
+    train_parser.add_argument('--sdxl-validation-prompt', default=None, help='Optional validation prompt forwarded to the official diffusers SDXL script')
+    train_parser.add_argument('--sdxl-report-to', default='none', help='report_to backend for the official diffusers SDXL script, e.g. none or wandb')
+    train_parser.add_argument('--sdxl-use-8bit-adam', action='store_true', help='Forward --use_8bit_adam to the official diffusers SDXL script')
+    train_parser.add_argument('--sdxl-enable-xformers', action='store_true', help='Forward --enable_xformers_memory_efficient_attention to the official diffusers SDXL script')
+    train_parser.add_argument('--sdxl-disable-gradient-checkpointing', action='store_true', help='Disable --gradient_checkpointing on the official diffusers SDXL script path')
+    train_parser.add_argument('--sdxl-train-text-encoder', action='store_true', help='Forward --train_text_encoder to the official diffusers SDXL script')
+    train_parser.add_argument('--sdxl-caption-dropout-probability', type=float, default=None, help='Optional caption dropout probability forwarded to the official diffusers SDXL script')
+    train_parser.add_argument('--sdxl-noise-offset', type=float, default=None, help='Optional noise offset forwarded to the official diffusers SDXL script')
+    train_parser.add_argument('--sdxl-extra-arg', action='append', dest='sdxl_extra_args', default=None, help='Extra raw argument appended to the official diffusers SDXL script command; may be repeated')
+
 
     inspect_parser = subparsers.add_parser(
         "inspect-targets",
@@ -417,6 +434,8 @@ def _resolve_conditioning_objective(backbone_name: str, requested_objective: str
     family = infer_backbone_family(backbone_name)
     if requested_objective == "finetune_full_flux_transformer_on_real_image_and_stage1_canonical_caption_pairs" and family in {"pixart", "pixart_sigma"}:
         return "finetune_pixart_transformer_on_real_image_and_stage1_canonical_caption_pairs"
+    if requested_objective == "finetune_full_flux_transformer_on_real_image_and_stage1_canonical_caption_pairs" and family == "sdxl":
+        return "launch_official_diffusers_sdxl_lora_training_on_real_image_and_stage1_canonical_caption_pairs"
     return requested_objective
 
 
@@ -516,6 +535,22 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         enable_gradient_checkpointing=not args.disable_gradient_checkpointing,
         full_update_fp32_for_pixart=not args.disable_full_update_fp32_for_pixart,
         lora_fp32_for_pixart=not args.disable_lora_fp32_for_pixart,
+        sdxl_official_script=args.sdxl_official_script,
+        sdxl_num_processes=args.sdxl_num_processes,
+        sdxl_accelerate_extra_args=args.sdxl_accelerate_extra_args or [],
+        sdxl_mixed_precision=args.sdxl_mixed_precision,
+        sdxl_lr_scheduler=args.sdxl_lr_scheduler,
+        sdxl_lr_warmup_steps=args.sdxl_lr_warmup_steps,
+        sdxl_validation_epochs=args.sdxl_validation_epochs,
+        sdxl_validation_prompt=args.sdxl_validation_prompt,
+        sdxl_report_to=args.sdxl_report_to,
+        sdxl_use_8bit_adam=args.sdxl_use_8bit_adam,
+        sdxl_enable_xformers=args.sdxl_enable_xformers,
+        sdxl_gradient_checkpointing=not args.sdxl_disable_gradient_checkpointing,
+        sdxl_train_text_encoder=args.sdxl_train_text_encoder,
+        sdxl_caption_dropout_probability=args.sdxl_caption_dropout_probability,
+        sdxl_noise_offset=args.sdxl_noise_offset,
+        sdxl_extra_args=args.sdxl_extra_args or [],
     )
     config.adapter_plan.target_module_patterns = (
         config.adapter_plan.target_module_patterns or resolve_effective_module_selection(config)["effective_include_patterns"]
