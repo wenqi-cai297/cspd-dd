@@ -17,38 +17,153 @@ from cspd_stage2.training import (
     _accelerator_rank_info,
     _append_memory_event,
     _assert_trainable_parameters_finite,
-    _build_lr_scheduler,
-    _build_optimizer,
     _collect_cuda_memory_stats,
     _collect_step_metrics,
     _classify_training_failure,
     _effective_prompt_max_sequence_length,
     _emit_stage2_console_event,
     _finish_wandb_run,
-    _freeze_stage2_modules,
     _init_wandb_run,
     _mark_sync_point,
-    _maybe_apply_conditioning_dropout,
     _move_named_pipeline_components,
-    _prepare_pixart_forward_inputs,
     _raise_on_non_finite_scalar,
     _record_gradient_diagnostics,
     _resolve_sample_prompts,
     _resolve_training_device,
     _resolve_training_dtype,
-    _resolve_pixart_partial_full_update_fp32_exclude_patterns,
-    _run_pixart_wandb_sampling,
-    _safe_write_json,
     _save_transformer_checkpoint,
     _set_module_mode,
-    _should_force_full_update_fp32,
     _summarize_tensor_like,
-    _torch_dtype_label,
-    _upcast_trainable_parameters_,
     _wandb_log,
-    derive_stage2_baseline_sample_output_dir,
     tqdm,
 )
+from cspd_stage2.training_common import (
+    _build_lr_scheduler,
+    _build_optimizer,
+    _freeze_stage2_modules,
+    _prompt_slug,
+    _safe_write_json,
+    _save_pil_like_image,
+    _should_force_full_update_fp32,
+    _torch_dtype_label,
+    _upcast_trainable_parameters_,
+    derive_stage2_baseline_sample_output_dir,
+    resolve_effective_module_selection,
+)
+
+
+def _resolve_pixart_partial_full_update_fp32_exclude_patterns(*, config: Stage2TrainConfig) -> list[str]:
+    family = infer_backbone_family(config.backbone_name)
+    if family not in {"pixart", "pixart_sigma"}:
+        return []
+    if not _should_force_full_update_fp32(config=config):
+        return []
+    selection = resolve_effective_module_selection(config)
+    if selection["selection_is_full_transformer"]:
+        return []
+    return ["adaln_single.*"]
+
+
+def _infer_module_parameter_dtype(module: Any | None, *, fallback: Any) -> Any:
+    if module is None or not hasattr(module, "parameters"):
+        return fallback
+    for parameter in module.parameters():
+        return parameter.dtype
+    return fallback
+
+
+def _infer_pixart_input_boundary_dtypes(transformer: Any, *, fallback: Any) -> dict[str, Any]:
+    hidden_states_dtype = _infer_module_parameter_dtype(getattr(transformer, "pos_embed", None), fallback=fallback)
+    encoder_hidden_states_dtype = _infer_module_parameter_dtype(getattr(transformer, "caption_projection", None), fallback=_infer_module_parameter_dtype(getattr(transformer, "context_embedder", None), fallback=hidden_states_dtype))
+    added_cond_kwargs_dtype = _infer_module_parameter_dtype(getattr(transformer, "adaln_single", None), fallback=hidden_states_dtype)
+    return {"hidden_states": hidden_states_dtype, "encoder_hidden_states": encoder_hidden_states_dtype, "added_cond_kwargs": added_cond_kwargs_dtype}
+
+
+def _prepare_pixart_forward_inputs(*, transformer: Any, noisy_latents: Any, prompt_embeds: Any, device: Any, train_dtype: Any) -> dict[str, Any]:
+    import torch
+
+    boundary_dtypes = _infer_pixart_input_boundary_dtypes(transformer, fallback=train_dtype)
+    batch_size = int(noisy_latents.shape[0])
+    latent_height = int(noisy_latents.shape[-2])
+    latent_width = int(noisy_latents.shape[-1])
+    aspect_ratio_value = float(latent_width) / float(latent_height) if latent_height > 0 else 1.0
+    added_cond_dtype = boundary_dtypes["added_cond_kwargs"]
+    resolution = torch.tensor([[latent_height * 8.0, latent_width * 8.0]], device=device, dtype=added_cond_dtype).repeat(batch_size, 1)
+    aspect_ratio = torch.tensor([[aspect_ratio_value]], device=device, dtype=added_cond_dtype).repeat(batch_size, 1)
+    return {
+        "hidden_states": noisy_latents.to(device=device, dtype=boundary_dtypes["hidden_states"]),
+        "encoder_hidden_states": prompt_embeds.to(device=device, dtype=boundary_dtypes["encoder_hidden_states"]),
+        "added_cond_kwargs": {"resolution": resolution, "aspect_ratio": aspect_ratio},
+        "dtype_plan": {key: _torch_dtype_label(value) for key, value in boundary_dtypes.items()},
+        "latent_hw": [latent_height, latent_width],
+    }
+
+
+def _maybe_apply_conditioning_dropout(conditioning_text: list[str], *, config: Stage2TrainConfig, torch_module: Any) -> tuple[list[str], int]:
+    family = infer_backbone_family(config.backbone_name)
+    if family not in {"pixart", "pixart_sigma"}:
+        return list(conditioning_text), 0
+    dropout_prob = float(config.pixart_sigma_prompt_dropout_prob)
+    if dropout_prob <= 0.0:
+        return list(conditioning_text), 0
+    dropped_count = 0
+    conditioned: list[str] = []
+    for text in conditioning_text:
+        if float(torch_module.rand(1).item()) < dropout_prob:
+            conditioned.append("")
+            dropped_count += 1
+        else:
+            conditioned.append(text)
+    return conditioned, dropped_count
+
+
+def _run_pixart_wandb_sampling(*, pipeline: Any, transformer: Any, accelerator: Any | None, config: Stage2TrainConfig, run_dir: Path, epoch: int, optimizer_step: int, prompts: list[str], device: Any, train_dtype: Any, wandb_run: Any | None) -> dict[str, Any]:
+    result: dict[str, Any] = {"enabled": True, "attempted": True, "optimizer_step": optimizer_step, "epoch": epoch, "prompt_count": len(prompts)}
+    if not prompts:
+        result.update({"status": "skipped", "reason": "no_prompts"})
+        return result
+    import torch
+
+    sample_dir = run_dir / "samples" / f"step_{optimizer_step:06d}"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    resolved_transformer = accelerator.unwrap_model(transformer) if accelerator is not None else transformer
+    original_transformer = pipeline.transformer
+    training_mode = resolved_transformer.training if hasattr(resolved_transformer, "training") else None
+    resolved_transformer.eval()
+    pipeline.transformer = resolved_transformer
+    image_paths: list[Path] = []
+    table_rows: list[list[Any]] = []
+    try:
+        generator = torch.Generator(device=device.type if hasattr(device, "type") else "cpu")
+        generator.manual_seed(int(config.sample_seed) + int(optimizer_step))
+        with torch.no_grad():
+            outputs = pipeline(prompt=prompts, num_inference_steps=max(int(config.sample_num_inference_steps), 1), guidance_scale=float(config.sample_guidance_scale), height=int(config.resolution), width=int(config.resolution), generator=generator, output_type="pil")
+        images = list(getattr(outputs, "images", []) or [])
+        if len(images) != len(prompts):
+            raise RuntimeError(f"PixArt sampling returned {len(images)} images for {len(prompts)} prompts")
+        result["status"] = "completed"
+        result["sample_dir"] = str(sample_dir.resolve())
+        for index, (prompt, image) in enumerate(zip(prompts, images), start=1):
+            image_path = sample_dir / f"{index:02d}_{_prompt_slug(prompt)}.png"
+            _save_pil_like_image(image, image_path)
+            image_paths.append(image_path)
+            table_rows.append([optimizer_step, epoch, prompt, str(image_path.resolve())])
+        if wandb_run is not None:
+            import wandb
+
+            images_payload = [wandb.Image(str(image_path), caption=prompt) for image_path, prompt in zip(image_paths, prompts)]
+            _wandb_log(wandb_run, {"samples/images": images_payload}, step=optimizer_step)
+            table = wandb.Table(columns=["optimizer_step", "epoch", "prompt", "image_path"], data=table_rows)
+            _wandb_log(wandb_run, {"samples/table": table}, step=optimizer_step)
+    except Exception as exc:
+        result.update({"status": "failed", "error_type": type(exc).__name__, "error": str(exc)})
+    finally:
+        pipeline.transformer = original_transformer
+        if training_mode is not None:
+            resolved_transformer.train(training_mode)
+    result["saved_images"] = [str(path.resolve()) for path in image_paths]
+    return result
+
 
 def run_stage2_pixart_baseline_sampling(
     *,

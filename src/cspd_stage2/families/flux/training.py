@@ -21,7 +21,6 @@ from cspd_stage2.training import (
     _emit_stage2_console_event,
     _enable_transformer_gradient_checkpointing,
     _finish_wandb_run,
-    _freeze_stage2_modules,
     _init_wandb_run,
     _mark_sync_point,
     _move_named_pipeline_components,
@@ -29,13 +28,22 @@ from cspd_stage2.training import (
     _record_gradient_diagnostics,
     _resolve_training_device,
     _resolve_training_dtype,
-    _safe_write_json,
-    _sample_flux_flow_matching_timesteps,
     _save_transformer_checkpoint,
     _set_module_mode,
-    _torch_dtype_label,
     _wandb_log,
 )
+from cspd_stage2.training_common import _freeze_stage2_modules, _safe_write_json, _torch_dtype_label
+
+
+def _sample_flux_flow_matching_timesteps(*, batch_size: int, device: Any, dtype: Any) -> tuple[Any, Any]:
+    import torch
+
+    timesteps = torch.rand((batch_size,), device=device, dtype=torch.float32)
+    sigmas = timesteps.to(device=device, dtype=dtype)
+    while sigmas.ndim < 3:
+        sigmas = sigmas.unsqueeze(-1)
+    return timesteps, sigmas
+
 
 def run_real_stage2_flux_training(
     *,

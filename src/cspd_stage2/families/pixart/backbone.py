@@ -5,6 +5,19 @@ from __future__ import annotations
 from typing import Any
 
 
+def resolve_pixart_conditioning_transformer_patterns() -> list[str]:
+    """Return the PixArt-specific narrowed conditioning-target patterns."""
+    return [
+        "caption_projection",
+        "caption_projection.*",
+        "adaln_single",
+        "adaln_single.*",
+        "transformer_blocks.*.attn1.*",
+        "transformer_blocks.*.attn2.*",
+        "transformer_blocks.*.ff.*",
+    ]
+
+
 def infer_pixart_family(backbone_name: str) -> str:
     """Infer the PixArt family label from a backbone identifier."""
     lowered = backbone_name.lower()
