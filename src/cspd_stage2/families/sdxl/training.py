@@ -223,8 +223,10 @@ def _build_sdxl_official_command(*, config: Any, script_path: str, materialized:
         '--validation_epochs', str(max(int(getattr(config, 'sdxl_validation_epochs', 1)), 1)),
         '--rank', str(int(getattr(config, 'adapter_plan').rank)),
         '--seed', str(int(getattr(config, 'seed', 42))),
-        '--report_to', str(getattr(config, 'sdxl_report_to', 'none')),
     ])
+    report_to = str(getattr(config, 'sdxl_report_to', 'none') or 'none').strip().lower()
+    if report_to and report_to != 'none':
+        command.extend(['--report_to', report_to])
     if getattr(config, 'max_steps', None) is not None:
         command.extend(['--max_train_steps', str(int(getattr(config, 'max_steps')))])
     else:
