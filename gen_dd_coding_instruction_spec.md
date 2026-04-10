@@ -31,40 +31,30 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - **Stage 1 extraction** is implemented and runnable.
 - **Stage 1 normalization** is implemented as a deterministic-first canonicalization step with inline constrained VLM review enabled by default.
 - **Stage 1 render** is implemented as a deterministic archetype-template renderer.
+- **Stage 2 SDXL LoRA training** is implemented and has completed successful end-to-end runs on ImageNette.
+- **Stage 2 inference / sampling** script is implemented for LoRA vs baseline A/B comparison.
 - Supporting server scripts, metadata prep, mock/regression runs, and full workflow wiring exist.
 
 ### Not implemented yet
-- **Later research stages after current Stage 2 planning/scaffold work** are not implemented in code yet.
+- **Later research stages** are not implemented in code yet.
   - Stage 3 visual clustering / mode discovery
   - Stage 3 visual anchor estimation
   - Stage 3 semantic anchor aggregation
   - Stage 3 semantic anchor rendering
   - Stage 4 dual-anchor conditioned distilled generation
 
-### Partially implemented now
-- **Stage 2 generative-backbone adaptation / canonical-caption conditioning alignment** now has a substantial scaffold in code, but not a runnable end-to-end real training loop yet.
-- Implemented Stage 2 pieces now include:
-  - image + Stage 1 canonical-caption pairing / manifest generation
-  - Stage 2 run-directory setup and trainer-plan/config snapshot writing
-  - diffusers-backed real FLUX/Kontext backbone load path for inspection
-  - module targeting inspection utilities
-  - optional LoRA-target planning / injection scaffolding on explicitly provided real modules
-  - module-tree dump helpers for top-level pipeline components and transformer submodules
-- Current Stage 2 default recorded policy in repo:
-  - freeze non-transformer top-level modules
-  - fine-tune the full `FluxTransformer2DModel`
-  - if memory is insufficient, fall back to conditioning-related transformer submodules only
-- Important boundary:
-  - the repo records this policy honestly in Stage 2 metadata/artifacts,
-  - but **executable real FLUX.1 Kontext / FLUX transformer fine-tuning is still not wired end-to-end yet**.
+### Partially implemented / legacy exploratory
+- **Stage 2 FLUX family**: training loop is only a stub; backbone loading and inspection work but end-to-end training is not wired.
+- **Stage 2 PixArt family**: training loop is functional but has been deprioritized as an exploratory branch (text-to-image only, no img2img path).
 
 ### Important practical reading
 Right now, the repo is best understood as:
 - a working **Prep** pipeline for class metadata,
 - a working **Stage 1** pipeline consisting of extraction -> normalization -> render,
+- a working **Stage 2 SDXL LoRA** training pipeline that delegates to the official diffusers trainer,
+- a working **Stage 2 inference** script for sampling from trained LoRA weights,
 - where Stage 1 normalization is deterministic-first but can invoke constrained VLM review on ambiguous slots,
-- plus planning/spec notes for later stages,
-- but **not** a multi-stage end-to-end CSPD implementation yet.
+- plus planning/spec notes for later stages.
 
 ### Packaging / environment reality check
 - The installable project in `pyproject.toml` is currently named **`cspd-stage1`**.
@@ -96,10 +86,17 @@ Right now, the repo is best understood as:
 - `src/cspd_stage2/`
   - `__init__.py`
   - `cli.py`
-  - `training.py`
-  - `data.py`
-  - `backbone.py`
-  - currently implements Stage 2 pairing / planning / backbone inspection scaffolding and partial training-path plumbing
+  - `training.py` — main training orchestration, config, dispatch
+  - `training_common.py` — shared training utilities (optimizer, scheduler, freeze logic)
+  - `data.py` — pairing, manifest, dataloader
+  - `backbone.py` — backbone loading, module inspection, LoRA injection
+  - `families/flux/backbone.py`, `families/flux/training.py` — FLUX family (stub training)
+  - `families/pixart/backbone.py`, `families/pixart/training.py` — PixArt family (functional but deprioritized)
+  - `families/sdxl/backbone.py`, `families/sdxl/training.py` — SDXL family (**working end-to-end**)
+  - implements Stage 2 pairing / planning / backbone inspection / SDXL LoRA training via official diffusers delegation
+
+### Inference scripts
+- `scripts/inference/sample_sdxl_lora.py` — SDXL LoRA sampling with baseline comparison support
 
 ### Config / metadata
 - `classes.json`
@@ -134,7 +131,13 @@ Right now, the repo is best understood as:
 - `scripts/server/run_stage1_full_workflow.sh`
 - `scripts/server/generate_class_to_archetype_vlm.sh`
 - `scripts/server/run_stage1_normalization_review_vlm.sh` (prototype / sidecar helper retained)
-- `scripts/server/README.md` documents the recommended Prep + Stage 1 helper flow
+- `scripts/server/check_stage2_sdxl_env.sh` — Stage 2 SDXL environment preflight
+- `scripts/server/stage2/run_sdxl_stage2_official.sh` — SDXL LoRA training launcher (default: 2 GPUs, 512 resolution)
+- `scripts/server/stage2/run_pixart_stage2_baseline_sampling.sh`
+- `scripts/server/stage2/run_pixart_stage2_wandb.sh`
+- `scripts/server/run_stage2_train.sh`
+- `scripts/server/dump_stage2_backbone_modules.sh`
+- `scripts/server/README.md` documents the recommended Prep + Stage 1 + Stage 2 helper flow
 
 ### Stage 2 output-dir rule (must remember)
 - The repo-standard Stage 2 run root is:
@@ -199,8 +202,12 @@ For implementation tracking in this repo, use the following stage view:
 2. **Stage 1B**: deterministic-first normalization with optional inline VLM review for ambiguous cases
 3. **Stage 1C**: canonical semantic rendering from normalized Stage 1 records
 
+### Stage 2
+- generative-backbone adaptation / canonical-semantic-space familiarization
+- current working implementation: **SDXL base 1.0 UNet LoRA** via official diffusers trainer
+- legacy exploratory families: FLUX (stub), PixArt (functional but deprioritized)
+
 ### Later planned stages
-2. generative-backbone adaptation / canonical-semantic-space familiarization
 3. visual mode discovery / clustering
 4. visual anchor estimation
 5. semantic anchor aggregation
@@ -661,19 +668,125 @@ That means render should keep using:
 
 ---
 
-## 12. What is deterministic vs learned right now
+## 12. Stage 2 — SDXL LoRA training (current mainline)
+
+### Implementation status
+**Implemented and successfully run on ImageNette.**
+
+### Core purpose
+Train the SDXL UNet via LoRA so the model's semantic space learns to recognize our Stage 1C canonical captions. The training pairs are `(real image, canonical_caption)` from Stage 1 render outputs.
+
+### Architecture
+Stage 2 SDXL delegates training to the **official diffusers `train_text_to_image_lora_sdxl.py`** script. The repo owns:
+- **pairing**: matching ImageFolder images to Stage 1C render `records.jsonl` by `record_id`
+- **dataset materialization**: copying images + generating `metadata.jsonl` in diffusers imagefolder format
+- **launch orchestration**: building the `accelerate launch` command with config translation
+- **preflight checks**: validating environment, script resolution, dataset integrity
+
+### Main code
+- `src/cspd_stage2/families/sdxl/training.py` — materialization, command building, launch
+- `src/cspd_stage2/training.py` — dispatch (detects `sdxl` family, routes to official wrapper)
+- `src/cspd_stage2/cli.py` — CLI with all SDXL-specific flags (`--sdxl-*`)
+- `scripts/server/stage2/run_sdxl_stage2_official.sh` — server helper
+- `scripts/server/check_stage2_sdxl_env.sh` — environment check
+
+### Training configuration (current defaults)
+- backbone: `stabilityai/stable-diffusion-xl-base-1.0`
+- parameterization: LoRA (UNet attention layers: `to_k`, `to_q`, `to_v`, `to_out.0`)
+- resolution: **512** (lowered from SDXL native 1024 for memory)
+- GPUs: **2** (default `--sdxl-num-processes 2`)
+- mixed precision: fp16
+- gradient checkpointing: enabled
+- lr: 2e-5, scheduler: constant, no warmup
+- VAE + text encoders: frozen
+- `--report_to` is omitted (not `"none"`) to avoid accelerate tracker init errors
+
+### CLI usage
+```bash
+cspd-stage2 train \
+  --dataset-root /path/to/ImageNette/train \
+  --render-input /path/to/records.jsonl \
+  --backbone-name stabilityai/stable-diffusion-xl-base-1.0 \
+  --training-parameterization lora \
+  --adapter-rank 64 \
+  --batch-size 8 --epochs 5 \
+  --resolution 512
+```
+
+### Server helper usage
+```bash
+bash scripts/server/stage2/run_sdxl_stage2_official.sh \
+  <dataset_root> <render_records_jsonl> [batch_size] [epochs] [extra args...]
+```
+
+### Training output artifacts
+```text
+runs/stage2/train/<dataset_label>/<backbone_slug>/<timestamp>/
+├── sdxl_materialized_dataset/       # copied images + metadata.jsonl
+│   ├── images/
+│   └── metadata.jsonl
+├── official_output/                 # diffusers trainer output
+│   ├── pytorch_lora_weights.safetensors   # final LoRA weights
+│   └── checkpoint-*/                      # intermediate checkpoints
+├── sdxl_official_launch_plan.json
+├── sdxl_official_stdout.txt
+├── sdxl_official_stderr.txt
+├── trainer_plan.json
+├── stage2_config_snapshot.json
+├── stage2_run_summary.json
+├── train_manifest_summary.json
+├── unmatched_images.jsonl
+└── unmatched_render_records.jsonl
+```
+
+### External dependency
+The official diffusers repo must be cloned and pip-installed from source (`pip install -e .`). The training script is resolved via:
+1. `--sdxl-official-script` CLI flag
+2. `CSPD_STAGE2_SDXL_SCRIPT` env var
+3. `DIFFUSERS_REPO_ROOT/examples/text_to_image/train_text_to_image_lora_sdxl.py`
+4. `train_text_to_image_lora_sdxl.py` on PATH
+
+### First successful training run (2026-04-10)
+- dataset: ImageNette train (12,894 pairs, 100% pairing rate, 10 classes, 7 archetypes)
+- config: rank=16, batch_size=1, 1 epoch (16,120 steps), 2 GPUs, ~6h49m
+- result: LoRA weights (8.3MB) produced; qualitative A/B comparison shows clear improvement over baseline
+- observation: model shifts from conceptual/illustration style toward realistic photo style matching training data
+- known gap: generated images still differ from real dataset photos in detail, texture, and composition naturalness
+
+### Inference / sampling script
+- `scripts/inference/sample_sdxl_lora.py`
+- loads base SDXL + optional LoRA weights
+- generates images from canonical captions for visual A/B comparison
+- supports `--no-lora` baseline mode with same seed for fair comparison
+- default prompts cover all 7 ImageNette archetypes
+- output: PNG images + `sample_metadata.json`
+
+### Current hyperparameter exploration (2026-04-10)
+- investigating: fewer epochs (5) + higher rank (64) to reduce overfitting while increasing expressiveness
+- batch_size increased to 8 for faster iteration
+
+### Important caveats
+- the official diffusers script version must match the pip-installed diffusers version (use `pip install -e .` from the cloned repo)
+- `--report_to none` must NOT be passed to the official script; latest accelerate rejects `"none"` as an unsupported tracker
+- dataset-root must be the exact Stage 1-compatible ImageFolder split root (e.g. `.../ImageNette/train`), not the parent
+
+---
+
+## 13. What is deterministic vs learned right now
 
 ### Learned / model-driven
 - Prep multimodal class-to-archetype mapping
 - Stage 1A image-level attribute extraction
 - Stage 1B inline VLM review for ambiguous slots only
+- Stage 2 SDXL UNet LoRA training (canonical-caption conditioning alignment)
 
 ### Deterministic / rule-driven
 - Stage 1B first-pass normalization
 - Stage 1C render
+- Stage 2 pairing / dataset materialization / launch orchestration
 
 This separation is deliberate.
-The repo currently uses VLMs where semantic proposal or ambiguity resolution is needed, while keeping the main downstream cleanup/render path auditable.
+The repo currently uses VLMs where semantic proposal or ambiguity resolution is needed, uses diffusion model fine-tuning for semantic-space alignment, while keeping the main cleanup/render/orchestration paths auditable and deterministic.
 
 ---
 
@@ -694,77 +807,78 @@ No current modules are present in the repo yet for:
 
 ## 14. What future coding agents should not get wrong
 
-### 14.1 Do not misread the repo as multi-stage-complete
+### 15.1 Do not misread the repo as multi-stage-complete
 It is not.
-Currently the repo is mostly:
+Currently the repo covers:
 - Prep metadata,
-- Stage 1 extraction,
-- Stage 1 normalization,
-- Stage 1 render,
-- helper scripts,
-- planning notes.
+- Stage 1 extraction / normalization / render,
+- Stage 2 SDXL LoRA training (working end-to-end),
+- Stage 2 inference / sampling,
+- but Stage 3+ is not implemented.
 
-### 14.2 Do not ignore render anymore
+### 15.2 Do not ignore render anymore
 Render is implemented and belongs to Stage 1 workflow semantics.
-Its canonical implementation now lives under `src/cspd_stage1/`, while `src/cspd_stage2/` is only future scaffolding.
+Its canonical implementation now lives under `src/cspd_stage1/`.
 
-### 14.3 Do not silently treat class-aware correction as the main downstream strategy
+### 15.3 Do not silently treat class-aware correction as the main downstream strategy
 Current intended boundary is:
 - class-aware logic is acceptable in Prep,
 - downstream normalization/render should stay mostly archetype-aware and auditable.
 
-### 14.4 Do not describe Stage 1B as purely deterministic anymore
+### 15.4 Do not describe Stage 1B as purely deterministic anymore
 Current Stage 1B is **deterministic-first with inline constrained VLM review by default**.
 The deterministic result is preserved for auditability, but the effective result may include reviewed overrides.
 
-### 14.5 Do not assume per-slot confidence/state objects exist
+### 15.5 Do not assume per-slot confidence/state objects exist
 They do not exist in current Stage 1 extraction outputs.
 
-### 14.6 Do not spec future stages against stale numbering
+### 15.6 Do not spec future stages against stale numbering
 Current implementation-facing numbering is:
 - Prep
 - Stage 1A extraction
 - Stage 1B normalization (+ inline review)
 - Stage 1C render
-- later research stages remain unimplemented
+- Stage 2 SDXL LoRA training (working)
+- Stage 2 inference / sampling (working)
+- Stage 3+ remains unimplemented
+
+### 15.7 Do not treat Stage 2 as still scaffold-only
+SDXL LoRA training is now **working end-to-end** with successful runs on ImageNette.
+The repo delegates to the official diffusers trainer; do not rewrite the training loop unless there is a concrete need.
+
+### 15.8 Do not pass --report_to none to the official SDXL script
+Latest accelerate rejects `"none"` as an unsupported tracker. The repo already handles this by omitting `--report_to` when the value is `"none"`.
 
 ---
 
-## 15. Immediate next implementation work
+## 16. Immediate next implementation work
 
-Given current repo state, the most sensible next coding work is:
+Given current repo state, the most sensible next work is:
 
-1. **Use the current clean Stage 1 outputs as the fixed Stage 2 input surface**
-   - the latest ImageNette normalization/render run has already been pushed to a no-render-failure baseline
-   - Stage 1 should no longer be the main blocker unless a concrete upstream bug reappears
+1. **Stage 2 hyperparameter tuning on SDXL LoRA**
+   - first successful run used rank=16, 1 epoch; qualitative results show LoRA learns the semantic space but may overfit
+   - currently investigating: fewer epochs (5) + higher rank (64) + larger batch size (8)
+   - goal: find the sweet spot between expressiveness and overfitting
+   - metrics: visual A/B comparison via `scripts/inference/sample_sdxl_lora.py`
 
-2. **Push Stage 2 from mixed-family scaffold status to a clean family-split implementation surface**
-   - Stage 2 pairing / manifest / trainer-plan infrastructure is already implemented
-   - FLUX and PixArt training / backbone logic have now been split into family subpackages
-   - current engineering rule is: only neutral shared code should remain outside family packages
-   - before substantial new SDXL work, keep reducing leftover mixed family logic in shared modules
+2. **Evaluate Stage 2 output quality systematically**
+   - current evaluation is qualitative (visual comparison)
+   - may need: FID/CLIP score computation, per-archetype quality breakdown
+   - compare across checkpoint intervals to find optimal stopping point
 
-3. **Immediate next mainline engineering target**
-   - move the next serious Stage 2 investigation to **SDXL base 1.0**, not PixArt
-   - treat Stage 2 as an image-to-image-flavored generative adaptation problem aligned with later visual+semantic distilled-data creation
-   - use the current Stage 2 family-split refactor as the structural base for adding an SDXL family cleanly rather than patching old mixed modules
-   - initial SDXL tuning hypothesis should prioritize **UNet LoRA** (attention-only first, broader UNet LoRA second if needed), not text encoder or VAE
+3. **Stage 2 → Stage 3 transition planning**
+   - once Stage 2 produces good enough canonical-caption-conditioned outputs, move to Stage 3
+   - Stage 3 will use the trained Stage 2 model as the generative backbone for distilled dataset creation
+   - Stage 3 is still fully future work: visual clustering, anchor estimation, semantic aggregation
 
 4. **Keep method wording generic, implementation wording honest**
    - method level: generative-backbone adaptation / canonical-semantic-space familiarization
-   - current exploratory legacy families in repo: FLUX and PixArt
-   - next preferred implementation target family: **SDXL base 1.0**
-   - current practical framing: move toward image-to-image-capable Stage 2 rather than staying on a text-to-image-only branch that mismatches the downstream project need
-
-5. **Stage 3 remains future work**
-   - visual mode discovery / clustering
-   - visual anchor estimation
-   - cluster-wise semantic aggregation
-   - semantic anchor rendering
+   - current working implementation: **SDXL base 1.0 UNet LoRA** via official diffusers
+   - legacy exploratory families preserved in repo: FLUX (stub), PixArt (functional but deprioritized)
 
 ---
 
-## 16. If this document needs updating later
+## 17. If this document needs updating later
 
 When updating this file:
 - prefer repo-truth over older chat memory,
