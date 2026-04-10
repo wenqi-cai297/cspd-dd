@@ -14,10 +14,12 @@ dependencies:
   - pytorch-cuda=12.1
   - pillow
   - tqdm>=4.66
+  - numpy
   - pip:
       - diffusers>=0.37.1
       - transformers
       - accelerate
+      - peft
       - sentencepiece
       - protobuf
       - tiktoken

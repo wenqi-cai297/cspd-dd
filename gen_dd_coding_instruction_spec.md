@@ -65,7 +65,9 @@ Right now, the repo is best understood as:
   - **`cspd-stage2`** for Stage 2 scaffold / inspection / planning commands
   - **`cspd-stage3`** for Stage 3 encoding / clustering / mode extraction
 - The repo now also bundles `environment.yml` for the shared conda environment name **`cspd-dd`** used by the server shell helpers.
-- `scikit-learn` is required for Stage 3 K-Means clustering.
+- Core dependencies: `torch`, `torchvision`, `numpy`, `tqdm`, `pillow`, `diffusers`, `transformers`, `accelerate`, `peft`, `sentencepiece`, `protobuf`, `tiktoken`, `safetensors`, `scikit-learn`.
+- Optional dependencies (declared in `pyproject.toml`): `wandb` (W&B logging), `xformers` (memory-efficient attention), `bitsandbytes` (8-bit Adam).
+- For new environment setup: `conda env create -f environment.yml && conda activate cspd-dd` installs everything needed.
 
 ---
 

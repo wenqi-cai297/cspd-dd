@@ -9,17 +9,26 @@ description = "CSPD pipeline: Prep, Stage 1 canonicalization/render, Stage 2 SDX
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "torch>=2.0",
+  "torchvision",
+  "numpy",
   "tqdm>=4.66",
   "pillow",
   "diffusers>=0.37.1",
   "transformers",
   "accelerate",
+  "peft",
   "sentencepiece",
   "protobuf",
   "tiktoken",
   "safetensors",
   "scikit-learn",
 ]
+
+[project.optional-dependencies]
+wandb = ["wandb"]
+xformers = ["xformers"]
+8bit = ["bitsandbytes"]
 
 [project.scripts]
 cspd-stage1 = "cspd_stage1.cli:main"
