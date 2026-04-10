@@ -22,4 +22,5 @@ dependencies:
       - protobuf
       - tiktoken
       - safetensors
+      - scikit-learn
       - -e .

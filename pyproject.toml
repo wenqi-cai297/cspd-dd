@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cspd-stage1"
 version = "0.1.0"
-description = "Prep + Stage 1 + Stage 2 scaffold for CSPD (metadata prep, Stage 1 canonicalization/render, Stage 2 adaptation scaffold)"
+description = "CSPD pipeline: Prep, Stage 1 canonicalization/render, Stage 2 SDXL LoRA adaptation, Stage 3 visual/semantic mode discovery"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -18,11 +18,13 @@ dependencies = [
   "protobuf",
   "tiktoken",
   "safetensors",
+  "scikit-learn",
 ]
 
 [project.scripts]
 cspd-stage1 = "cspd_stage1.cli:main"
 cspd-stage2 = "cspd_stage2.cli:main"
+cspd-stage3 = "cspd_stage3.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

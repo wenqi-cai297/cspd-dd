@@ -33,6 +33,7 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - **Stage 1 render** is implemented as a deterministic archetype-template renderer.
 - **Stage 2 SDXL LoRA training** is implemented and has completed successful end-to-end runs on ImageNette.
 - **Stage 2 inference / sampling** script is implemented for LoRA vs baseline A/B comparison.
+- **Stage 3 visual/semantic mode discovery** is implemented: VAE/text encoding + per-class K-Means clustering + mode extraction.
 - Supporting server scripts, metadata prep, mock/regression runs, and full workflow wiring exist.
 
 ### Not implemented yet
@@ -53,15 +54,18 @@ Right now, the repo is best understood as:
 - a working **Stage 1** pipeline consisting of extraction -> normalization -> render,
 - a working **Stage 2 SDXL LoRA** training pipeline that delegates to the official diffusers trainer,
 - a working **Stage 2 inference** script for sampling from trained LoRA weights,
+- a working **Stage 3** pipeline for latent encoding, per-class clustering, and visual/semantic mode extraction,
 - where Stage 1 normalization is deterministic-first but can invoke constrained VLM review on ambiguous slots,
-- plus planning/spec notes for later stages.
+- plus planning/spec notes for Stage 4.
 
 ### Packaging / environment reality check
 - The installable project in `pyproject.toml` is currently named **`cspd-stage1`**.
 - The console scripts exposed there are now:
   - **`cspd-stage1`** with Stage 1 subcommands such as `run`, `normalize`, and `render`
   - **`cspd-stage2`** for Stage 2 scaffold / inspection / planning commands
+  - **`cspd-stage3`** for Stage 3 encoding / clustering / mode extraction
 - The repo now also bundles `environment.yml` for the shared conda environment name **`cspd-dd`** used by the server shell helpers.
+- `scikit-learn` is required for Stage 3 K-Means clustering.
 
 ---
 
@@ -94,6 +98,12 @@ Right now, the repo is best understood as:
   - `families/pixart/backbone.py`, `families/pixart/training.py` — PixArt family (functional but deprioritized)
   - `families/sdxl/backbone.py`, `families/sdxl/training.py` — SDXL family (**working end-to-end**)
   - implements Stage 2 pairing / planning / backbone inspection / SDXL LoRA training via official diffusers delegation
+
+- `src/cspd_stage3/`
+  - `__init__.py`
+  - `encode.py` — VAE latent + text embedding encoding (Stage 3A)
+  - `cluster.py` — per-class K-Means clustering + visual/semantic mode extraction (Stage 3B+3C)
+  - `cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
 
 ### Inference scripts
 - `scripts/inference/sample_sdxl_lora.py` — SDXL LoRA sampling with baseline comparison support
@@ -207,12 +217,13 @@ For implementation tracking in this repo, use the following stage view:
 - current working implementation: **SDXL base 1.0 UNet LoRA** via official diffusers trainer
 - legacy exploratory families: FLUX (stub), PixArt (functional but deprioritized)
 
+### Stage 3
+- visual/semantic mode discovery via latent clustering
+- current implementation: per-class K-Means on VAE latents, K = IPC
+- outputs: visual mode centroids, semantic mode mean embeddings, representative captions
+
 ### Later planned stages
-3. visual mode discovery / clustering
-4. visual anchor estimation
-5. semantic anchor aggregation
-6. semantic anchor rendering
-7. dual-anchor conditioned distilled generation
+4. dual-anchor (visual mode + semantic mode) conditioned distilled generation
 
 ### Important naming caveat
 Historically, render was treated as a Stage 2 compatibility surface.
@@ -790,31 +801,101 @@ The repo currently uses VLMs where semantic proposal or ambiguity resolution is 
 
 ---
 
-## 13. Later stages — current implementation status
+## 13. Stage 3 — Visual/semantic mode discovery via latent clustering
 
-### Visual clustering / prototype / generation / assembly stages
-Status: **not implemented in repo**.
+### Implementation status
+**Implemented in repo (initial version).**
 
-No current modules are present in the repo yet for:
-- visual mode discovery / clustering
-- visual prototype estimation
-- semantic prototype aggregation
-- semantic prototype rendering
-- dual-prototype conditioned generation
-- final distilled dataset assembly
+### Core purpose
+Discover representative visual and semantic modes per class via clustering in latent space. These modes become the dual anchors for Stage 4 distilled dataset generation.
+
+### Architecture
+
+```
+Stage 3A: Encode
+  images → SDXL VAE → latents (N, 4, H/8, W/8)
+  captions → SDXL CLIP × 2 → text embeddings (N, seq_len, 2048) + pooled (N, 1280)
+
+Stage 3B+3C: Cluster + Extract
+  per class: K-Means on flattened latents, K = IPC
+  per cluster:
+    visual mode  = latent centroid (+ medoid as fallback)
+    semantic mode = mean text embedding (+ representative caption from medoid)
+```
+
+### Main code
+- `src/cspd_stage3/__init__.py`
+- `src/cspd_stage3/encode.py` — VAE latent + text embedding encoding
+- `src/cspd_stage3/cluster.py` — per-class K-Means, visual/semantic mode extraction
+- `src/cspd_stage3/cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
+
+### CLI usage
+```bash
+# Full pipeline (encode + cluster)
+cspd-stage3 run \
+  --dataset-root /path/to/ImageNette/train \
+  --render-input /path/to/records.jsonl \
+  --output-dir runs/stage3/imagenette \
+  --ipc 10
+
+# Or step by step:
+cspd-stage3 encode --dataset-root ... --render-input ... --output-dir runs/stage3/encoded
+cspd-stage3 cluster --encode-dir runs/stage3/encoded --output-dir runs/stage3/modes --ipc 10
+```
+
+### Output artifacts
+```text
+runs/stage3/<output_dir>/
+├── encoded/
+│   ├── latents.pt              # (N, 4, H/8, W/8) VAE latents
+│   ├── text_embeds.pt          # (N, seq_len, 2048) concatenated CLIP embeddings
+│   ├── pooled_embeds.pt        # (N, 1280) pooled text embeddings
+│   └── encode_index.json       # per-sample metadata
+├── modes/
+│   ├── visual_modes.pt         # (total_modes, 4, H/8, W/8) centroid latents
+│   ├── semantic_modes.pt       # (total_modes, seq_len, 2048) mean text embeddings
+│   ├── pooled_modes.pt         # (total_modes, 1280) mean pooled embeddings
+│   ├── modes_index.json        # per-mode metadata (class, archetype, captions, sizes)
+│   └── stage3_summary.json     # clustering summary
+```
+
+### Key design decisions
+- **Clustering space**: VAE latents (not CLIP image embeddings) — preserves pixel-level visual diversity and connects directly to Stage 4 generation
+- **Visual mode**: cluster centroid in latent space; medoid recorded as fallback
+- **Semantic mode**: mean of text embeddings within cluster; representative caption from semantic medoid
+- **IPC as K**: number of clusters per class equals the desired images per class in the distilled dataset
+- Uses the same SDXL VAE + text encoders as Stage 2 for space consistency
+
+### Stage 4 connection (future)
+Visual modes + semantic modes will serve as dual anchors for Stage 4:
+- visual mode latent → img2img initialization
+- semantic mode embedding → text conditioning
+- Stage 2 LoRA weights → generation backbone
 
 ---
 
-## 14. What future coding agents should not get wrong
+## 14. Later stages — current implementation status
+
+### Stage 4: dual-anchor conditioned distilled generation
+Status: **not implemented in repo**.
+
+No current modules are present yet for:
+- dual-anchor (visual mode + semantic mode) conditioned generation
+- final distilled dataset assembly
+- distilled dataset quality evaluation
+
+---
+
+## 15. What future coding agents should not get wrong
 
 ### 15.1 Do not misread the repo as multi-stage-complete
-It is not.
 Currently the repo covers:
 - Prep metadata,
 - Stage 1 extraction / normalization / render,
 - Stage 2 SDXL LoRA training (working end-to-end),
 - Stage 2 inference / sampling,
-- but Stage 3+ is not implemented.
+- Stage 3 visual/semantic mode discovery (implemented),
+- but Stage 4 is not implemented.
 
 ### 15.2 Do not ignore render anymore
 Render is implemented and belongs to Stage 1 workflow semantics.
@@ -855,21 +936,23 @@ Latest accelerate rejects `"none"` as an unsupported tracker. The repo already h
 
 Given current repo state, the most sensible next work is:
 
-1. **Stage 2 hyperparameter tuning on SDXL LoRA**
-   - first successful run used rank=16, 1 epoch; qualitative results show LoRA learns the semantic space but may overfit
-   - currently investigating: fewer epochs (5) + higher rank (64) + larger batch size (8)
-   - goal: find the sweet spot between expressiveness and overfitting
-   - metrics: visual A/B comparison via `scripts/inference/sample_sdxl_lora.py`
+1. **Stage 2 hyperparameter tuning on SDXL LoRA** (ongoing)
+   - first run: rank=16, 1 epoch — learns semantic space but may overfit
+   - second run: rank=64, 5 epochs — better visual quality, less color drift
+   - currently running: rank=64, 20 epochs with checkpoints at epoch 5/10/15/20 for comparison
+   - goal: find the sweet spot between expressiveness and overfitting via checkpoint comparison
 
-2. **Evaluate Stage 2 output quality systematically**
-   - current evaluation is qualitative (visual comparison)
-   - may need: FID/CLIP score computation, per-archetype quality breakdown
-   - compare across checkpoint intervals to find optimal stopping point
+2. **Run Stage 3 on ImageNette**
+   - Stage 3 code is implemented; needs first real run on server
+   - use the same ImageNette dataset + Stage 1C render records as input
+   - start with IPC=10 (10 modes per class, 100 total for 10 classes)
+   - verify clustering quality: check cluster sizes, representative captions, decoded centroids
 
-3. **Stage 2 → Stage 3 transition planning**
-   - once Stage 2 produces good enough canonical-caption-conditioned outputs, move to Stage 3
-   - Stage 3 will use the trained Stage 2 model as the generative backbone for distilled dataset creation
-   - Stage 3 is still fully future work: visual clustering, anchor estimation, semantic aggregation
+3. **Implement Stage 4: dual-anchor conditioned generation**
+   - use visual mode latents as img2img initialization
+   - use semantic mode embeddings as text conditioning
+   - load Stage 2 LoRA weights as the generation backbone
+   - this is the final step to produce the distilled dataset
 
 4. **Keep method wording generic, implementation wording honest**
    - method level: generative-backbone adaptation / canonical-semantic-space familiarization
