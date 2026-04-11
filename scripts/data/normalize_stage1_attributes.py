@@ -551,15 +551,30 @@ def build_review_prompt(row: dict[str, Any], slot: str, slot_meta: dict[str, Any
         normalized_attributes = {}
     current_value = slot_meta.get("normalized_value", normalized_attributes.get(slot, "unknown"))
     context_attributes = {k: normalized_attributes.get(k, "unknown") for k in (row.get("slot_schema") or []) if k != slot}
+    review_reasons = slot_meta.get("review_reasons") or []
+    is_unknown_recovery = "review.mapped_to_unknown_recovery" in review_reasons
+
+    if is_unknown_recovery:
+        task_description = (
+            "The normalized value for this slot was mapped to 'unknown' because the original VLM output was too vague or uninformative.\n"
+            "Look at the image carefully and try to provide a better, more descriptive value for this slot.\n"
+            "If you can see relevant information in the image, use replace_normalized with a short descriptive phrase.\n"
+            "If the slot truly cannot be determined from the image, use set_unknown.\n"
+        )
+    else:
+        task_description = (
+            "Review exactly one ambiguous normalized attribute.\n"
+        )
+
     return (
-        "Review exactly one ambiguous normalized attribute.\n"
+        f"{task_description}"
         f"record_id: {row.get('record_id')}\n"
         f"class_name: {row.get('class_name')}\n"
         f"class_name_raw: {row.get('class_name_raw')}\n"
         f"archetype: {row.get('archetype')}\n"
         f"slot: {slot}\n"
         f"slot_schema: {json.dumps(row.get('slot_schema') or [], ensure_ascii=False)}\n"
-        f"review_reasons: {json.dumps(slot_meta.get('review_reasons') or [], ensure_ascii=False)}\n"
+        f"review_reasons: {json.dumps(review_reasons, ensure_ascii=False)}\n"
         f"raw_slot_value: {json.dumps(raw_attributes.get(slot), ensure_ascii=False)}\n"
         f"normalized_slot_value: {json.dumps(current_value, ensure_ascii=False)}\n"
         f"other_normalized_slots: {json.dumps(context_attributes, ensure_ascii=False)}\n"
@@ -613,6 +628,7 @@ def should_apply_review_decision(slot: str, slot_meta: dict[str, Any], parsed: d
     action = str(parsed.get("action") or "defer")
     confidence = str(parsed.get("confidence") or "low").strip().lower()
     review_reasons = {str(item) for item in slot_meta.get("review_reasons") or []}
+    is_unknown_recovery = "review.mapped_to_unknown_recovery" in review_reasons
     severity_unknown_ok = {
         "review.wrong_object_candidate",
         "review.archetype_anchor_mismatch",
@@ -621,8 +637,12 @@ def should_apply_review_decision(slot: str, slot_meta: dict[str, Any], parsed: d
         "review.cross_slot_value_conflict",
         "review.person_mention",
         "review.slot_contamination",
+        "review.mapped_to_unknown_recovery",
     }
     if action == "replace_normalized":
+        # For unknown recovery, accept even low confidence — any value is better than unknown
+        if is_unknown_recovery:
+            return True, "accepted_replace_unknown_recovery"
         return confidence in {"high", "medium"}, "accepted_replace" if confidence in {"high", "medium"} else "rejected_low_confidence_replace"
     if action == "set_unknown":
         allow = confidence == "high" or bool(review_reasons & severity_unknown_ok)
@@ -673,7 +693,18 @@ def select_review_items(row: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]
     for slot, slot_meta in meta.items():
         if not isinstance(slot_meta, dict):
             continue
-        if str(slot_meta.get("status") or "") == "review_required" or bool(slot_meta.get("review_reasons") or []):
+        status = str(slot_meta.get("status") or "")
+        has_review_reasons = bool(slot_meta.get("review_reasons") or [])
+        # Original trigger: explicit review_required or review_reasons
+        needs_review = status == "review_required" or has_review_reasons
+        # Extended trigger: slots mapped to unknown may benefit from VLM re-examination.
+        # The VLM can look at the image and attempt to fill in a better value.
+        if not needs_review and status == "mapped_to_unknown":
+            slot_meta_copy = dict(slot_meta)
+            _append_review_reason(slot_meta_copy, "review.mapped_to_unknown_recovery")
+            items.append((str(slot), slot_meta_copy))
+            continue
+        if needs_review:
             slot_meta = dict(slot_meta)
             slot_meta["review_priority"] = compute_review_priority(str(slot), slot_meta)
             items.append((str(slot), slot_meta))
