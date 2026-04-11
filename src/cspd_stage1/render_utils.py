@@ -24,8 +24,9 @@ LOW_VALUE_POSE_VALUES = {
     "inactive",
     "unplayed",
 }
-# "on"/"off" are handled separately via STATE_DROP_VALUES — they produce
-# awkward trailing words and carry no visual information.
+# Bare "on"/"off" and close synonyms produce awkward trailing words
+# and carry no visual information. Richer states like "powered on"
+# or "inactive" are now preserved by normalization and kept here.
 STATE_DROP_VALUES = {"on", "off"}
 LOW_VALUE_TRAIT_VALUES = {
     "fish",

@@ -79,10 +79,10 @@
     "held by man": "being held",
     "held upright": "being held",
     "being played": "in use",
-    "powered off": "off",
-    "inactive": "off",
-    "powered on": "on",
-    "active": "on",
+    "powered off": "powered off",
+    "inactive": "inactive",
+    "powered on": "powered on",
+    "active": "active",
     "operational": "in use",
     "in operation": "in use",
     "ready to use": "in use",
@@ -162,7 +162,7 @@
   "review_substrings": {
     "part_or_state_person_mentions": ["person", "man", "woman", "child", "people", "human"],
     "mixed_or_narrative_markers": ["possibly", "near ", " with ", ", displaying", ", old"],
-    "slot_contamination_color_background": ["white", "black", "dark"]
+    "slot_contamination_color_background": []
   },
   "v2_refinement": {
     "person_to_unknown_slots": [
@@ -219,29 +219,13 @@
       "salient_part_or_accessory"
     ],
     "low_value_background_phrases": [
-      "solid blue",
-      "cloth",
       "neutral",
-      "wall",
-      "living room",
-      "indoor",
-      "outdoor",
-      "outdoor area",
-      "grassy area"
+      "indistinct"
     ],
     "low_value_state_phrases": [
-      "being held",
-      "resting",
-      "at rest",
       "stationary"
     ],
-    "low_value_shape_phrases": [
-      "curved tubing",
-      "spherical",
-      "cylindrical",
-      "rectangular",
-      "blade"
-    ],
+    "low_value_shape_phrases": [],
     "low_value_part_phrases": [
       "atlas disposal logo",
       "numbered",
@@ -256,12 +240,11 @@
       "urban area": "urban",
       "urban parking lot": "urban",
       "retro-style display": "display area",
-      "outdoor, grassy area": "outdoor",
-      "solid blue": "unknown",
-      "cloth": "unknown",
+      "outdoor, grassy area": "outdoor grassy area",
+      "outdoor setting": "outdoor",
+      "indoor setting": "indoor",
       "neutral": "unknown",
-      "wall": "unknown",
-      "living room": "unknown"
+      "indistinct": "unknown"
     },
     "state_phrase_map": {
       "at rest": "resting",

@@ -688,6 +688,16 @@ The original Stage 1C render was overly aggressive in dropping slots, causing ~3
 - **Trait/shape**: reduced from 14 suppressed values to 4. Geometric descriptors (`"rectangular"`, `"cylindrical"`, `"spherical"`) are now preserved. Hard-coded pre-anchor drops for shapes removed.
 - **Food/container**: relaxed archetype-specific suppressions (food shape, food context, container fill).
 
+### Normalization rules revision (2026-04-11)
+The normalization rules in `configs/stage1/normalization/stage1_attribute_normalization_rules.json` were also relaxed to stop destroying upstream diversity before it reaches the renderer:
+- **Background color contamination**: disabled `slot_contamination_color_background` markers (`"white"`, `"black"`, `"dark"` no longer auto-killed). VLM often uses colors as background descriptions (e.g., `"white"` for studio backdrop); these are now preserved.
+- **Background low-value phrases**: reduced from 9 → 2 (`"neutral"`, `"indistinct"`). Values like `"indoor"`, `"outdoor"`, `"wall"`, `"living room"`, `"cloth"`, `"grassy area"` are no longer mapped to unknown.
+- **Background phrase map**: removed `→ unknown` mappings for `"wall"`, `"living room"`, `"cloth"`, `"solid blue"`.
+- **State normalization**: stopped collapsing descriptive states into bare `"on"`/`"off"`. `"powered on"` stays `"powered on"`, `"active"` stays `"active"`, `"inactive"` stays `"inactive"`, `"powered off"` stays `"powered off"`. Only bare `"on"`/`"off"` are dropped at render time.
+- **Low-value state phrases**: reduced from 4 → 1 (only `"stationary"`). `"being held"`, `"resting"`, `"at rest"` are no longer treated as low-value.
+- **Low-value shape phrases**: cleared entirely. Shapes like `"curved tubing"`, `"spherical"`, `"rectangular"` are no longer suppressed at normalization.
+- **Design principle**: all rule changes are archetype-level (slot-type aware), never class-level. No rule references class names or class-level statistics.
+
 ---
 
 ## 12. Stage 2 — SDXL LoRA training (current mainline)
