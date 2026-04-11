@@ -668,7 +668,7 @@ Current approved direction is:
 - deterministic,
 - normalized-first,
 - archetype-specific,
-- conservative,
+- **diversity-preserving** — slot drop rules should retain information that provides intra-class distinction,
 - auditable,
 - and increasingly **archetype-aware rather than class-aware**.
 
@@ -678,6 +678,15 @@ That means render should keep using:
 - cleanup heuristics,
 - class-name fallback only as a narrow anchor recovery path already present in the implementation,
 - but avoid turning into a class-specific correction layer or a free-form VLM text generator.
+
+### Render slot-drop policy revision (2026-04-11)
+The original Stage 1C render was overly aggressive in dropping slots, causing ~30% caption duplication and low intra-class diversity. The following relaxations were applied:
+- **Background**: reduced from 23 suppressed values to 5 (only truly uninformative: `neutral`, `unknown`, `indistinct`, `dark`, `cloth`). Removed `color_like_background` suppression. Relaxed `complex_background` rule for animals (allow commas/with).
+- **Pose/state**: reduced from 21 suppressed values to 3 (`stationary`, `inactive`, `unplayed`). Bare `"on"`/`"off"` are dropped via a dedicated `STATE_DROP_VALUES` set instead of being treated as generic low-value poses. Meaningful poses like `"being held"`, `"standing"`, `"resting"`, `"deployed"` are now preserved.
+- **Viewpoint**: `"front view"` and `"side view"` are no longer dropped — they provide composition information even if common.
+- **Salient part**: reduced from 16 suppressed values to 6. Values like `"body"`, `"head"`, `"face"`, `"fish"`, `"tower"` are now preserved.
+- **Trait/shape**: reduced from 14 suppressed values to 4. Geometric descriptors (`"rectangular"`, `"cylindrical"`, `"spherical"`) are now preserved. Hard-coded pre-anchor drops for shapes removed.
+- **Food/container**: relaxed archetype-specific suppressions (food shape, food context, container fill).
 
 ---
 

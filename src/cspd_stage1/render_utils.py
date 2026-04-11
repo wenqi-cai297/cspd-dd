@@ -5,89 +5,32 @@ from typing import Any
 
 UNKNOWN_VALUES = {"unknown", "not_applicable", "n/a", "none", "null", ""}
 LOW_VALUE_FOCUS_VALUES = {
-    "fish",
     "entire fish",
     "entire body",
     "entire object",
     "object",
-    "body",
-    "head",
-    "face",
-    "dog's face and body",
-    "dog face and body",
     "numbered",
     "atlas disposal logo",
-    "tether lines",
-    "bell tower",
-    "tower",
-    "ceiling",
 }
 LOW_VALUE_BACKGROUND_VALUES = {
-    "grass",
-    "water",
-    "outdoor",
-    "outdoor area",
-    "indoors",
-    "indoor",
-    "greenery",
-    "wall",
-    "cloth",
     "neutral",
-    "solid blue",
-    "living room",
-    "couch",
-    "farm",
-    "dog bed",
-    "snow",
-    "advertising",
-    "art gallery",
-    "dark",
-    "blue",
-    "red",
-    "white",
     "unknown",
     "indistinct",
-    "sidewalk",
-    "storefront",
-    "restaurant",
+    "dark",
+    "cloth",
 }
 LOW_VALUE_POSE_VALUES = {
-    "being held",
-    "standing",
-    "resting",
-    "relaxed",
-    "at rest",
     "stationary",
-    "off",
-    "sleeping",
-    "alert",
-    "playing",
-    "on",
-    "in use",
-    "emptying",
-    "deployed",
-    "displayed",
-    "closed",
-    "open",
-    "empty",
-    "full",
-    "unplayed",
     "inactive",
+    "unplayed",
 }
+# "on"/"off" are handled separately via STATE_DROP_VALUES — they produce
+# awkward trailing words and carry no visual information.
+STATE_DROP_VALUES = {"on", "off"}
 LOW_VALUE_TRAIT_VALUES = {
     "fish",
     "object",
-    "rectangular",
-    "rectangular with rounded edges",
-    "rectangular with large bin",
-    "spherical",
-    "cylindrical",
-    "cylindrical container",
-    "curved tubing",
-    "blade",
     "dumpster-like",
-    "circular with lines",
-    "elliptical",
     "tethered",
 }
 VIEWPOINT_MAP = {
@@ -180,8 +123,6 @@ def clean_pre_anchor_value(slot: str, value: str) -> str | None:
     if slot in {"body_trait", "shape_or_structure", "shape_or_growth_form", "architectural_style_or_form"}:
         if lowered in LOW_VALUE_TRAIT_VALUES:
             return None
-        if lowered in {"with rounded edges", "with curved top", "with curved nozzle", "long handle with blade", "rectangular with handle", "mug", "spoon", "slice"}:
-            return None
         text = text.replace(",", " and")
         text = re.sub(r"\s+and\s+", " and ", text)
         text = text.replace(" and and ", " and ")
@@ -214,8 +155,6 @@ def should_drop_slot(archetype: str, slot: str, value: str, review_required: boo
         return True, "low_value_focus"
 
     if slot == "viewpoint":
-        if lowered in {"frontal", "front", "front view", "side", "side view"}:
-            return True, "default_viewpoint"
         if NARRATIVE_PATTERN.search(text):
             return True, "narrative_viewpoint"
 
@@ -224,25 +163,23 @@ def should_drop_slot(archetype: str, slot: str, value: str, review_required: boo
             return True, "low_value_background"
         if NARRATIVE_PATTERN.search(text):
             return True, "narrative_background"
-        if COLOR_LIKE_PATTERN.fullmatch(text) and len(text.split()) <= 3:
-            return True, "color_like_background"
 
-    if archetype == "animal" and slot == "background_or_habitat" and ("," in lowered or "with" in lowered or lowered.endswith("side") or lowered.endswith("setting")):
+    if archetype == "animal" and slot == "background_or_habitat" and (lowered.endswith("side") or lowered.endswith("setting")):
         return True, "complex_background"
 
     if archetype == "animal" and slot == "pose_or_state" and lowered in {"stationary"}:
         return True, "animal_pose_suppressed"
 
-    if archetype in {"instrument", "sports_or_toy", "tool", "device_or_appliance", "vehicle", "container", "household_object", "furniture", "weapon"} and slot in {"playing_state_or_pose", "activity_or_usage_state", "usage_state", "operating_state_or_display_state", "state_or_action", "usage_or_display_state", "fill_state_or_contents_visibility", "wearing_state_or_pose"} and lowered in {"inactive"}:
+    state_slots = {"playing_state_or_pose", "activity_or_usage_state", "usage_state", "operating_state_or_display_state", "state_or_action", "usage_or_display_state", "fill_state_or_contents_visibility", "wearing_state_or_pose", "pose_or_state"}
+    if slot in state_slots and lowered in STATE_DROP_VALUES:
+        return True, "bare_on_off_state"
+
+    if archetype in {"instrument", "sports_or_toy", "tool", "device_or_appliance", "vehicle", "container", "household_object", "furniture", "weapon"} and slot in state_slots and lowered in {"inactive"}:
         return True, "low_value_state"
 
     if archetype == "food_and_drink":
-        if slot == "shape_or_structure" and lowered in {"mug", "spoon", "bowl", "plate"}:
-            return True, "food_shape_suppressed"
-        if slot == "preparation_or_serving_style" and (NARRATIVE_PATTERN.search(text) or lowered in {"individual bowls", "served on plate"}):
+        if slot == "preparation_or_serving_style" and NARRATIVE_PATTERN.search(text):
             return True, "food_style_suppressed"
-        if slot == "container_or_context" and lowered in {"table", "white plate", "refrigerator shelf", "table setting", "wooden surface"}:
-            return True, "food_context_suppressed"
 
     if archetype == "human_or_person":
         if slot == "background_or_activity_context" and lowered in {"coral reef", "ocean water", "underwater shipwreck", "wedding setting", "wedding reception", "outdoor garden setting"}:
