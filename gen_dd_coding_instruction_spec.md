@@ -37,12 +37,7 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - Supporting server scripts, metadata prep, mock/regression runs, and full workflow wiring exist.
 
 ### Not implemented yet
-- **Later research stages** are not implemented in code yet.
-  - Stage 3 visual clustering / mode discovery
-  - Stage 3 visual anchor estimation
-  - Stage 3 semantic anchor aggregation
-  - Stage 3 semantic anchor rendering
-  - Stage 4 dual-anchor conditioned distilled generation
+- **Stage 4**: dual-anchor conditioned distilled generation is not implemented in code yet.
 
 ### Partially implemented / legacy exploratory
 - **Stage 2 FLUX family**: training loop is only a stub; backbone loading and inspection work but end-to-end training is not wired.
@@ -361,11 +356,26 @@ The current manual taxonomy file contains the following fine-grained archetypes:
 - `text_or_media_object`
 - `decorative_or_symbolic_object`
 
+### Archetype mapping revision (2026-04-12)
+20 misplaced class-to-archetype mappings were fixed in `class_to_archetype_imagenet1k_manual.json`:
+- 4 stores/shops moved from food_and_drink → structure_or_building (bakery, butcher shop, confectionery, grocery store)
+- 6 containers moved from food_and_drink → container (beer/wine/pop bottle, soup bowl, plate, packet)
+- rotisserie moved from food_and_drink → device_or_appliance
+- nipple moved from food_and_drink → household_object
+- bobsled/dogsled/go-kart moved from sports_or_toy → vehicle
+- ballplayer moved from sports_or_toy → human_or_person
+- patio moved from natural_scene → structure_or_building
+- hay moved to plant_or_fungus, spider web to decorative_or_symbolic_object
+- shopping cart moved from container → vehicle
+
+These mapping changes require re-running Stage 1A for affected classes (archetype determines slot schema).
+
 ### Important current policy boundary
 Current engineering direction is:
 - **Prep can use class identity**, because Prep is explicitly class-level metadata construction.
 - **Stage 1 normalization/render should prefer archetype-aware rules**, not expanding class-specific hard patches.
 - **If VLM is used downstream, it should appear as constrained review/fallback, not as a full class-aware rewrite layer.**
+- **All optimization must be at archetype level, never class level.** Optimizing for specific classes (e.g., special rules for "cassette player") is methodologically invalid and will not generalize.
 
 That boundary matters for method cleanliness.
 
@@ -432,17 +442,29 @@ The current prompt asks the VLM to return JSON in the shape:
 {
   "archetype": "...",
   "attributes": {
-    "slot_name": "short phrase"
+    "slot_name": "per-slot guidance string with examples"
   }
 }
 ```
 
-The prompt explicitly asks for:
-- JSON only,
-- no markdown,
-- short phrases rather than sentences,
-- `unknown` for unclear values,
-- `not_applicable` when needed.
+Each slot placeholder now contains **specific guidance** instead of generic `"short phrase"`. This is defined in `SLOT_GUIDANCE` dict in `prompting.py`. Examples:
+- `background_or_habitat`: `"scene or place WHERE the subject is, e.g. grassy field, lake shore. Do NOT write just a color"`
+- `operating_state_or_display_state`: `"device state with detail, e.g. playing music with display lit. Do NOT write just 'on' or 'off'"`
+- `pose_or_state`: `"what the animal is doing, e.g. swimming, being held by person, curled up sleeping"`
+- `viewpoint`: `"camera angle, e.g. front view, side view, top-down view"`
+
+The prompt rules explicitly instruct:
+- JSON only, no markdown or code fences,
+- short phrases (2-5 words), not full sentences,
+- describe ONLY what is visible in the specific image,
+- for background/environment slots: describe the PLACE or SCENE, not just a color,
+- for state/pose slots: describe the specific ACTION or CONDITION, not just 'on'/'off',
+- each slot should have a SINGLE value, not a comma-separated list,
+- prefer a coarse description over 'unknown'.
+
+### Prompt revision history
+- **Original**: generic `"short phrase"` placeholder for all slots. VLM frequently gave colors for backgrounds, bare "on"/"off" for states, and comma-separated lists.
+- **2026-04-12**: per-slot guidance with examples and explicit anti-patterns. Addresses the three main VLM extraction quality issues (color-as-background, bare on/off, comma lists).
 
 ### Important reality check
 Current Stage 1 extraction output is **flat string-valued attributes**.
@@ -544,10 +566,11 @@ In other words:
 - and VLM review should stay limited to ambiguous slots, not all attributes.
 
 ### What triggers inline VLM review
-Inline VLM review is not full-row and not full-dataset free rewriting.
-It is only invoked for slots whose deterministic normalization metadata indicates ambiguity, i.e. slots with:
-- `status == "review_required"`, or
-- non-empty `review_reasons`
+Inline VLM review is invoked for:
+1. Slots whose deterministic normalization metadata indicates ambiguity (`status == "review_required"` or non-empty `review_reasons`)
+2. **Slots mapped to `"unknown"` by normalization** (`status == "mapped_to_unknown"`) — the VLM is given the image and asked to try providing a better value. This is the `review.mapped_to_unknown_recovery` trigger.
+
+In ImageNette testing, this extended trigger increased VLM review items from 66 to 969, with 511 (52.7%) receiving a `replace_normalized` action — successfully recovering values that normalization had killed.
 
 ### Current action space for VLM review
 The constrained review path only allows structured slot decisions such as:
@@ -793,9 +816,13 @@ The official diffusers repo must be cloned and pip-installed from source (`pip i
 - default prompts cover all 7 ImageNette archetypes
 - output: PNG images + `sample_metadata.json`
 
-### Current hyperparameter exploration (2026-04-10)
-- investigating: fewer epochs (5) + higher rank (64) to reduce overfitting while increasing expressiveness
-- batch_size increased to 8 for faster iteration
+### Hyperparameter exploration results (2026-04-10 → 2026-04-11)
+- **rank=16, epoch=20, batch=1**: learns semantic space but overfits (color drift, artifacts)
+- **rank=64, epoch=5, batch=8**: better quality, less overfitting, 1h55m training time
+- **rank=64, epoch=5/10/15/20 checkpoint comparison**: epoch=15 is the best overall — chain saw cleanest, spaniel normal, no overfitting artifacts
+- **Selected configuration**: rank=64, epoch=15 (checkpoint-12090), batch=8, 2 GPUs
+- LoRA weights at this config: ~355MB (safetensors)
+- Remaining quality gap vs real photos: detail/texture, composition naturalness — acceptable for Stage 3/4 pipeline
 
 ### Important caveats
 - the official diffusers script version must match the pip-installed diffusers version (use `pip install -e .` from the cloned repo)
@@ -808,21 +835,22 @@ The official diffusers repo must be cloned and pip-installed from source (`pip i
 
 ### Learned / model-driven
 - Prep multimodal class-to-archetype mapping
-- Stage 1A image-level attribute extraction
-- Stage 1B inline VLM review for ambiguous slots only
+- Stage 1A image-level attribute extraction (VLM with per-slot guided prompts)
+- Stage 1B inline VLM review for ambiguous slots AND unknown-recovery
 - Stage 2 SDXL UNet LoRA training (canonical-caption conditioning alignment)
 
 ### Deterministic / rule-driven
 - Stage 1B first-pass normalization
 - Stage 1C render
 - Stage 2 pairing / dataset materialization / launch orchestration
+- Stage 3 encoding / clustering / mode extraction
 
 This separation is deliberate.
 The repo currently uses VLMs where semantic proposal or ambiguity resolution is needed, uses diffusion model fine-tuning for semantic-space alignment, while keeping the main cleanup/render/orchestration paths auditable and deterministic.
 
 ---
 
-## 13. Stage 3 — Visual/semantic mode discovery via latent clustering
+## 14. Stage 3 — Visual/semantic mode discovery via latent clustering
 
 ### Implementation status
 **Implemented in repo (initial version).**
@@ -895,7 +923,7 @@ Visual modes + semantic modes will serve as dual anchors for Stage 4:
 
 ---
 
-## 14. Later stages — current implementation status
+## 15. Later stages — current implementation status
 
 ### Stage 4: dual-anchor conditioned distilled generation
 Status: **not implemented in repo**.
@@ -907,82 +935,92 @@ No current modules are present yet for:
 
 ---
 
-## 15. What future coding agents should not get wrong
+## 16. What future coding agents should not get wrong
 
-### 15.1 Do not misread the repo as multi-stage-complete
-Currently the repo covers:
-- Prep metadata,
-- Stage 1 extraction / normalization / render,
-- Stage 2 SDXL LoRA training (working end-to-end),
-- Stage 2 inference / sampling,
-- Stage 3 visual/semantic mode discovery (implemented),
-- but Stage 4 is not implemented.
+### 16.1 All optimization must be archetype-level, never class-level
+This is a hard methodological boundary. Do not write normalization rules, render drop rules, or prompt guidance that references specific class names or class-level statistics. The only place class identity is used is in Prep (class-to-archetype mapping). Everything downstream operates on archetype + slot name only.
 
-### 15.2 Do not ignore render anymore
-Render is implemented and belongs to Stage 1 workflow semantics.
-Its canonical implementation now lives under `src/cspd_stage1/`.
+### 16.2 Do not misread the repo as multi-stage-complete
+Currently the repo covers Prep, Stage 1 (1A+1B+1C), Stage 2 (SDXL LoRA + inference), Stage 3 (encoding + clustering + mode extraction). Stage 4 is not implemented.
 
-### 15.3 Do not silently treat class-aware correction as the main downstream strategy
-Current intended boundary is:
-- class-aware logic is acceptable in Prep,
-- downstream normalization/render should stay mostly archetype-aware and auditable.
+### 16.3 Stage 1A prompt now uses per-slot guidance
+The prompt template no longer uses generic `"short phrase"` placeholders. Each slot has specific guidance with examples and anti-patterns defined in `SLOT_GUIDANCE` dict in `prompting.py`. This was added on 2026-04-12.
 
-### 15.4 Do not describe Stage 1B as purely deterministic anymore
-Current Stage 1B is **deterministic-first with inline constrained VLM review by default**.
-The deterministic result is preserved for auditability, but the effective result may include reviewed overrides.
+### 16.4 Stage 1B VLM review now triggers on mapped-to-unknown slots
+VLM review is no longer limited to `review_required` slots. It also triggers `review.mapped_to_unknown_recovery` on all slots that normalization mapped to unknown, giving the VLM a chance to provide a better value by looking at the image.
 
-### 15.5 Do not assume per-slot confidence/state objects exist
-They do not exist in current Stage 1 extraction outputs.
+### 16.5 Archetype mapping was revised on 2026-04-12
+20 classes in `class_to_archetype_imagenet1k_manual.json` were remapped. If reusing old Stage 1A extraction results, check whether any affected classes are present — those records need re-extraction because the slot schema changed.
 
-### 15.6 Do not spec future stages against stale numbering
-Current implementation-facing numbering is:
-- Prep
-- Stage 1A extraction
-- Stage 1B normalization (+ inline review)
-- Stage 1C render
-- Stage 2 SDXL LoRA training (working)
-- Stage 2 inference / sampling (working)
-- Stage 3+ remains unimplemented
-
-### 15.7 Do not treat Stage 2 as still scaffold-only
-SDXL LoRA training is now **working end-to-end** with successful runs on ImageNette.
-The repo delegates to the official diffusers trainer; do not rewrite the training loop unless there is a concrete need.
-
-### 15.8 Do not pass --report_to none to the official SDXL script
+### 16.6 Do not pass --report_to none to the official SDXL script
 Latest accelerate rejects `"none"` as an unsupported tracker. The repo already handles this by omitting `--report_to` when the value is `"none"`.
+
+### 16.7 Stage 2 best known config is rank=64, epoch=15
+From checkpoint comparison on ImageNette. The checkpoint at step 12090 (epoch 15 of 20) gives the best quality/overfitting tradeoff.
 
 ---
 
-## 16. Immediate next implementation work
+## 17. Immediate next implementation work
 
-Given current repo state, the most sensible next work is:
+Given current repo state (as of 2026-04-12):
 
-1. **Stage 2 hyperparameter tuning on SDXL LoRA** (ongoing)
-   - first run: rank=16, 1 epoch — learns semantic space but may overfit
-   - second run: rank=64, 5 epochs — better visual quality, less color drift
-   - currently running: rank=64, 20 epochs with checkpoints at epoch 5/10/15/20 for comparison
-   - goal: find the sweet spot between expressiveness and overfitting via checkpoint comparison
+1. **Re-run Stage 1 on ImageNet-1k 5-shot with improved pipeline** (in progress)
+   - prompt now has per-slot guidance (2026-04-12)
+   - normalization rules relaxed (2026-04-11)
+   - VLM review extended with unknown recovery (2026-04-11)
+   - 20 archetype mappings fixed (2026-04-12)
+   - need to re-run Stage 1A/1B/1C and evaluate caption quality on full 1000-class diversity
 
-2. **Run Stage 3 on ImageNette**
+2. **Re-run Stage 2 SDXL LoRA training on ImageNette with improved captions**
+   - Stage 1 render quality has improved significantly since the first Stage 2 training
+   - re-train with the new captions using the established best config (rank=64, epoch=15, batch=8)
+   - compare A/B sampling quality to see if improved captions translate to better generation
+
+3. **Run Stage 3 on ImageNette**
    - Stage 3 code is implemented; needs first real run on server
-   - use the same ImageNette dataset + Stage 1C render records as input
+   - use the new improved Stage 1C render records as input
    - start with IPC=10 (10 modes per class, 100 total for 10 classes)
-   - verify clustering quality: check cluster sizes, representative captions, decoded centroids
 
-3. **Implement Stage 4: dual-anchor conditioned generation**
+4. **Implement Stage 4: dual-anchor conditioned generation**
    - use visual mode latents as img2img initialization
    - use semantic mode embeddings as text conditioning
    - load Stage 2 LoRA weights as the generation backbone
-   - this is the final step to produce the distilled dataset
 
-4. **Keep method wording generic, implementation wording honest**
-   - method level: generative-backbone adaptation / canonical-semantic-space familiarization
-   - current working implementation: **SDXL base 1.0 UNet LoRA** via official diffusers
-   - legacy exploratory families preserved in repo: FLUX (stub), PixArt (functional but deprioritized)
+5. **Validate full pipeline on ImageNet-1k**
+   - once Stage 1→2→3→4 works on ImageNette, run full pipeline on ImageNet-1k
+   - evaluate distilled dataset quality (FID, classification accuracy)
 
 ---
 
-## 17. If this document needs updating later
+## 18. Completed experiment log (for context recovery)
+
+### Stage 1 optimization arc (2026-04-11 → 2026-04-12)
+- **Problem**: ImageNette captions had 70.6% unique rate, heavy duplication (top: 209x), trailing "on/off" (1080 cases)
+- **Fix 1** (render relaxation): unique rate → 83.7%, trailing on/off → 6
+- **Fix 2** (normalization relaxation): background unknown rate dropped ~70%
+- **Fix 3** (VLM unknown recovery): 511/903 unknown slots recovered via VLM re-examination
+- **Fix 4** (prompt per-slot guidance): pending re-run evaluation
+- **Final ImageNette**: 84.6% unique, 14.0 avg words, 85x top duplicate
+- **ImageNet-1k 5-shot validation**: 99.7% unique across 4999/5000 records (1 render failure → fixed via archetype mapping)
+
+### Stage 2 training arc (2026-04-10 → 2026-04-11)
+- rank=16, epoch=20: learns style but overfits (color drift on french horn, spaniel limb issues)
+- rank=64, epoch=5: better quality, less overfitting, 1h55m
+- rank=64, epoch=5/10/15/20 comparison: **epoch=15 is best** — cleanest results, no overfitting
+- All runs on ImageNette (12,894 pairs), 2 GPUs, resolution=512, lr=2e-5
+
+### Server environment
+- Path: `/media/4T_HDD/cai/cspd-dd/cspd-dd`
+- GPU: 2x GPU, CUDA 12.1
+- Conda env: `cspd-dd`
+- ImageNette: `/media/4T_HDD/cai/datasets/ImageNette/train` (12,894 images, 10 classes)
+- ImageNet-1k: `/media/4T_HDD/cai/datasets/ImageNet1k/train`
+- ImageNet-1k 5-shot: `/media/4T_HDD/cai/datasets/ImageNet1k_5shot/train` (5,000 images, 1000 classes)
+- Diffusers repo: `./diffusers` (pip install -e . required)
+
+---
+
+## 19. If this document needs updating later
 
 When updating this file:
 - prefer repo-truth over older chat memory,
