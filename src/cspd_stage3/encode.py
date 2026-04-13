@@ -1,6 +1,7 @@
 """Stage 3A — Encode images to VAE latents and captions to text embeddings.
 
-Uses the same SDXL components as Stage 2 to ensure consistent latent/embedding spaces.
+Uses the official diffusers SDXL pipeline components for encoding, ensuring
+exact consistency with the Stage 4 img2img generation pipeline.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import numpy as np
 from PIL import Image
 from tqdm.auto import tqdm
 
@@ -33,18 +33,10 @@ class EncodeResult:
 
 
 def _load_image(path: str | Path, resolution: int) -> Image.Image:
-    """Load and preprocess an image to target resolution."""
+    """Load an image as PIL RGB at target resolution."""
     img = Image.open(path).convert("RGB")
     img = img.resize((resolution, resolution), Image.LANCZOS)
     return img
-
-
-def _image_to_tensor(img: Image.Image) -> torch.Tensor:
-    """Convert PIL image to normalized tensor [-1, 1] in (C, H, W) format."""
-    arr = np.array(img, dtype=np.float32) / 255.0
-    tensor = torch.from_numpy(arr).permute(2, 0, 1)  # HWC → CHW
-    tensor = tensor * 2.0 - 1.0  # [0,1] → [-1,1]
-    return tensor
 
 
 def _load_render_records(render_input: str | Path) -> dict[str, dict[str, Any]]:
@@ -132,8 +124,8 @@ def encode_dataset(
     Returns:
         EncodeResult with paths to saved tensors and metadata.
     """
-    from diffusers import AutoencoderKL
-    from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
+    from diffusers import StableDiffusionXLPipeline
+    from diffusers.image_processor import VaeImageProcessor
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -146,37 +138,41 @@ def encode_dataset(
         raise ValueError("No pairs found. Check dataset_root and render_input paths.")
     print(f"[Stage 3A] Found {len(pairs)} paired samples")
 
-    # Load VAE — always float32 to avoid NaN from fp16 overflow
-    print(f"[Stage 3A] Loading VAE from {model_name} (float32 for numerical stability)...")
-    vae = AutoencoderKL.from_pretrained(model_name, subfolder="vae", torch_dtype=torch.float32)
-    vae = vae.to(device)
-    vae.eval()
+    # Load the full SDXL pipeline — use its components for encoding
+    # This ensures VAE encode and text encode produce outputs exactly matching
+    # what the img2img pipeline in Stage 4 expects.
+    print(f"[Stage 3A] Loading SDXL pipeline from {model_name}...")
+    pipe = StableDiffusionXLPipeline.from_pretrained(
+        model_name, torch_dtype=torch_dtype, use_safetensors=True,
+    ).to(device)
+
+    vae = pipe.vae
+    tokenizer_1 = pipe.tokenizer
+    tokenizer_2 = pipe.tokenizer_2
+    text_encoder_1 = pipe.text_encoder
+    text_encoder_2 = pipe.text_encoder_2
     vae_scaling_factor = vae.config.scaling_factor
+    image_processor = VaeImageProcessor(vae_scale_factor=vae.config.scaling_factor * 2)
 
-    # Load text encoders + tokenizers
-    print(f"[Stage 3A] Loading text encoders from {model_name}...")
-    tokenizer_1 = CLIPTokenizer.from_pretrained(model_name, subfolder="tokenizer")
-    tokenizer_2 = CLIPTokenizer.from_pretrained(model_name, subfolder="tokenizer_2")
-    text_encoder_1 = CLIPTextModel.from_pretrained(model_name, subfolder="text_encoder", torch_dtype=torch_dtype).to(device)
-    text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(model_name, subfolder="text_encoder_2", torch_dtype=torch_dtype).to(device)
-    text_encoder_1.eval()
-    text_encoder_2.eval()
-
-    # Encode images → VAE latents
-    print(f"[Stage 3A] Encoding {len(pairs)} images to VAE latents...")
+    # Encode images → VAE latents (float32 for numerical stability)
+    print(f"[Stage 3A] Encoding {len(pairs)} images to VAE latents (float32)...")
+    vae_orig_dtype = vae.dtype
+    vae.to(dtype=torch.float32)
     all_latents = []
     for i in tqdm(range(0, len(pairs), batch_size), desc="VAE encode"):
         batch_pairs = pairs[i : i + batch_size]
         images = [_load_image(p["image_path"], resolution) for p in batch_pairs]
-        pixel_values = torch.stack([_image_to_tensor(img) for img in images]).to(device, dtype=torch.float32)
+        pixel_values = image_processor.preprocess(images, height=resolution, width=resolution)
+        pixel_values = pixel_values.to(device, dtype=torch.float32)
         latent_dist = vae.encode(pixel_values).latent_dist
         latents = latent_dist.sample() * vae_scaling_factor
         all_latents.append(latents.cpu().float())
+    vae.to(dtype=vae_orig_dtype)
 
     all_latents = torch.cat(all_latents, dim=0)  # (N, C, H, W)
     print(f"[Stage 3A] Latent tensor shape: {list(all_latents.shape)}")
 
-    # Encode captions → text embeddings
+    # Encode captions → text embeddings using pipeline's encode_prompt
     print(f"[Stage 3A] Encoding {len(pairs)} captions to text embeddings...")
     all_prompt_embeds = []
     all_pooled_embeds = []
@@ -184,19 +180,13 @@ def encode_dataset(
         batch_pairs = pairs[i : i + batch_size]
         captions = [p["canonical_caption"] for p in batch_pairs]
 
-        # Tokenize for both encoders
-        tokens_1 = tokenizer_1(captions, padding="max_length", max_length=tokenizer_1.model_max_length, truncation=True, return_tensors="pt").input_ids.to(device)
-        tokens_2 = tokenizer_2(captions, padding="max_length", max_length=tokenizer_2.model_max_length, truncation=True, return_tensors="pt").input_ids.to(device)
-
-        # Encode with both CLIP encoders (SDXL concatenates penultimate hidden states)
-        enc_out_1 = text_encoder_1(tokens_1, output_hidden_states=True, return_dict=True)
-        enc_out_2 = text_encoder_2(tokens_2, output_hidden_states=True, return_dict=True)
-
-        prompt_embeds_1 = enc_out_1.hidden_states[-2]  # penultimate layer
-        prompt_embeds_2 = enc_out_2.hidden_states[-2]
-        prompt_embeds = torch.cat([prompt_embeds_1, prompt_embeds_2], dim=-1)  # concat along feature dim
-
-        pooled_prompt_embeds = enc_out_2.text_embeds  # pooled from second encoder only
+        # Use the pipeline's encode_prompt — guarantees exact match with generation
+        prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, _ = pipe.encode_prompt(
+            prompt=captions,
+            device=device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=False,
+        )
 
         all_prompt_embeds.append(prompt_embeds.cpu().float())
         all_pooled_embeds.append(pooled_prompt_embeds.cpu().float())
