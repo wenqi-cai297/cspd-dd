@@ -23,6 +23,7 @@ dependencies = [
   "tiktoken",
   "safetensors",
   "scikit-learn",
+  "hdbscan",
 ]
 
 [project.optional-dependencies]

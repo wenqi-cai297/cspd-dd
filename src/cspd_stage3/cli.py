@@ -35,7 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
     cluster_parser.add_argument("--encode-dir", required=True, help="Directory with Stage 3A encode outputs")
     cluster_parser.add_argument("--output-dir", required=True, help="Directory for mode outputs")
     cluster_parser.add_argument("--ipc", type=int, required=True, help="Images per class (number of clusters per class)")
-    cluster_parser.add_argument("--seed", type=int, default=42, help="Random seed for K-Means")
+    cluster_parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    cluster_parser.add_argument("--cluster-method", default="kmeans", choices=["kmeans", "hdbscan"], help="Clustering method: kmeans (baseline) or hdbscan (mode discovery)")
+    cluster_parser.add_argument("--min-cluster-size", type=int, default=15, help="HDBSCAN min_cluster_size (ignored for kmeans)")
+    cluster_parser.add_argument("--pca-dim", type=int, default=50, help="PCA dimensions for HDBSCAN pre-processing (ignored for kmeans)")
 
     # --- run (encode + cluster in one shot) ---
     run_parser = subparsers.add_parser(
@@ -52,6 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--device", default="cuda", help="Torch device")
     run_parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"], help="Weight dtype")
     run_parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    run_parser.add_argument("--cluster-method", default="kmeans", choices=["kmeans", "hdbscan"], help="Clustering method: kmeans (baseline) or hdbscan (mode discovery)")
+    run_parser.add_argument("--min-cluster-size", type=int, default=15, help="HDBSCAN min_cluster_size (ignored for kmeans)")
+    run_parser.add_argument("--pca-dim", type=int, default=50, help="PCA dimensions for HDBSCAN pre-processing (ignored for kmeans)")
 
     return parser
 
@@ -88,6 +94,9 @@ def main() -> None:
             output_dir=args.output_dir,
             ipc=args.ipc,
             seed=args.seed,
+            method=args.cluster_method,
+            min_cluster_size=args.min_cluster_size,
+            pca_dim=args.pca_dim,
         )
         print(json.dumps({
             "output_dir": result.output_dir,
@@ -127,6 +136,9 @@ def main() -> None:
             output_dir=str(modes_dir),
             ipc=args.ipc,
             seed=args.seed,
+            method=args.cluster_method,
+            min_cluster_size=args.min_cluster_size,
+            pca_dim=args.pca_dim,
         )
 
         print()

@@ -25,4 +25,5 @@ dependencies:
       - tiktoken
       - safetensors
       - scikit-learn
+      - hdbscan
       - -e .
