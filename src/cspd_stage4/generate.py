@@ -183,20 +183,18 @@ def generate_distilled_dataset(
         decoded_np = (decoded_np * 255).round().astype(np.uint8)
         init_image = Image.fromarray(decoded_np).resize((resolution, resolution), Image.LANCZOS)
 
-        # Get semantic mode embeddings
-        prompt_embeds = semantic_modes[mode_idx].unsqueeze(0).to(device, dtype=torch_dtype)
-        pooled_prompt_embeds = pooled_modes[mode_idx].unsqueeze(0).to(device, dtype=torch_dtype)
-        negative_prompt_embeds = torch.zeros_like(prompt_embeds)
-        negative_pooled_prompt_embeds = torch.zeros_like(pooled_prompt_embeds)
+        # Use the representative caption (medoid caption) as text prompt.
+        # This produces a real, coherent text embedding that the Stage 2 LoRA
+        # model has seen during training, rather than an averaged embedding
+        # that may not correspond to any meaningful semantic point.
+        prompt = representative_caption if representative_caption else class_name
 
         # Generate via img2img pipeline
         generator = torch.Generator(device="cpu").manual_seed(seed + mode_idx)
         output = pipe(
             image=init_image,
-            prompt_embeds=prompt_embeds,
-            pooled_prompt_embeds=pooled_prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+            prompt=prompt,
+            negative_prompt="",
             strength=strength,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
