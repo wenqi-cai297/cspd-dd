@@ -26,29 +26,30 @@ import torch
 from diffusers import StableDiffusionXLPipeline, AutoencoderKL
 
 
-# Representative canonical captions covering all ImageNette archetypes.
-# Updated 2026-04-13 to match the current per-slot-guided render style.
+# Representative canonical captions from Stage 3 K-Means mode 0 per class.
+# These are the same captions used by Stage 4, enabling direct A/B comparison
+# between Stage 2 inference (pure text-to-image) and Stage 4 generation.
 DEFAULT_PROMPTS = [
-    # animal - tench
-    "a brown large and flat body tench being held in outdoor, natural setting with grass and trees front view",
-    # animal - springer spaniel
-    "a black and white long floppy ears english springer standing in grass side view with ears",
-    # device_or_appliance - cassette player
-    "a black and silver plastic rectangular with rounded edges cassette player idle with display off in white surface front view",
-    # device_or_appliance - gas pump
-    "an orange metal rectangular with rounded edges gas pump idle in park-like area side view",
-    # tool - chain saw
-    "a black and silver metal long handle with blade chain saw in use in grass field side view",
-    # structure_or_building - church
-    "a carpet and stone and wood gothic large church in interior front view with stained glass windows",
-    # instrument - french horn
-    "a golden yellow metal curved tubing french horn resting in white surface side view",
-    # vehicle - garbage truck
-    "an orange dump truck body and open rear garbage truck driving on road in urban street side view",
-    # sports_or_toy - golf ball
-    "a white with dimples rubber spherical golf ball resting in green grass close-up view",
-    # sports_or_toy - parachute
-    "a rainbow striped fabric elliptical with lines parachute in flight in sky with clouds low angle view",
+    # tench
+    "a dark with lighter markings fins and scales tench resting in white surface side view",
+    # English springer
+    "a brown and white wearing red life vest english springer swimming in water surface side view with life vest",
+    # cassette player
+    "a black and silver brushed metal rectangular with rounded edges cassette player front view",
+    # chain saw
+    "an orange and silver metal long handle with blade chain saw close-up view",
+    # church
+    "a wooden planks orthodox medium church in snowy landscape front view with domes",
+    # French horn
+    "a gold metal curved tubing french horn in use in concert hall side view",
+    # garbage truck
+    "a white large and boxy and with rear compartment garbage truck picking up trash in residential area side view with trash bins",
+    # gas pump
+    "a rusty gray metal+weathered cylindrical tank with handle gas pump in industrial yard, overcast sky front view",
+    # golf ball
+    "a white solid rubber spherical golf ball resting in golf course green side view",
+    # parachute
+    "a blue and yellow stripes fabric rectangular with rounded edges parachute in flight in clear blue sky side view",
 ]
 
 
