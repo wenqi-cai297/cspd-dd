@@ -125,7 +125,6 @@ def encode_dataset(
         EncodeResult with paths to saved tensors and metadata.
     """
     from diffusers import StableDiffusionXLPipeline
-    from diffusers.image_processor import VaeImageProcessor
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -152,7 +151,6 @@ def encode_dataset(
     text_encoder_1 = pipe.text_encoder
     text_encoder_2 = pipe.text_encoder_2
     vae_scaling_factor = vae.config.scaling_factor
-    image_processor = VaeImageProcessor(vae_scale_factor=vae.config.scaling_factor * 2)
 
     # Encode images → VAE latents (float32 for numerical stability)
     print(f"[Stage 3A] Encoding {len(pairs)} images to VAE latents (float32)...")
@@ -161,10 +159,16 @@ def encode_dataset(
     all_latents = []
     for i in tqdm(range(0, len(pairs), batch_size), desc="VAE encode"):
         batch_pairs = pairs[i : i + batch_size]
-        # Images are already resized by _load_image; preprocess only normalizes
         images = [_load_image(p["image_path"], resolution) for p in batch_pairs]
-        pixel_values = image_processor.preprocess(images)
-        pixel_values = pixel_values.to(device, dtype=torch.float32)
+        # Convert PIL images to tensor: [0,255] → [0,1] → [-1,1]
+        import numpy as np
+        tensors = []
+        for img in images:
+            arr = np.array(img, dtype=np.float32) / 255.0
+            t = torch.from_numpy(arr).permute(2, 0, 1)  # HWC → CHW
+            t = t * 2.0 - 1.0
+            tensors.append(t)
+        pixel_values = torch.stack(tensors).to(device, dtype=torch.float32)
         latent_dist = vae.encode(pixel_values).latent_dist
         latents = latent_dist.sample() * vae_scaling_factor
         all_latents.append(latents.cpu().float())
