@@ -28,13 +28,14 @@ set -euo pipefail
 #   STAGE4_DTYPE=float16
 
 if [[ $# -lt 2 ]]; then
-  echo "Usage: bash scripts/server/stage4/run_stage4_pipeline.sh <stage3_modes_dir> <stage2_lora_weights|none> [strength]"
+  echo "Usage: bash scripts/server/stage4/run_stage4_pipeline.sh <stage3_modes_dir> <stage2_lora_weights|none> [strength] [semantic_mode]"
   exit 1
 fi
 
 MODES_DIR="$1"
 LORA_WEIGHTS="$2"
 STRENGTH="${3:-0.5}"
+SEMANTIC_MODE="${4:-caption}"
 ENV_NAME="${CSPD_ENV_NAME:-cspd-dd}"
 STEPS="${STAGE4_STEPS:-50}"
 GUIDANCE="${STAGE4_GUIDANCE:-7.5}"
@@ -90,6 +91,7 @@ CMD=(
   --seed "$SEED"
   --device "$DEVICE"
   --dtype "$DTYPE"
+  --semantic-mode "$SEMANTIC_MODE"
 )
 
 if [[ "$LORA_WEIGHTS" != "none" ]]; then

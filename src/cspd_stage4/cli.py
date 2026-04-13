@@ -28,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     gen_parser.add_argument("--device", default="cuda", help="Torch device")
     gen_parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"], help="Weight dtype")
     gen_parser.add_argument("--resolution", type=int, default=512, help="Output image resolution")
+    gen_parser.add_argument("--semantic-mode", default="caption", choices=["caption", "embedding"], help="Semantic conditioning: 'caption' uses representative caption text (recommended), 'embedding' uses mean text embedding from Stage 3 (baseline)")
 
     return parser
 
@@ -51,6 +52,7 @@ def main() -> None:
             device=args.device,
             dtype=args.dtype,
             resolution=args.resolution,
+            semantic_mode=args.semantic_mode,
         )
         print(json.dumps({
             "output_dir": result.output_dir,

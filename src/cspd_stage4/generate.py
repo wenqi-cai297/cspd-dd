@@ -109,6 +109,7 @@ def generate_distilled_dataset(
     device: str = "cuda",
     dtype: str = "float16",
     resolution: int = 512,
+    semantic_mode: str = "caption",
 ) -> GenerateResult:
     """Generate the distilled dataset using dual-anchor conditioning.
 
@@ -124,6 +125,8 @@ def generate_distilled_dataset(
         device: Torch device.
         dtype: Weight dtype.
         resolution: Output image resolution.
+        semantic_mode: "caption" uses the representative caption text as prompt (recommended).
+            "embedding" uses the mean text embedding from Stage 3 (baseline, may produce blurry results).
 
     Returns:
         GenerateResult with paths to generated images and metadata.
@@ -183,24 +186,45 @@ def generate_distilled_dataset(
         decoded_np = (decoded_np * 255).round().astype(np.uint8)
         init_image = Image.fromarray(decoded_np).resize((resolution, resolution), Image.LANCZOS)
 
-        # Use the representative caption (medoid caption) as text prompt.
-        # This produces a real, coherent text embedding that the Stage 2 LoRA
-        # model has seen during training, rather than an averaged embedding
-        # that may not correspond to any meaningful semantic point.
-        prompt = representative_caption if representative_caption else class_name
-
         # Generate via img2img pipeline
         generator = torch.Generator(device="cpu").manual_seed(seed + mode_idx)
-        output = pipe(
-            image=init_image,
-            prompt=prompt,
-            negative_prompt="",
-            strength=strength,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            output_type="pil",
-        )
+
+        if semantic_mode == "embedding":
+            # Baseline: use mean text embedding from Stage 3 clustering.
+            # May produce blurry results because the averaged embedding
+            # doesn't correspond to any real caption the model has seen.
+            prompt_embeds = semantic_modes[mode_idx].unsqueeze(0).to(device, dtype=torch_dtype)
+            pooled_prompt_embeds = pooled_modes[mode_idx].unsqueeze(0).to(device, dtype=torch_dtype)
+            negative_prompt_embeds = torch.zeros_like(prompt_embeds)
+            negative_pooled_prompt_embeds = torch.zeros_like(pooled_prompt_embeds)
+            output = pipe(
+                image=init_image,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                strength=strength,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                output_type="pil",
+            )
+        else:
+            # Recommended: use the representative caption (medoid caption) as
+            # text prompt. This produces a real, coherent text embedding that
+            # the Stage 2 LoRA model has seen during training.
+            prompt = representative_caption if representative_caption else class_name
+            output = pipe(
+                image=init_image,
+                prompt=prompt,
+                negative_prompt="",
+                strength=strength,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                output_type="pil",
+            )
+
         image = output.images[0]
 
         # Save image: organize by class
