@@ -29,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     gen_parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"], help="Weight dtype")
     gen_parser.add_argument("--resolution", type=int, default=512, help="Output image resolution")
     gen_parser.add_argument("--semantic-mode", default="caption", choices=["caption", "embedding"], help="Semantic conditioning: 'caption' uses representative caption text (recommended), 'embedding' uses mean text embedding from Stage 3 (baseline)")
+    gen_parser.add_argument("--visual-mode", default="centroid", choices=["centroid", "medoid"], help="Visual init image: 'centroid' decodes cluster centroid latent (baseline, may be blurry), 'medoid' uses the real image closest to centroid (sharper)")
 
     return parser
 
@@ -53,6 +54,7 @@ def main() -> None:
             dtype=args.dtype,
             resolution=args.resolution,
             semantic_mode=args.semantic_mode,
+            visual_mode=args.visual_mode,
         )
         print(json.dumps({
             "output_dir": result.output_dir,

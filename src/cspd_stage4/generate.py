@@ -54,6 +54,16 @@ def _load_modes(modes_dir: str | Path) -> dict[str, Any]:
 
     modes_list = modes_index.get("modes", [])
 
+    # Try to load encode_index for medoid image paths
+    # modes_dir is typically .../modes or .../modes_hdbscan, encode_dir is sibling .../encoded
+    encode_dir = modes_dir.parent / "encoded"
+    encode_samples = []
+    encode_index_path = encode_dir / "encode_index.json"
+    if encode_index_path.exists():
+        with open(encode_index_path, encoding="utf-8") as f:
+            encode_index = json.load(f)
+        encode_samples = encode_index.get("samples", [])
+
     return {
         "visual_modes": visual_modes,
         "semantic_modes": semantic_modes,
@@ -62,6 +72,7 @@ def _load_modes(modes_dir: str | Path) -> dict[str, Any]:
         "ipc": modes_index.get("ipc", 0),
         "num_classes": modes_index.get("num_classes", 0),
         "total_modes": modes_index.get("total_modes", 0),
+        "encode_samples": encode_samples,
     }
 
 
@@ -110,6 +121,7 @@ def generate_distilled_dataset(
     dtype: str = "float16",
     resolution: int = 512,
     semantic_mode: str = "caption",
+    visual_mode: str = "centroid",
 ) -> GenerateResult:
     """Generate the distilled dataset using dual-anchor conditioning.
 
@@ -127,6 +139,8 @@ def generate_distilled_dataset(
         resolution: Output image resolution.
         semantic_mode: "caption" uses the representative caption text as prompt (recommended).
             "embedding" uses the mean text embedding from Stage 3 (baseline, may produce blurry results).
+        visual_mode: "centroid" uses the cluster centroid latent decoded to image (baseline).
+            "medoid" uses the real image closest to centroid (sharper init image).
 
     Returns:
         GenerateResult with paths to generated images and metadata.
@@ -146,7 +160,10 @@ def generate_distilled_dataset(
     modes_list = modes["modes_list"]
     total_modes = modes["total_modes"]
 
+    encode_samples = modes["encode_samples"]
+
     print(f"[Stage 4] Loaded {total_modes} modes ({modes['num_classes']} classes × IPC {modes['ipc']})")
+    print(f"[Stage 4] Visual mode: {visual_mode}, Semantic mode: {semantic_mode}")
 
     # Load SDXL img2img pipeline
     print(f"[Stage 4] Loading SDXL img2img pipeline...")
@@ -170,21 +187,43 @@ def generate_distilled_dataset(
         cluster_id = mode_meta.get("cluster_id", mode_idx)
         representative_caption = mode_meta.get("representative_caption", "")
 
-        # Get visual mode latent and decode to PIL image for img2img input
-        visual_latent = visual_modes[mode_idx].unsqueeze(0).to(device, dtype=torch.float32)  # (1, 4, H, W)
-        latent_for_decode = visual_latent / vae_scaling_factor
+        # Get init image for img2img
+        if visual_mode == "medoid":
+            # Use the real image closest to the cluster centroid (sharp, no decode artifacts)
+            medoid_index = mode_meta.get("visual_medoid_index", mode_idx)
+            if encode_samples and medoid_index < len(encode_samples):
+                medoid_image_path = encode_samples[medoid_index].get("image_path", "")
+            else:
+                medoid_record_id = mode_meta.get("visual_medoid_record_id", "")
+                # Fallback: try to find image path from record_id
+                medoid_image_path = ""
+                for s in encode_samples:
+                    if s.get("record_id") == medoid_record_id:
+                        medoid_image_path = s.get("image_path", "")
+                        break
+            if medoid_image_path and Path(medoid_image_path).exists():
+                init_image = Image.open(medoid_image_path).convert("RGB")
+                init_image = init_image.resize((resolution, resolution), Image.LANCZOS)
+            else:
+                print(f"  [WARN] Medoid image not found for mode {mode_idx}, falling back to centroid")
+                visual_mode_fallback = "centroid"
+        else:
+            visual_mode_fallback = None
 
-        # Temporarily cast VAE to float32 for decoding
-        vae_orig_dtype = vae.dtype
-        vae.to(dtype=torch.float32)
-        decoded = vae.decode(latent_for_decode, return_dict=False)[0]
-        vae.to(dtype=vae_orig_dtype)
+        if visual_mode == "centroid" or (visual_mode == "medoid" and visual_mode_fallback == "centroid"):
+            # Decode cluster centroid latent to PIL image (may be blurry due to averaging)
+            visual_latent = visual_modes[mode_idx].unsqueeze(0).to(device, dtype=torch.float32)
+            latent_for_decode = visual_latent / vae_scaling_factor
 
-        # Convert decoded tensor to PIL Image
-        decoded = (decoded / 2 + 0.5).clamp(0, 1)
-        decoded_np = decoded.squeeze(0).permute(1, 2, 0).cpu().float().numpy()
-        decoded_np = (decoded_np * 255).round().astype(np.uint8)
-        init_image = Image.fromarray(decoded_np).resize((resolution, resolution), Image.LANCZOS)
+            vae_orig_dtype = vae.dtype
+            vae.to(dtype=torch.float32)
+            decoded = vae.decode(latent_for_decode, return_dict=False)[0]
+            vae.to(dtype=vae_orig_dtype)
+
+            decoded = (decoded / 2 + 0.5).clamp(0, 1)
+            decoded_np = decoded.squeeze(0).permute(1, 2, 0).cpu().float().numpy()
+            decoded_np = (decoded_np * 255).round().astype(np.uint8)
+            init_image = Image.fromarray(decoded_np).resize((resolution, resolution), Image.LANCZOS)
 
         # Generate via img2img pipeline
         generator = torch.Generator(device="cpu").manual_seed(seed + mode_idx)
