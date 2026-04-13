@@ -65,32 +65,43 @@ def _load_render_records(render_input: str | Path) -> dict[str, dict[str, Any]]:
 def _load_pairs_index(render_input: str | Path, dataset_root: str | Path) -> list[dict[str, Any]]:
     """Build a list of (image_path, caption, class, archetype, record_id) from render records.
 
-    Reuses the same pairing logic as Stage 2: match by record_id which encodes
-    class_name_raw::file_name.
+    Reads directly from Stage 1C render records.jsonl. Each record has a record_id
+    of the form class_name_raw::relative_path, which is used to reconstruct the
+    full image path under dataset_root.
     """
-    from cspd_stage1.pipeline import build_samples_from_imagefolder, load_string_mapping
-
     dataset_root = Path(dataset_root)
-    samples = build_samples_from_imagefolder(str(dataset_root))
     render_records = _load_render_records(render_input)
 
     pairs = []
-    for sample in samples:
-        # record_id = class_name_raw::file_name
-        record_id = f"{sample.class_name_raw}::{sample.image_path.split('/')[-1] if '/' in sample.image_path else sample.image_path.split(chr(92))[-1]}"
-        if record_id not in render_records:
+    for record_id, row in render_records.items():
+        if row.get("render_status") != "success":
             continue
-        render_row = render_records[record_id]
+        # record_id = "class_name_raw::relative_path" e.g. "n01440764::n01440764/img.JPEG"
+        parts = record_id.split("::", 1)
+        if len(parts) != 2:
+            continue
+        class_name_raw = parts[0]
+        relative_path = parts[1]
+        image_path = dataset_root / relative_path
+        if not image_path.exists():
+            # Try sample_id as fallback
+            sample_id = row.get("sample_id", "")
+            if sample_id:
+                image_path = dataset_root / sample_id
         pairs.append({
             "index": len(pairs),
             "record_id": record_id,
-            "image_path": sample.image_path,
-            "canonical_caption": render_row.get("canonical_caption", ""),
-            "class_name": render_row.get("class_name", sample.class_name),
-            "class_name_raw": sample.class_name_raw,
-            "class_id": sample.class_id,
-            "archetype": render_row.get("archetype", sample.archetype),
+            "image_path": str(image_path),
+            "canonical_caption": row.get("canonical_caption", ""),
+            "class_name": row.get("class_name", class_name_raw),
+            "class_name_raw": class_name_raw,
+            "class_id": int(row.get("class_id", 0) or 0),
+            "archetype": row.get("archetype", ""),
         })
+    # Sort by record_id for deterministic ordering
+    pairs.sort(key=lambda p: p["record_id"])
+    for i, p in enumerate(pairs):
+        p["index"] = i
     return pairs
 
 
