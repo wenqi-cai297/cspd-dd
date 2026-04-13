@@ -5,10 +5,6 @@ import random
 import numpy as np
 import os
 import time
-import matplotlib
-import matplotlib.pyplot as plt
-
-# matplotlib.use('Agg')
 
 __all__ = ["Compose", "Lighting", "ColorJitter"]
 

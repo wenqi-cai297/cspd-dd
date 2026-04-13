@@ -37,7 +37,6 @@ from cspd_eval.train_utils import (
     random_indices,
     rand_bbox,
     Lighting,
-    get_time,
 )
 
 # ImageNet normalization constants
