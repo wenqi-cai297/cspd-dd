@@ -200,18 +200,18 @@ def generate_distilled_dataset(
         representative_caption = mode_meta.get("representative_caption", "")
 
         # --- Text-to-image path (visual_mode="none") ---
+        # Uses the exact same pipeline call as scripts/inference/sample_sdxl_lora.py
+        # to ensure identical output given the same prompt and seed.
         if visual_mode == "none":
             prompt = representative_caption if representative_caption else class_name
-            generator = torch.Generator(device="cpu").manual_seed(seed + mode_idx)
+            generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
             output = pipe(
                 prompt=prompt,
-                negative_prompt="",
                 height=resolution,
                 width=resolution,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
                 generator=generator,
-                output_type="pil",
             )
             image = output.images[0]
 
