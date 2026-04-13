@@ -54,7 +54,6 @@ fi
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 cd "$REPO_ROOT"
-pip install -e . -q
 
 # Derive dataset label
 derive_dataset_label() {

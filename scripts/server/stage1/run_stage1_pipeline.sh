@@ -43,7 +43,6 @@ fi
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 cd "$REPO_ROOT"
-pip install -e . -q
 
 # Derive dataset label for output paths
 DATASET_LABEL="$(basename "$(dirname "$DATASET_ROOT")")"
