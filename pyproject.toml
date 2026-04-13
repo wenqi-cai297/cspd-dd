@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cspd-stage1"
 version = "0.1.0"
-description = "CSPD pipeline: Prep, Stage 1 canonicalization/render, Stage 2 SDXL LoRA adaptation, Stage 3 visual/semantic mode discovery"
+description = "CSPD pipeline: Stage 1 canonicalization, Stage 2 SDXL LoRA adaptation, Stage 3 mode discovery, Stage 4 distilled generation"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -34,6 +34,7 @@ xformers = ["xformers"]
 cspd-stage1 = "cspd_stage1.cli:main"
 cspd-stage2 = "cspd_stage2.cli:main"
 cspd-stage3 = "cspd_stage3.cli:main"
+cspd-stage4 = "cspd_stage4.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

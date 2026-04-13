@@ -37,7 +37,7 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - Supporting server scripts, metadata prep, mock/regression runs, and full workflow wiring exist.
 
 ### Not implemented yet
-- **Stage 4**: dual-anchor conditioned distilled generation is not implemented in code yet.
+- Distilled dataset quality evaluation (FID, classification accuracy) is not yet automated.
 
 ### Partially implemented / legacy exploratory
 - **Stage 2 FLUX family**: training loop is only a stub; backbone loading and inspection work but end-to-end training is not wired.
@@ -59,6 +59,7 @@ Right now, the repo is best understood as:
   - **`cspd-stage1`** with Stage 1 subcommands such as `run`, `normalize`, and `render`
   - **`cspd-stage2`** for Stage 2 scaffold / inspection / planning commands
   - **`cspd-stage3`** for Stage 3 encoding / clustering / mode extraction
+  - **`cspd-stage4`** for Stage 4 dual-anchor distilled dataset generation
 - The repo now also bundles `environment.yml` for the shared conda environment name **`cspd-dd`** used by the server shell helpers.
 - Core dependencies: `torch`, `torchvision`, `numpy`, `tqdm`, `pillow`, `diffusers`, `transformers`, `accelerate`, `peft`, `sentencepiece`, `protobuf`, `tiktoken`, `safetensors`, `scikit-learn`.
 - Optional dependencies (declared in `pyproject.toml`): `wandb` (W&B logging), `xformers` (memory-efficient attention), `bitsandbytes` (8-bit Adam).
@@ -101,6 +102,11 @@ Right now, the repo is best understood as:
   - `encode.py` — VAE latent + text embedding encoding (Stage 3A)
   - `cluster.py` — per-class K-Means clustering + visual/semantic mode extraction (Stage 3B+3C)
   - `cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
+
+- `src/cspd_stage4/`
+  - `__init__.py`
+  - `generate.py` — dual-anchor conditioned generation with latent-space img2img
+  - `cli.py` — CLI with `generate` subcommand
 
 ### Inference scripts
 - `scripts/inference/sample_sdxl_lora.py` — SDXL LoRA sampling with baseline comparison support
@@ -219,8 +225,12 @@ For implementation tracking in this repo, use the following stage view:
 - current implementation: per-class K-Means on VAE latents, K = IPC
 - outputs: visual mode centroids, semantic mode mean embeddings, representative captions
 
-### Later planned stages
-4. dual-anchor (visual mode + semantic mode) conditioned distilled generation
+### Stage 4
+- dual-anchor (visual mode + semantic mode) conditioned distilled generation
+- visual mode latent as img2img initialization in latent space
+- semantic mode embedding as text conditioning
+- Stage 2 LoRA weights as generation backbone
+- key parameter: `strength` controls visual/semantic balance
 
 ### Important naming caveat
 Historically, render was treated as a Stage 2 compatibility surface.
@@ -923,15 +933,61 @@ Visual modes + semantic modes will serve as dual anchors for Stage 4:
 
 ---
 
-## 15. Later stages — current implementation status
+## 15. Stage 4 — Dual-anchor conditioned distilled dataset generation
 
-### Stage 4: dual-anchor conditioned distilled generation
-Status: **not implemented in repo**.
+### Implementation status
+**Implemented in repo.**
 
-No current modules are present yet for:
-- dual-anchor (visual mode + semantic mode) conditioned generation
-- final distilled dataset assembly
-- distilled dataset quality evaluation
+### Core purpose
+Generate the final distilled dataset by combining visual mode latents (from Stage 3) as initialization anchors with semantic mode embeddings (from Stage 3) as text conditioning, through the Stage 2 LoRA-finetuned SDXL backbone.
+
+### Generation flow per mode
+```
+visual_mode latent (4, 64, 64)
+  → add noise at controlled strength
+  + semantic_mode embedding as text conditioning
+  → SDXL UNet (+ Stage 2 LoRA) denoising loop with CFG
+  → VAE decode → distilled image (PNG)
+```
+
+### Main code
+- `src/cspd_stage4/__init__.py`
+- `src/cspd_stage4/generate.py` — dual-anchor generation with latent-space img2img
+- `src/cspd_stage4/cli.py` — CLI with `generate` subcommand
+- `scripts/server/stage4/run_stage4_pipeline.sh` — server pipeline script
+
+### CLI usage
+```bash
+cspd-stage4 generate \
+  --modes-dir runs/stage3/.../modes \
+  --lora-weights runs/stage2/.../checkpoint-8050/pytorch_lora_weights.safetensors \
+  --output-dir runs/stage4/imagenette/ipc10 \
+  --strength 0.5
+```
+
+### Key parameter: strength
+- `strength=0` → pure visual mode decode (no generation, just centroid → image)
+- `strength=0.3~0.7` → visual mode provides layout/structure, UNet refines with semantic conditioning
+- `strength=1.0` → pure text-to-image (visual mode ignored)
+
+### Output artifacts
+```text
+runs/stage4/<dataset>/<ipc>/s<strength>_<lora_tag>/<timestamp>/
+├── images/
+│   ├── <class_raw>/
+│   │   ├── <class_raw>_mode000.png
+│   │   ├── <class_raw>_mode001.png
+│   │   └── ...
+│   └── ...
+├── distilled_metadata.json    # per-image metadata with mode info
+└── stage4_summary.json        # generation summary
+```
+
+### Design decisions
+- **Latent-space img2img**: visual mode latent is injected directly into the diffusion latent space (no decode→re-encode roundtrip)
+- **CFG with zero unconditional**: negative prompt embeddings are zeros
+- **Per-mode seeding**: `seed + mode_index` for reproducibility with diversity
+- **ImageFolder output structure**: images organized by class for downstream classifier training
 
 ---
 
@@ -940,8 +996,8 @@ No current modules are present yet for:
 ### 16.1 All optimization must be archetype-level, never class-level
 This is a hard methodological boundary. Do not write normalization rules, render drop rules, or prompt guidance that references specific class names or class-level statistics. The only place class identity is used is in Prep (class-to-archetype mapping). Everything downstream operates on archetype + slot name only.
 
-### 16.2 Do not misread the repo as multi-stage-complete
-Currently the repo covers Prep, Stage 1 (1A+1B+1C), Stage 2 (SDXL LoRA + inference), Stage 3 (encoding + clustering + mode extraction). Stage 4 is not implemented.
+### 16.2 All four stages are now implemented
+The repo covers Prep, Stage 1 (1A+1B+1C), Stage 2 (SDXL LoRA + inference), Stage 3 (encoding + clustering + mode extraction), Stage 4 (dual-anchor distilled generation). Quality evaluation tooling is not yet automated.
 
 ### 16.3 Stage 1A prompt now uses per-slot guidance
 The prompt template no longer uses generic `"short phrase"` placeholders. Each slot has specific guidance with examples and anti-patterns defined in `SLOT_GUIDANCE` dict in `prompting.py`. This was added on 2026-04-12.
