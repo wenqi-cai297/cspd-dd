@@ -146,9 +146,9 @@ def encode_dataset(
         raise ValueError("No pairs found. Check dataset_root and render_input paths.")
     print(f"[Stage 3A] Found {len(pairs)} paired samples")
 
-    # Load VAE
-    print(f"[Stage 3A] Loading VAE from {model_name}...")
-    vae = AutoencoderKL.from_pretrained(model_name, subfolder="vae", torch_dtype=torch_dtype)
+    # Load VAE — always float32 to avoid NaN from fp16 overflow
+    print(f"[Stage 3A] Loading VAE from {model_name} (float32 for numerical stability)...")
+    vae = AutoencoderKL.from_pretrained(model_name, subfolder="vae", torch_dtype=torch.float32)
     vae = vae.to(device)
     vae.eval()
     vae_scaling_factor = vae.config.scaling_factor
@@ -168,7 +168,7 @@ def encode_dataset(
     for i in tqdm(range(0, len(pairs), batch_size), desc="VAE encode"):
         batch_pairs = pairs[i : i + batch_size]
         images = [_load_image(p["image_path"], resolution) for p in batch_pairs]
-        pixel_values = torch.stack([_image_to_tensor(img) for img in images]).to(device, dtype=torch_dtype)
+        pixel_values = torch.stack([_image_to_tensor(img) for img in images]).to(device, dtype=torch.float32)
         latent_dist = vae.encode(pixel_values).latent_dist
         latents = latent_dist.sample() * vae_scaling_factor
         all_latents.append(latents.cpu().float())
