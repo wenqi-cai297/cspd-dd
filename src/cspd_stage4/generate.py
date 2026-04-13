@@ -70,13 +70,16 @@ def _load_pipeline(
     lora_weights: str | None,
     device: str,
     dtype: str,
-) -> Any:
-    """Load SDXL pipeline with optional Stage 2 LoRA weights."""
-    from diffusers import StableDiffusionXLPipeline
+) -> tuple[Any, Any]:
+    """Load SDXL img2img pipeline + VAE with optional Stage 2 LoRA weights.
+
+    Returns (img2img_pipe, vae) where VAE is in float32 for stable decoding.
+    """
+    from diffusers import StableDiffusionXLImg2ImgPipeline, AutoencoderKL
 
     torch_dtype = torch.float16 if dtype == "float16" else torch.bfloat16
 
-    pipe = StableDiffusionXLPipeline.from_pretrained(
+    pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
         model_name,
         torch_dtype=torch_dtype,
         use_safetensors=True,
@@ -142,24 +145,15 @@ def generate_distilled_dataset(
 
     print(f"[Stage 4] Loaded {total_modes} modes ({modes['num_classes']} classes × IPC {modes['ipc']})")
 
-    # Load SDXL pipeline
-    print(f"[Stage 4] Loading SDXL pipeline...")
+    # Load SDXL img2img pipeline
+    print(f"[Stage 4] Loading SDXL img2img pipeline...")
     if lora_weights:
         print(f"[Stage 4] LoRA weights: {lora_weights}")
     pipe = _load_pipeline(model_name, lora_weights, device, dtype)
 
-    # Get VAE and scheduler from pipeline
+    # We need VAE in float32 for stable decoding of visual mode centroids
     vae = pipe.vae
-    scheduler = pipe.scheduler
-    unet = pipe.unet
     vae_scaling_factor = vae.config.scaling_factor
-
-    # Prepare time_ids for SDXL conditioning (original_size + crop_coords + target_size)
-    add_time_ids = torch.tensor(
-        [[resolution, resolution, 0, 0, resolution, resolution]],
-        dtype=torch_dtype,
-        device=device,
-    )
 
     # Generate one image per mode
     metadata_rows = []
@@ -173,74 +167,43 @@ def generate_distilled_dataset(
         cluster_id = mode_meta.get("cluster_id", mode_idx)
         representative_caption = mode_meta.get("representative_caption", "")
 
-        # Get mode tensors
-        visual_latent = visual_modes[mode_idx].unsqueeze(0).to(device, dtype=torch_dtype)  # (1, 4, H, W)
-        prompt_embeds = semantic_modes[mode_idx].unsqueeze(0).to(device, dtype=torch_dtype)  # (1, seq_len, dim)
-        pooled_prompt_embeds = pooled_modes[mode_idx].unsqueeze(0).to(device, dtype=torch_dtype)  # (1, pooled_dim)
+        # Get visual mode latent and decode to PIL image for img2img input
+        visual_latent = visual_modes[mode_idx].unsqueeze(0).to(device, dtype=torch.float32)  # (1, 4, H, W)
+        latent_for_decode = visual_latent / vae_scaling_factor
 
-        # Prepare negative prompt embeddings (unconditional = zeros)
+        # Temporarily cast VAE to float32 for decoding
+        vae_orig_dtype = vae.dtype
+        vae.to(dtype=torch.float32)
+        decoded = vae.decode(latent_for_decode, return_dict=False)[0]
+        vae.to(dtype=vae_orig_dtype)
+
+        # Convert decoded tensor to PIL Image
+        decoded = (decoded / 2 + 0.5).clamp(0, 1)
+        decoded_np = decoded.squeeze(0).permute(1, 2, 0).cpu().float().numpy()
+        decoded_np = (decoded_np * 255).round().astype(np.uint8)
+        init_image = Image.fromarray(decoded_np).resize((resolution, resolution), Image.LANCZOS)
+
+        # Get semantic mode embeddings
+        prompt_embeds = semantic_modes[mode_idx].unsqueeze(0).to(device, dtype=torch_dtype)
+        pooled_prompt_embeds = pooled_modes[mode_idx].unsqueeze(0).to(device, dtype=torch_dtype)
         negative_prompt_embeds = torch.zeros_like(prompt_embeds)
         negative_pooled_prompt_embeds = torch.zeros_like(pooled_prompt_embeds)
 
-        # Set up scheduler
-        scheduler.set_timesteps(num_inference_steps, device=device)
-
-        # Determine the starting timestep based on strength
-        # strength=0.5 means start denoising from halfway
-        init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
-        t_start = max(num_inference_steps - init_timestep, 0)
-        timesteps = scheduler.timesteps[t_start:]
-
-        # Add noise to the visual mode latent
-        # Generate noise on CPU (supports generator) then move to device
-        cpu_generator = torch.Generator(device="cpu").manual_seed(seed + mode_idx)
-        noise = torch.randn(visual_latent.shape, generator=cpu_generator, dtype=visual_latent.dtype).to(device)
-
-        if len(timesteps) > 0:
-            # Scale the latent (already scaled by vae_scaling_factor from Stage 3)
-            latents = scheduler.add_noise(visual_latent, noise, timesteps[:1])
-        else:
-            # strength=0: no noise, just decode the centroid directly
-            latents = visual_latent
-
-        # Concatenate conditional and unconditional for CFG
-        prompt_embeds_cfg = torch.cat([negative_prompt_embeds, prompt_embeds])
-        pooled_embeds_cfg = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds])
-        add_time_ids_cfg = torch.cat([add_time_ids, add_time_ids])
-        added_cond_kwargs = {
-            "text_embeds": pooled_embeds_cfg,
-            "time_ids": add_time_ids_cfg,
-        }
-
-        # Denoising loop
-        for t in timesteps:
-            latent_model_input = torch.cat([latents] * 2)  # for CFG
-            latent_model_input = scheduler.scale_model_input(latent_model_input, t)
-
-            noise_pred = unet(
-                latent_model_input,
-                t,
-                encoder_hidden_states=prompt_embeds_cfg,
-                added_cond_kwargs=added_cond_kwargs,
-                return_dict=False,
-            )[0]
-
-            # CFG: noise_pred = uncond + guidance_scale * (cond - uncond)
-            noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-
-            # Step
-            latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-
-        # VAE decode
-        latents_decoded = latents / vae_scaling_factor
-        image_tensor = vae.decode(latents_decoded, return_dict=False)[0]
-
-        # Tensor to PIL
-        image_tensor = (image_tensor / 2 + 0.5).clamp(0, 1)
-        image_np = image_tensor.squeeze(0).permute(1, 2, 0).cpu().float().numpy()
-        image_np = (image_np * 255).round().astype(np.uint8)
-        image = Image.fromarray(image_np)
+        # Generate via img2img pipeline
+        generator = torch.Generator(device="cpu").manual_seed(seed + mode_idx)
+        output = pipe(
+            image=init_image,
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+            strength=strength,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+            output_type="pil",
+        )
+        image = output.images[0]
 
         # Save image: organize by class
         class_dir = images_dir / class_name_raw
