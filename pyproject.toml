@@ -35,6 +35,7 @@ cspd-stage1 = "cspd_stage1.cli:main"
 cspd-stage2 = "cspd_stage2.cli:main"
 cspd-stage3 = "cspd_stage3.cli:main"
 cspd-stage4 = "cspd_stage4.cli:main"
+cspd-eval = "cspd_eval.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
