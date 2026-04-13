@@ -161,8 +161,9 @@ def encode_dataset(
     all_latents = []
     for i in tqdm(range(0, len(pairs), batch_size), desc="VAE encode"):
         batch_pairs = pairs[i : i + batch_size]
+        # Images are already resized by _load_image; preprocess only normalizes
         images = [_load_image(p["image_path"], resolution) for p in batch_pairs]
-        pixel_values = image_processor.preprocess(images, height=resolution, width=resolution)
+        pixel_values = image_processor.preprocess(images)
         pixel_values = pixel_values.to(device, dtype=torch.float32)
         latent_dist = vae.encode(pixel_values).latent_dist
         latents = latent_dist.sample() * vae_scaling_factor
