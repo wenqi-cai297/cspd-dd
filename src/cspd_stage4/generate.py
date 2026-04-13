@@ -76,28 +76,46 @@ def _load_modes(modes_dir: str | Path) -> dict[str, Any]:
     }
 
 
-def _load_pipeline(
+def _load_text2img_pipeline(
     model_name: str,
     lora_weights: str | None,
     device: str,
     dtype: str,
-    pipeline_type: str = "img2img",
 ) -> Any:
-    """Load SDXL pipeline with optional Stage 2 LoRA weights.
-
-    Args:
-        pipeline_type: "img2img" for visual-anchor mode, "text2img" for caption-only mode.
-    """
-    if pipeline_type == "text2img":
-        from diffusers import StableDiffusionXLPipeline
-        PipeClass = StableDiffusionXLPipeline
-    else:
-        from diffusers import StableDiffusionXLImg2ImgPipeline
-        PipeClass = StableDiffusionXLImg2ImgPipeline
+    """Load SDXL text2img pipeline — identical to scripts/inference/sample_sdxl_lora.py."""
+    from diffusers import StableDiffusionXLPipeline
 
     torch_dtype = torch.float16 if dtype == "float16" else torch.bfloat16
 
-    pipe = PipeClass.from_pretrained(
+    pipe = StableDiffusionXLPipeline.from_pretrained(
+        model_name,
+        torch_dtype=torch_dtype,
+        use_safetensors=True,
+    )
+
+    if lora_weights:
+        lora_path = Path(lora_weights)
+        if not lora_path.exists():
+            raise FileNotFoundError(f"LoRA weights not found: {lora_path}")
+        pipe.load_lora_weights(str(lora_path.parent), weight_name=lora_path.name)
+
+    pipe = pipe.to(device)
+    pipe.set_progress_bar_config(disable=False)
+    return pipe
+
+
+def _load_img2img_pipeline(
+    model_name: str,
+    lora_weights: str | None,
+    device: str,
+    dtype: str,
+) -> Any:
+    """Load SDXL img2img pipeline for visual-anchor modes."""
+    from diffusers import StableDiffusionXLImg2ImgPipeline
+
+    torch_dtype = torch.float16 if dtype == "float16" else torch.bfloat16
+
+    pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
         model_name,
         torch_dtype=torch_dtype,
         use_safetensors=True,
@@ -177,13 +195,15 @@ def generate_distilled_dataset(
     print(f"[Stage 4] Visual mode: {visual_mode}, Semantic mode: {semantic_mode}")
 
     # Load SDXL pipeline
-    pipeline_type = "text2img" if visual_mode == "none" else "img2img"
-    print(f"[Stage 4] Loading SDXL {pipeline_type} pipeline...")
     if lora_weights:
         print(f"[Stage 4] LoRA weights: {lora_weights}")
-    pipe = _load_pipeline(model_name, lora_weights, device, dtype, pipeline_type=pipeline_type)
+    if visual_mode == "none":
+        print(f"[Stage 4] Loading SDXL text2img pipeline (same as inference script)...")
+        pipe = _load_text2img_pipeline(model_name, lora_weights, device, dtype)
+    else:
+        print(f"[Stage 4] Loading SDXL img2img pipeline...")
+        pipe = _load_img2img_pipeline(model_name, lora_weights, device, dtype)
 
-    # We need VAE in float32 for stable decoding of visual mode centroids (img2img only)
     vae = pipe.vae
     vae_scaling_factor = vae.config.scaling_factor
 
@@ -200,20 +220,22 @@ def generate_distilled_dataset(
         representative_caption = mode_meta.get("representative_caption", "")
 
         # --- Text-to-image path (visual_mode="none") ---
-        # Uses the exact same pipeline call as scripts/inference/sample_sdxl_lora.py
-        # to ensure identical output given the same prompt and seed.
+        # Mirrors scripts/inference/sample_sdxl_lora.py exactly:
+        #   generator = torch.Generator(device=device).manual_seed(seed + idx)
+        #   image = pipe(prompt=prompt, height=res, width=res,
+        #                num_inference_steps=steps, guidance_scale=gs,
+        #                generator=generator).images[0]
         if visual_mode == "none":
             prompt = representative_caption if representative_caption else class_name
             generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
-            output = pipe(
+            image = pipe(
                 prompt=prompt,
                 height=resolution,
                 width=resolution,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
                 generator=generator,
-            )
-            image = output.images[0]
+            ).images[0]
 
             # Save image
             class_dir = images_dir / class_name_raw
