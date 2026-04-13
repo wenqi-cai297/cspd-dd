@@ -26,25 +26,29 @@ import torch
 from diffusers import StableDiffusionXLPipeline, AutoencoderKL
 
 
-# Representative canonical captions covering all ImageNette archetypes
+# Representative canonical captions covering all ImageNette archetypes.
+# Updated 2026-04-13 to match the current per-slot-guided render style.
 DEFAULT_PROMPTS = [
-    # animal
-    "a brown large and flat tench being held",
-    "a black and white fluffy springer spaniel sitting in grassy field",
-    # device_or_appliance
-    "a black plastic cassette player",
-    "a beige rectangular vintage radio standing on wooden surface",
-    # tool
-    "a red and silver metallic chain saw static on concrete",
-    # structure_or_building
-    "a marble baroque large church with altar",
-    # instrument
-    "a gold metal french horn resting in display case",
-    # vehicle
-    "an orange dump body garbage truck in motion in urban road",
-    # sports_or_toy
-    "a white with dimples rubber golf ball resting on green grass close-up view",
-    "a colorful fabric parachute deployed in clear sky from below",
+    # animal - tench
+    "a brown large and flat body tench being held in outdoor, natural setting with grass and trees front view",
+    # animal - springer spaniel
+    "a black and white long floppy ears english springer standing in grass side view with ears",
+    # device_or_appliance - cassette player
+    "a black and silver plastic rectangular with rounded edges cassette player idle with display off in white surface front view",
+    # device_or_appliance - gas pump
+    "an orange metal rectangular with rounded edges gas pump idle in park-like area side view",
+    # tool - chain saw
+    "a black and silver metal long handle with blade chain saw in use in grass field side view",
+    # structure_or_building - church
+    "a carpet and stone and wood gothic large church in interior front view with stained glass windows",
+    # instrument - french horn
+    "a golden yellow metal curved tubing french horn resting in white surface side view",
+    # vehicle - garbage truck
+    "an orange dump truck body and open rear garbage truck driving on road in urban street side view",
+    # sports_or_toy - golf ball
+    "a white with dimples rubber spherical golf ball resting in green grass close-up view",
+    # sports_or_toy - parachute
+    "a rainbow striped fabric elliptical with lines parachute in flight in sky with clouds low angle view",
 ]
 
 
