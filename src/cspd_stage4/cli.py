@@ -1,4 +1,4 @@
-"""CLI entrypoint for CSPD Stage 4 — dual-anchor conditioned distilled dataset generation."""
+"""CLI entrypoint for CSPD Stage 4 — distilled dataset generation."""
 
 from __future__ import annotations
 
@@ -8,28 +8,29 @@ import json
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="CSPD Stage 4 CLI for dual-anchor conditioned distilled dataset generation"
+        description="CSPD Stage 4 CLI for distilled dataset generation"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # --- generate ---
     gen_parser = subparsers.add_parser(
         "generate",
-        help="Generate distilled dataset from Stage 3 visual/semantic modes using Stage 2 LoRA backbone",
+        help="Generate distilled dataset from Stage 3 modes using Stage 2 LoRA backbone (text-to-image)",
     )
-    gen_parser.add_argument("--modes-dir", required=True, help="Directory with Stage 3 mode outputs (visual_modes.pt, semantic_modes.pt, modes_index.json)")
+    gen_parser.add_argument("--modes-dir", required=True, help="Directory with Stage 3 mode outputs (modes_index.json)")
     gen_parser.add_argument("--output-dir", required=True, help="Directory for distilled dataset output")
     gen_parser.add_argument("--lora-weights", default=None, help="Path to Stage 2 LoRA weights (.safetensors). Omit for baseline SDXL.")
     gen_parser.add_argument("--model-name", default="stabilityai/stable-diffusion-xl-base-1.0", help="SDXL model identifier")
-    gen_parser.add_argument("--strength", type=float, default=0.5, help="Noise strength for visual mode initialization. 0=pure centroid decode, 1=pure text-to-image. Default 0.5.")
     gen_parser.add_argument("--num-inference-steps", type=int, default=50, help="Diffusion sampling steps")
     gen_parser.add_argument("--guidance-scale", type=float, default=7.5, help="Classifier-free guidance scale")
     gen_parser.add_argument("--seed", type=int, default=42, help="RNG seed")
     gen_parser.add_argument("--device", default="cuda", help="Torch device")
     gen_parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"], help="Weight dtype")
     gen_parser.add_argument("--resolution", type=int, default=512, help="Output image resolution")
-    gen_parser.add_argument("--semantic-mode", default="caption", choices=["caption", "embedding"], help="Semantic conditioning: 'caption' uses representative caption text (recommended), 'embedding' uses mean text embedding from Stage 3 (baseline)")
-    gen_parser.add_argument("--visual-mode", default="none", choices=["none", "centroid", "medoid"], help="Visual anchor: 'none' uses pure text-to-image (recommended), 'centroid' decodes cluster centroid latent, 'medoid' uses real image closest to centroid")
+    # Legacy options preserved for ablation experiments
+    gen_parser.add_argument("--visual-mode", default="none", choices=["none", "centroid", "medoid"], help=argparse.SUPPRESS)
+    gen_parser.add_argument("--semantic-mode", default="caption", choices=["caption", "embedding"], help=argparse.SUPPRESS)
+    gen_parser.add_argument("--strength", type=float, default=0.5, help=argparse.SUPPRESS)
 
     return parser
 
