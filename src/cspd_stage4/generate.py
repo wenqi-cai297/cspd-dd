@@ -188,15 +188,17 @@ def generate_distilled_dataset(
         representative_caption = mode_meta.get("representative_caption", "")
 
         # Get init image for img2img
+        use_centroid = visual_mode == "centroid"
+
         if visual_mode == "medoid":
             # Use the real image closest to the cluster centroid (sharp, no decode artifacts)
             medoid_index = mode_meta.get("visual_medoid_index", mode_idx)
+            medoid_image_path = ""
             if encode_samples and medoid_index < len(encode_samples):
                 medoid_image_path = encode_samples[medoid_index].get("image_path", "")
-            else:
-                medoid_record_id = mode_meta.get("visual_medoid_record_id", "")
+            if not medoid_image_path or not Path(medoid_image_path).exists():
                 # Fallback: try to find image path from record_id
-                medoid_image_path = ""
+                medoid_record_id = mode_meta.get("visual_medoid_record_id", "")
                 for s in encode_samples:
                     if s.get("record_id") == medoid_record_id:
                         medoid_image_path = s.get("image_path", "")
@@ -206,11 +208,9 @@ def generate_distilled_dataset(
                 init_image = init_image.resize((resolution, resolution), Image.LANCZOS)
             else:
                 print(f"  [WARN] Medoid image not found for mode {mode_idx}, falling back to centroid")
-                visual_mode_fallback = "centroid"
-        else:
-            visual_mode_fallback = None
+                use_centroid = True
 
-        if visual_mode == "centroid" or (visual_mode == "medoid" and visual_mode_fallback == "centroid"):
+        if use_centroid:
             # Decode cluster centroid latent to PIL image (may be blurry due to averaging)
             visual_latent = visual_modes[mode_idx].unsqueeze(0).to(device, dtype=torch.float32)
             latent_for_decode = visual_latent / vae_scaling_factor
