@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     gen_parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"], help="Weight dtype")
     gen_parser.add_argument("--resolution", type=int, default=512, help="Output image resolution")
     gen_parser.add_argument("--semantic-mode", default="caption", choices=["caption", "embedding"], help="Semantic conditioning: 'caption' uses representative caption text (recommended), 'embedding' uses mean text embedding from Stage 3 (baseline)")
-    gen_parser.add_argument("--visual-mode", default="centroid", choices=["centroid", "medoid"], help="Visual init image: 'centroid' decodes cluster centroid latent (baseline, may be blurry), 'medoid' uses the real image closest to centroid (sharper)")
+    gen_parser.add_argument("--visual-mode", default="none", choices=["none", "centroid", "medoid"], help="Visual anchor: 'none' uses pure text-to-image (recommended), 'centroid' decodes cluster centroid latent, 'medoid' uses real image closest to centroid")
 
     return parser
 

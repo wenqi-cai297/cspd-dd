@@ -81,16 +81,23 @@ def _load_pipeline(
     lora_weights: str | None,
     device: str,
     dtype: str,
-) -> tuple[Any, Any]:
-    """Load SDXL img2img pipeline + VAE with optional Stage 2 LoRA weights.
+    pipeline_type: str = "img2img",
+) -> Any:
+    """Load SDXL pipeline with optional Stage 2 LoRA weights.
 
-    Returns (img2img_pipe, vae) where VAE is in float32 for stable decoding.
+    Args:
+        pipeline_type: "img2img" for visual-anchor mode, "text2img" for caption-only mode.
     """
-    from diffusers import StableDiffusionXLImg2ImgPipeline, AutoencoderKL
+    if pipeline_type == "text2img":
+        from diffusers import StableDiffusionXLPipeline
+        PipeClass = StableDiffusionXLPipeline
+    else:
+        from diffusers import StableDiffusionXLImg2ImgPipeline
+        PipeClass = StableDiffusionXLImg2ImgPipeline
 
     torch_dtype = torch.float16 if dtype == "float16" else torch.bfloat16
 
-    pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+    pipe = PipeClass.from_pretrained(
         model_name,
         torch_dtype=torch_dtype,
         use_safetensors=True,
@@ -139,8 +146,12 @@ def generate_distilled_dataset(
         resolution: Output image resolution.
         semantic_mode: "caption" uses the representative caption text as prompt (recommended).
             "embedding" uses the mean text embedding from Stage 3 (baseline, may produce blurry results).
-        visual_mode: "centroid" uses the cluster centroid latent decoded to image (baseline).
+        visual_mode: "centroid" uses the cluster centroid latent decoded to image.
             "medoid" uses the real image closest to centroid (sharper init image).
+            "none" skips visual anchor entirely — pure text-to-image (recommended).
+            When "none", the generation uses StableDiffusionXLPipeline (text2img) instead of img2img.
+            Stage 3 visual clustering is still used to SELECT which captions to generate,
+            but the generation itself is driven purely by text conditioning.
 
     Returns:
         GenerateResult with paths to generated images and metadata.
@@ -165,13 +176,14 @@ def generate_distilled_dataset(
     print(f"[Stage 4] Loaded {total_modes} modes ({modes['num_classes']} classes × IPC {modes['ipc']})")
     print(f"[Stage 4] Visual mode: {visual_mode}, Semantic mode: {semantic_mode}")
 
-    # Load SDXL img2img pipeline
-    print(f"[Stage 4] Loading SDXL img2img pipeline...")
+    # Load SDXL pipeline
+    pipeline_type = "text2img" if visual_mode == "none" else "img2img"
+    print(f"[Stage 4] Loading SDXL {pipeline_type} pipeline...")
     if lora_weights:
         print(f"[Stage 4] LoRA weights: {lora_weights}")
-    pipe = _load_pipeline(model_name, lora_weights, device, dtype)
+    pipe = _load_pipeline(model_name, lora_weights, device, dtype, pipeline_type=pipeline_type)
 
-    # We need VAE in float32 for stable decoding of visual mode centroids
+    # We need VAE in float32 for stable decoding of visual mode centroids (img2img only)
     vae = pipe.vae
     vae_scaling_factor = vae.config.scaling_factor
 
@@ -187,7 +199,44 @@ def generate_distilled_dataset(
         cluster_id = mode_meta.get("cluster_id", mode_idx)
         representative_caption = mode_meta.get("representative_caption", "")
 
-        # Get init image for img2img
+        # --- Text-to-image path (visual_mode="none") ---
+        if visual_mode == "none":
+            prompt = representative_caption if representative_caption else class_name
+            generator = torch.Generator(device="cpu").manual_seed(seed + mode_idx)
+            output = pipe(
+                prompt=prompt,
+                negative_prompt="",
+                height=resolution,
+                width=resolution,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                output_type="pil",
+            )
+            image = output.images[0]
+
+            # Save image
+            class_dir = images_dir / class_name_raw
+            class_dir.mkdir(parents=True, exist_ok=True)
+            image_filename = f"{class_name_raw}_mode{cluster_id:03d}.png"
+            image_path = class_dir / image_filename
+            image.save(image_path)
+
+            metadata_rows.append({
+                "mode_index": mode_idx,
+                "class_name": class_name,
+                "class_name_raw": class_name_raw,
+                "archetype": archetype,
+                "cluster_id": cluster_id,
+                "representative_caption": representative_caption,
+                "num_cluster_members": mode_meta.get("num_members", 0),
+                "image_path": str(image_path),
+                "relative_image_path": f"{class_name_raw}/{image_filename}",
+                "generation_mode": "text2img",
+            })
+            continue
+
+        # --- Img2img path (visual_mode="centroid" or "medoid") ---
         use_centroid = visual_mode == "centroid"
 
         if visual_mode == "medoid":
