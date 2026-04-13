@@ -192,8 +192,9 @@ def generate_distilled_dataset(
         timesteps = scheduler.timesteps[t_start:]
 
         # Add noise to the visual mode latent
-        generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
-        noise = torch.randn_like(visual_latent, generator=generator)
+        # Generate noise on CPU (supports generator) then move to device
+        cpu_generator = torch.Generator(device="cpu").manual_seed(seed + mode_idx)
+        noise = torch.randn(visual_latent.shape, generator=cpu_generator, dtype=visual_latent.dtype).to(device)
 
         if len(timesteps) > 0:
             # Scale the latent (already scaled by vae_scaling_factor from Stage 3)
