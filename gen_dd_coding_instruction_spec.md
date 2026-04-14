@@ -33,11 +33,13 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - **Stage 1 render** is implemented as a deterministic archetype-template renderer.
 - **Stage 2 SDXL LoRA training** is implemented and has completed successful end-to-end runs on ImageNette.
 - **Stage 2 inference / sampling** script is implemented for LoRA vs baseline A/B comparison.
-- **Stage 3 visual/semantic mode discovery** is implemented: VAE/text encoding + per-class K-Means clustering + mode extraction.
+- **Stage 3 visual/semantic mode discovery** is implemented: VAE/text/DINOv2 encoding + per-class clustering (K-Means or HDBSCAN) + mode extraction.
+- **Stage 4 distilled dataset generation** is implemented: text-to-image generation using Stage 3 caption selection + Stage 2 LoRA backbone. Optional SDXL refiner support.
+- **Evaluation** is implemented: train classifier (ConvNet-6/ResNet-18/ResNetAP-10) on distilled dataset, evaluate on real val set.
 - Supporting server scripts, metadata prep, mock/regression runs, and full workflow wiring exist.
 
 ### Not implemented yet
-- Distilled dataset quality evaluation (FID, classification accuracy) is not yet automated.
+- FID evaluation is not yet automated.
 
 ### Partially implemented / legacy exploratory
 - **Stage 2 FLUX family**: training loop is only a stub; backbone loading and inspection work but end-to-end training is not wired.
@@ -49,7 +51,9 @@ Right now, the repo is best understood as:
 - a working **Stage 1** pipeline consisting of extraction -> normalization -> render,
 - a working **Stage 2 SDXL LoRA** training pipeline that delegates to the official diffusers trainer,
 - a working **Stage 2 inference** script for sampling from trained LoRA weights,
-- a working **Stage 3** pipeline for latent encoding, per-class clustering, and visual/semantic mode extraction,
+- a working **Stage 3** pipeline for VAE/text/DINOv2 encoding, per-class clustering (K-Means or HDBSCAN), and visual/semantic mode extraction,
+- a working **Stage 4** pipeline for text-to-image distilled dataset generation with caption selection by visual clustering,
+- a working **Evaluation** pipeline for training classifiers on distilled datasets and evaluating on real validation sets,
 - where Stage 1 normalization is deterministic-first but can invoke constrained VLM review on ambiguous slots,
 - plus planning/spec notes for Stage 4.
 
@@ -99,14 +103,22 @@ Right now, the repo is best understood as:
 
 - `src/cspd_stage3/`
   - `__init__.py`
-  - `encode.py` — VAE latent + text embedding encoding (Stage 3A)
-  - `cluster.py` — per-class K-Means clustering + visual/semantic mode extraction (Stage 3B+3C)
+  - `encode.py` — VAE latent + text embedding + DINOv2 feature encoding (Stage 3A)
+  - `cluster.py` — per-class clustering (K-Means or HDBSCAN) + visual/semantic mode extraction (Stage 3B+3C)
   - `cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
 
 - `src/cspd_stage4/`
   - `__init__.py`
-  - `generate.py` — dual-anchor conditioned generation with latent-space img2img
+  - `generate.py` — text2img distilled generation with optional refiner and legacy img2img paths
   - `cli.py` — CLI with `generate` subcommand
+
+- `src/cspd_eval/`
+  - `__init__.py`
+  - `train.py` — classifier training + evaluation (ConvNet-6, ResNet-18, ResNetAP-10)
+  - `train_utils.py` — training utilities (AverageMeter, accuracy, CutMix, etc.)
+  - `models/convnet.py` — ConvNet-6 architecture
+  - `models/resnet.py` — ResNet-18 architecture
+  - `models/resnet_ap.py` — ResNetAP-10 architecture
 
 ### Inference scripts
 - `scripts/inference/sample_sdxl_lora.py` — SDXL LoRA sampling with baseline comparison support
@@ -151,6 +163,11 @@ Right now, the repo is best understood as:
 - `scripts/server/run_stage2_train.sh`
 - `scripts/server/dump_stage2_backbone_modules.sh`
 - `scripts/server/README.md` documents the recommended Prep + Stage 1 + Stage 2 helper flow
+- `scripts/server/stage1/run_stage1_pipeline.sh` — full Stage 1: extract → normalize → render
+- `scripts/server/stage2/run_stage2_pipeline.sh` — Stage 2 training + checkpoint sampling
+- `scripts/server/stage3/run_stage3_pipeline.sh` — Stage 3 encode + cluster
+- `scripts/server/stage4/run_stage4_pipeline.sh` — Stage 4 generate distilled dataset
+- `scripts/server/eval/run_eval_pipeline.sh` — train classifier + evaluate
 
 ### Stage 2 output-dir rule (must remember)
 - The repo-standard Stage 2 run root is:
@@ -222,15 +239,18 @@ For implementation tracking in this repo, use the following stage view:
 
 ### Stage 3
 - visual/semantic mode discovery via latent clustering
-- current implementation: per-class K-Means on VAE latents, K = IPC
-- outputs: visual mode centroids, semantic mode mean embeddings, representative captions
+- encoding: VAE latents + CLIP text embeddings + DINOv2 CLS features
+- clustering: K-Means (baseline) or HDBSCAN (density-based mode discovery)
+- feature space: VAE latents (baseline) or DINOv2 features (better mode separation)
+- outputs: visual mode centroids/medoids, semantic mode mean embeddings, representative captions
 
 ### Stage 4
-- dual-anchor (visual mode + semantic mode) conditioned distilled generation
-- visual mode latent as img2img initialization in latent space
-- semantic mode embedding as text conditioning
+- text-to-image distilled dataset generation
+- visual clustering selects WHICH captions to generate (one per mode)
+- representative caption from each mode used as text prompt
 - Stage 2 LoRA weights as generation backbone
-- key parameter: `strength` controls visual/semantic balance
+- optional SDXL refiner for detail/sharpness
+- legacy img2img path preserved for ablation (visual_mode=centroid/medoid)
 
 ### Important naming caveat
 Historically, render was treated as a Stage 2 compatibility surface.
@@ -863,29 +883,32 @@ The repo currently uses VLMs where semantic proposal or ambiguity resolution is 
 ## 14. Stage 3 — Visual/semantic mode discovery via latent clustering
 
 ### Implementation status
-**Implemented in repo (initial version).**
+**Implemented in repo. Running experiments on ImageNette with DINOv2 + K-Means/HDBSCAN.**
 
 ### Core purpose
-Discover representative visual and semantic modes per class via clustering in latent space. These modes become the dual anchors for Stage 4 distilled dataset generation.
+Discover representative visual and semantic modes per class via clustering. Visual clustering determines WHICH captions to use for Stage 4 generation (one representative caption per mode). Semantic modes provide the text embeddings and representative captions.
 
 ### Architecture
 
 ```
 Stage 3A: Encode
-  images → SDXL VAE → latents (N, 4, H/8, W/8)
-  captions → SDXL CLIP × 2 → text embeddings (N, seq_len, 2048) + pooled (N, 1280)
+  images → SDXL VAE → latents (N, 4, H/8, W/8)          [for mode extraction]
+  captions → SDXL CLIP × 2 → text embeddings (N, 77, 2048) + pooled (N, 1280)
+  images → DINOv2 (dinov2_vitb14) → CLS features (N, 768) [for clustering]
 
 Stage 3B+3C: Cluster + Extract
-  per class: K-Means on flattened latents, K = IPC
+  per class:
+    K-Means (baseline): cluster on selected feature space, K = IPC
+    HDBSCAN (mode discovery): discover natural density modes, allocate IPC proportionally
   per cluster:
-    visual mode  = latent centroid (+ medoid as fallback)
-    semantic mode = mean text embedding (+ representative caption from medoid)
+    visual mode  = VAE latent centroid (+ medoid record_id)
+    semantic mode = mean text embedding (+ representative caption from semantic medoid)
 ```
 
 ### Main code
 - `src/cspd_stage3/__init__.py`
-- `src/cspd_stage3/encode.py` — VAE latent + text embedding encoding
-- `src/cspd_stage3/cluster.py` — per-class K-Means, visual/semantic mode extraction
+- `src/cspd_stage3/encode.py` — VAE latent + text embedding + DINOv2 feature encoding
+- `src/cspd_stage3/cluster.py` — per-class clustering (K-Means or HDBSCAN), visual/semantic mode extraction
 - `src/cspd_stage3/cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
 
 ### CLI usage
@@ -895,84 +918,138 @@ cspd-stage3 run \
   --dataset-root /path/to/ImageNette/train \
   --render-input /path/to/records.jsonl \
   --output-dir runs/stage3/imagenette \
-  --ipc 10
+  --ipc 10 \
+  --cluster-space dino \
+  --cluster-method hdbscan \
+  --min-cluster-size 15 \
+  --min-samples 3 \
+  --pca-dim 0
 
 # Or step by step:
 cspd-stage3 encode --dataset-root ... --render-input ... --output-dir runs/stage3/encoded
-cspd-stage3 cluster --encode-dir runs/stage3/encoded --output-dir runs/stage3/modes --ipc 10
+cspd-stage3 cluster --encode-dir runs/stage3/encoded --output-dir runs/stage3/modes --ipc 10 \
+  --cluster-space dino --cluster-method kmeans
 ```
+
+### Clustering parameters
+- **--cluster-space**: `"vae"` (flatten VAE latents, 16384-dim, baseline) or `"dino"` (DINOv2 CLS features, 768-dim, better mode separation)
+- **--cluster-method**: `"kmeans"` (baseline, K=IPC) or `"hdbscan"` (density-based mode discovery)
+- **--min-cluster-size**: HDBSCAN parameter — minimum points for a subtree to count as a real cluster split in the condensed tree. Controls minimum legitimate cluster size. (ignored for kmeans)
+- **--min-samples**: HDBSCAN parameter — k in k-NN for core distance computation. Controls density estimation smoothness. Lower = finer density landscape, more clusters. Higher = smoother, fewer clusters. (ignored for kmeans)
+- **--pca-dim**: PCA dimensions for HDBSCAN pre-processing. `0` skips PCA. DINOv2 features (768-dim) usually don't need PCA.
+
+### HDBSCAN mode discovery flow
+1. Optional PCA dimensionality reduction on selected feature space
+2. HDBSCAN discovers natural density modes (no preset K)
+3. Noise points assigned to nearest discovered mode
+4. If 0-1 modes found → fallback to K-Means
+5. If modes > IPC → farthest-point sampling to select IPC most diverse modes
+6. If modes <= IPC → proportional IPC allocation, sub-cluster large modes with K-Means
+7. Mode extraction always uses VAE latents (visual) and text embeddings (semantic)
+
+### DINOv2 encoding
+- Model: `torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")`
+- Input: images resized to 224×224, ImageNet normalization
+- Output: CLS token features (N, 768)
+- Purpose: DINOv2 produces semantically rich features with natural cluster structure, better suited for mode discovery than VAE latents (which are smooth and high-dimensional)
 
 ### Output artifacts
 ```text
 runs/stage3/<output_dir>/
 ├── encoded/
 │   ├── latents.pt              # (N, 4, H/8, W/8) VAE latents
-│   ├── text_embeds.pt          # (N, seq_len, 2048) concatenated CLIP embeddings
+│   ├── text_embeds.pt          # (N, 77, 2048) concatenated CLIP embeddings
 │   ├── pooled_embeds.pt        # (N, 1280) pooled text embeddings
+│   ├── dino_embeds.pt          # (N, 768) DINOv2 CLS features
 │   └── encode_index.json       # per-sample metadata
-├── modes/
+├── modes_<method>/             # e.g. modes_dino_kmeans, modes_dino_hdbscan
 │   ├── visual_modes.pt         # (total_modes, 4, H/8, W/8) centroid latents
-│   ├── semantic_modes.pt       # (total_modes, seq_len, 2048) mean text embeddings
+│   ├── semantic_modes.pt       # (total_modes, 77, 2048) mean text embeddings
 │   ├── pooled_modes.pt         # (total_modes, 1280) mean pooled embeddings
-│   ├── modes_index.json        # per-mode metadata (class, archetype, captions, sizes)
+│   ├── modes_index.json        # per-mode metadata (class, archetype, captions, cluster sizes)
 │   └── stage3_summary.json     # clustering summary
 ```
 
 ### Key design decisions
-- **Clustering space**: VAE latents (not CLIP image embeddings) — preserves pixel-level visual diversity and connects directly to Stage 4 generation
-- **Visual mode**: cluster centroid in latent space; medoid recorded as fallback
-- **Semantic mode**: mean of text embeddings within cluster; representative caption from semantic medoid
-- **IPC as K**: number of clusters per class equals the desired images per class in the distilled dataset
+- **Clustering space vs mode extraction space**: clustering can use DINOv2 or VAE features, but mode extraction always uses VAE latents (visual) and text embeddings (semantic) for Stage 4 compatibility
+- **DINOv2 for clustering**: 768-dim CLS features have natural cluster structure; VAE latents (16384-dim) are smooth and cause HDBSCAN to fail (6-8/10 classes fall back to K-Means in VAE space vs 1/10 in DINOv2 space)
+- **Visual mode**: cluster centroid in VAE latent space; medoid record_id recorded for reference
+- **Semantic mode**: mean of text embeddings within cluster; **representative caption** from semantic medoid is the primary output used by Stage 4
+- **IPC as K**: for K-Means, number of clusters per class = IPC. For HDBSCAN, IPC is the target budget allocated proportionally across discovered modes
 - Uses the same SDXL VAE + text encoders as Stage 2 for space consistency
 
-### Stage 4 connection (future)
-Visual modes + semantic modes will serve as dual anchors for Stage 4:
-- visual mode latent → img2img initialization
-- semantic mode embedding → text conditioning
-- Stage 2 LoRA weights → generation backbone
+### Experiment observations (ImageNette, IPC=10)
+- **VAE K-Means**: baseline, uniform cluster sizes
+- **DINO K-Means**: more uneven cluster sizes (max/min ratio 2.4x-9.0x), reflecting real density variation
+- **DINO HDBSCAN** (min_cluster_size=15, min_samples=3, pca_dim=50): 9/10 classes discovered modes independently, only chain saw fell back to K-Means. gas pump had a 2-member micro-cluster (noise artifact from low min_cluster_size/min_samples)
 
 ---
 
-## 15. Stage 4 — Dual-anchor conditioned distilled dataset generation
+## 15. Stage 4 — Text-to-image distilled dataset generation
 
 ### Implementation status
-**Implemented in repo.**
+**Implemented in repo. Running experiments on ImageNette.**
 
 ### Core purpose
-Generate the final distilled dataset by combining visual mode latents (from Stage 3) as initialization anchors with semantic mode embeddings (from Stage 3) as text conditioning, through the Stage 2 LoRA-finetuned SDXL backbone.
+Generate the final distilled dataset using text-to-image generation. Stage 3 visual clustering selects WHICH captions to generate (one representative caption per mode). The Stage 2 LoRA-finetuned SDXL backbone generates the images.
 
-### Generation flow per mode
+### Generation flow per mode (recommended: visual_mode="none")
 ```
-visual_mode latent (4, 64, 64)
-  → add noise at controlled strength
-  + semantic_mode embedding as text conditioning
-  → SDXL UNet (+ Stage 2 LoRA) denoising loop with CFG
-  → VAE decode → distilled image (PNG)
+Stage 3 mode → representative_caption (text string)
+  → SDXL text2img pipeline (+ Stage 2 LoRA)
+  → optional SDXL refiner pass
+  → distilled image (PNG)
 ```
 
 ### Main code
 - `src/cspd_stage4/__init__.py`
-- `src/cspd_stage4/generate.py` — dual-anchor generation with latent-space img2img
+- `src/cspd_stage4/generate.py` — text2img generation with optional refiner and legacy img2img paths
 - `src/cspd_stage4/cli.py` — CLI with `generate` subcommand
 - `scripts/server/stage4/run_stage4_pipeline.sh` — server pipeline script
 
 ### CLI usage
 ```bash
+# Recommended: text2img with LoRA (visual clustering selects captions)
 cspd-stage4 generate \
-  --modes-dir runs/stage3/.../modes \
-  --lora-weights runs/stage2/.../checkpoint-8050/pytorch_lora_weights.safetensors \
+  --modes-dir runs/stage3/.../modes_dino_kmeans \
+  --lora-weights runs/stage2/.../checkpoint-12090/pytorch_lora_weights.safetensors \
+  --output-dir runs/stage4/imagenette/ipc10
+
+# With SDXL refiner for added detail/sharpness
+cspd-stage4 generate \
+  --modes-dir runs/stage3/.../modes_dino_kmeans \
+  --lora-weights runs/stage2/.../pytorch_lora_weights.safetensors \
   --output-dir runs/stage4/imagenette/ipc10 \
-  --strength 0.5
+  --refiner-model stabilityai/stable-diffusion-xl-refiner-1.0
+
+# Without LoRA (baseline SDXL)
+cspd-stage4 generate \
+  --modes-dir runs/stage3/.../modes_dino_kmeans \
+  --output-dir runs/stage4/imagenette/ipc10/baseline
 ```
 
-### Key parameter: strength
-- `strength=0` → pure visual mode decode (no generation, just centroid → image)
-- `strength=0.3~0.7` → visual mode provides layout/structure, UNet refines with semantic conditioning
-- `strength=1.0` → pure text-to-image (visual mode ignored)
+### Key parameters
+- **--resolution**: Output image resolution. Default `1024` (SDXL native). Training at 512 but generating at 1024 may cause quality issues.
+- **--guidance-scale**: CFG strength. Default `9.0`. Higher = sharper but less diverse, may cause artifacts.
+- **--num-inference-steps**: Diffusion sampling steps. Default `50`.
+- **--refiner-model**: Optional SDXL refiner model ID. When set, runs two-stage pipeline (base + refiner).
+- **--refiner-strength**: Denoising strength for refiner pass (0-1). Default `0.3`. Lower = more detail, less change.
+
+### Generation modes
+- **visual_mode** (hidden, default `"none"`):
+  - `"none"` — pure text-to-image using representative caption as prompt **(recommended)**
+  - `"centroid"` — img2img from decoded VAE centroid latent (legacy, may be blurry)
+  - `"medoid"` — img2img from real medoid image (legacy, sharper init)
+- **semantic_mode** (hidden, default `"caption"`):
+  - `"caption"` — use representative caption text as prompt **(recommended)**
+  - `"embedding"` — use mean text embedding from Stage 3 (legacy baseline, produces blurry results because averaged embedding doesn't correspond to any real caption)
+- **strength** (hidden, default `0.5`): img2img noise strength, only used when visual_mode != "none"
+
+Legacy img2img options are preserved via `argparse.SUPPRESS` for ablation experiments.
 
 ### Output artifacts
 ```text
-runs/stage4/<dataset>/<ipc>/s<strength>_<lora_tag>/<timestamp>/
+runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 ├── images/
 │   ├── <class_raw>/
 │   │   ├── <class_raw>_mode000.png
@@ -984,10 +1061,14 @@ runs/stage4/<dataset>/<ipc>/s<strength>_<lora_tag>/<timestamp>/
 ```
 
 ### Design decisions
-- **Latent-space img2img**: visual mode latent is injected directly into the diffusion latent space (no decode→re-encode roundtrip)
-- **CFG with zero unconditional**: negative prompt embeddings are zeros
+- **Text2img over img2img**: img2img from averaged latent centroids produced blurry images; mean text embeddings didn't correspond to real captions. Text2img with representative caption as prompt produces much better results. Visual clustering's role is now caption selection, not image initialization.
 - **Per-mode seeding**: `seed + mode_index` for reproducibility with diversity
 - **ImageFolder output structure**: images organized by class for downstream classifier training
+- **SDXL refiner**: optional two-stage pipeline where base model generates and refiner adds detail/sharpness
+
+### Known quality issues (as of 2026-04-14)
+- **Resolution mismatch**: Stage 2 LoRA trains at 512 but Stage 4 defaults to 1024. This may cause artifacts because the LoRA learned 512-resolution feature distributions.
+- **Human body generation**: captions containing "being held" (e.g., tench fishing photos) force SDXL to generate humans, which often produces anatomical artifacts (extra heads, distorted limbs). This is an inherent SDXL limitation.
 
 ---
 
@@ -996,8 +1077,8 @@ runs/stage4/<dataset>/<ipc>/s<strength>_<lora_tag>/<timestamp>/
 ### 16.1 All optimization must be archetype-level, never class-level
 This is a hard methodological boundary. Do not write normalization rules, render drop rules, or prompt guidance that references specific class names or class-level statistics. The only place class identity is used is in Prep (class-to-archetype mapping). Everything downstream operates on archetype + slot name only.
 
-### 16.2 All four stages are now implemented
-The repo covers Prep, Stage 1 (1A+1B+1C), Stage 2 (SDXL LoRA + inference), Stage 3 (encoding + clustering + mode extraction), Stage 4 (dual-anchor distilled generation). Quality evaluation tooling is not yet automated.
+### 16.2 All four stages + evaluation are implemented
+The repo covers Prep, Stage 1 (1A+1B+1C), Stage 2 (SDXL LoRA + inference), Stage 3 (encoding + clustering + mode extraction), Stage 4 (text2img distilled generation), and Evaluation (classifier training + accuracy measurement). FID evaluation is not yet automated.
 
 ### 16.3 Stage 1A prompt now uses per-slot guidance
 The prompt template no longer uses generic `"short phrase"` placeholders. Each slot has specific guidance with examples and anti-patterns defined in `SLOT_GUIDANCE` dict in `prompting.py`. This was added on 2026-04-12.
@@ -1018,33 +1099,33 @@ From checkpoint comparison on ImageNette. The checkpoint at step 12090 (epoch 15
 
 ## 17. Immediate next implementation work
 
-Given current repo state (as of 2026-04-12):
+Given current repo state (as of 2026-04-14):
 
-1. **Re-run Stage 1 on ImageNet-1k 5-shot with improved pipeline** (in progress)
-   - prompt now has per-slot guidance (2026-04-12)
-   - normalization rules relaxed (2026-04-11)
-   - VLM review extended with unknown recovery (2026-04-11)
-   - 20 archetype mappings fixed (2026-04-12)
-   - need to re-run Stage 1A/1B/1C and evaluate caption quality on full 1000-class diversity
+1. **Resolve Stage 2 ↔ Stage 4 resolution mismatch**
+   - Stage 2 LoRA trains at 512, Stage 4 generates at 1024
+   - Options: retrain Stage 2 at 1024 (expensive), or generate at 512 and improve quality via other means
+   - 1024 generation produces sharper images but LoRA features are 512-calibrated
 
-2. **Re-run Stage 2 SDXL LoRA training on ImageNette with improved captions**
-   - Stage 1 render quality has improved significantly since the first Stage 2 training
-   - re-train with the new captions using the established best config (rank=64, epoch=15, batch=8)
-   - compare A/B sampling quality to see if improved captions translate to better generation
+2. **Tune HDBSCAN parameters for better mode discovery**
+   - Current min_samples=3 is too low (creates micro-clusters like 2-member gas pump mode)
+   - Need to experiment with min_samples and min_cluster_size on DINOv2 space
+   - Both parameters now exposed as CLI args
 
-3. **Run Stage 3 on ImageNette**
-   - Stage 3 code is implemented; needs first real run on server
-   - use the new improved Stage 1C render records as input
-   - start with IPC=10 (10 modes per class, 100 total for 10 classes)
+3. **Improve generation quality**
+   - Test SDXL refiner (implemented, not yet evaluated)
+   - Tune guidance_scale (currently 9.0, may cause artifacts on human subjects)
+   - Consider LoRA rank increase (currently 64, could try 128)
+   - Address human body artifacts in captions with "being held" etc.
 
-4. **Implement Stage 4: dual-anchor conditioned generation**
-   - use visual mode latents as img2img initialization
-   - use semantic mode embeddings as text conditioning
-   - load Stage 2 LoRA weights as the generation backbone
+4. **ImageNet-1k full pipeline**
+   - Stage 1 full run on ImageNet-1k is in progress on server
+   - Once complete: Stage 2 → Stage 3 → Stage 4 → Eval on full 1000 classes
+   - This is the target evaluation for the method
 
-5. **Validate full pipeline on ImageNet-1k**
-   - once Stage 1→2→3→4 works on ImageNette, run full pipeline on ImageNet-1k
-   - evaluate distilled dataset quality (FID, classification accuracy)
+5. **Evaluation benchmarking**
+   - Compare DINO K-Means vs DINO HDBSCAN distilled datasets via classifier accuracy
+   - Compare against baselines (random selection, SRe2L, etc.)
+   - Eval code is implemented (ConvNet-6, ResNet-18, ResNetAP-10)
 
 ---
 
@@ -1064,6 +1145,20 @@ Given current repo state (as of 2026-04-12):
 - rank=64, epoch=5: better quality, less overfitting, 1h55m
 - rank=64, epoch=5/10/15/20 comparison: **epoch=15 is best** — cleanest results, no overfitting
 - All runs on ImageNette (12,894 pairs), 2 GPUs, resolution=512, lr=2e-5
+
+### Stage 3 clustering arc (2026-04-14)
+- **VAE K-Means** (baseline): uniform cluster sizes, works but doesn't discover real modes
+- **VAE HDBSCAN**: 6-8/10 classes fell back to K-Means — VAE latent space too smooth for density-based clustering
+- **DINOv2 added**: 768-dim CLS features with natural cluster structure
+- **DINO K-Means**: uneven cluster sizes reflecting real density variation (max/min ratio 2.4x-9.0x)
+- **DINO HDBSCAN** (min_cluster_size=15, min_samples=3, pca_dim=50): 9/10 classes discovered modes independently (only chain saw fell back). But gas pump had a 2-member micro-cluster — min_samples=3 too low.
+
+### Stage 4 generation arc (2026-04-13 → 2026-04-14)
+- **img2img + mean embedding**: all-black images (custom denoising loop incompatible with SDXL scheduler)
+- **img2img + official pipeline + mean embedding**: blurry/gray (averaged embedding doesn't correspond to real caption)
+- **img2img + representative caption**: better quality, but Stage 2 vs Stage 4 output mismatch (different generator device, call signature)
+- **text2img + representative caption** (current recommended): matches Stage 2 inference quality exactly
+- **text2img at 1024 + guidance 9.0**: sharper, but human anatomy artifacts on "being held" captions; resolution mismatch with 512-trained LoRA
 
 ### Server environment
 - Path: `/media/4T_HDD/cai/cspd-dd/cspd-dd`
