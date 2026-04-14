@@ -15,7 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     # --- generate ---
     gen_parser = subparsers.add_parser(
         "generate",
-        help="Generate distilled dataset from Stage 3 modes using Stage 2 LoRA backbone (text-to-image)",
+        help="Generate distilled dataset from Stage 3 modes using Stage 2 LoRA backbone",
     )
     gen_parser.add_argument("--modes-dir", required=True, help="Directory with Stage 3 mode outputs (modes_index.json)")
     gen_parser.add_argument("--output-dir", required=True, help="Directory for distilled dataset output")
@@ -29,10 +29,12 @@ def build_parser() -> argparse.ArgumentParser:
     gen_parser.add_argument("--resolution", type=int, default=1024, help="Output image resolution")
     gen_parser.add_argument("--refiner-model", default=None, help="SDXL refiner model ID (e.g. stabilityai/stable-diffusion-xl-refiner-1.0). Adds detail/sharpness.")
     gen_parser.add_argument("--refiner-strength", type=float, default=0.3, help="Refiner denoising strength (0-1). Lower=more detail, less change.")
-    # Legacy options preserved for ablation experiments
-    gen_parser.add_argument("--visual-mode", default="none", choices=["none", "centroid", "medoid"], help=argparse.SUPPRESS)
+    gen_parser.add_argument("--visual-mode", default="medoid", choices=["none", "centroid", "medoid"],
+                            help="Visual anchor: 'medoid' uses real medoid image as img2img init (recommended), "
+                                 "'centroid' uses decoded VAE centroid, 'none' for pure text2img")
+    gen_parser.add_argument("--strength", type=float, default=0.8,
+                            help="Img2img denoising strength (0-1). Higher=more regeneration. Ignored when visual-mode=none.")
     gen_parser.add_argument("--semantic-mode", default="caption", choices=["caption", "embedding"], help=argparse.SUPPRESS)
-    gen_parser.add_argument("--strength", type=float, default=0.5, help=argparse.SUPPRESS)
 
     return parser
 

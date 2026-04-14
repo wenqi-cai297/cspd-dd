@@ -21,6 +21,8 @@ set -euo pipefail
 #   STAGE4_STEPS=50
 #   STAGE4_GUIDANCE=9.0
 #   STAGE4_SEED=42
+#   STAGE4_STRENGTH=0.8  (img2img denoising strength)
+#   STAGE4_VISUAL_MODE=medoid  (medoid|centroid|none)
 #   STAGE4_REFINER=stabilityai/stable-diffusion-xl-refiner-1.0  (optional)
 #   STAGE4_REFINER_STRENGTH=0.3  (optional)
 
@@ -35,6 +37,8 @@ ENV_NAME="${CSPD_ENV_NAME:-cspd-dd}"
 STEPS="${STAGE4_STEPS:-50}"
 GUIDANCE="${STAGE4_GUIDANCE:-9.0}"
 SEED="${STAGE4_SEED:-42}"
+STRENGTH="${STAGE4_STRENGTH:-0.8}"
+VISUAL_MODE="${STAGE4_VISUAL_MODE:-medoid}"
 REFINER="${STAGE4_REFINER:-}"
 REFINER_STRENGTH="${STAGE4_REFINER_STRENGTH:-0.3}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,6 +76,8 @@ echo "  output_dir:    $OUTPUT_DIR"
 echo "  steps:         $STEPS"
 echo "  guidance:      $GUIDANCE"
 echo "  seed:          $SEED"
+echo "  visual_mode:   $VISUAL_MODE"
+echo "  strength:      $STRENGTH"
 echo "  refiner:       ${REFINER:-none}"
 echo "============================================================"
 
@@ -82,6 +88,8 @@ CMD=(
   --num-inference-steps "$STEPS"
   --guidance-scale "$GUIDANCE"
   --seed "$SEED"
+  --visual-mode "$VISUAL_MODE"
+  --strength "$STRENGTH"
 )
 
 if [[ "$LORA_WEIGHTS" != "none" ]]; then

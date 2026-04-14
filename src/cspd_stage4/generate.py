@@ -158,7 +158,7 @@ def generate_distilled_dataset(
     output_dir: str | Path,
     lora_weights: str | None = None,
     model_name: str = "stabilityai/stable-diffusion-xl-base-1.0",
-    strength: float = 0.5,
+    strength: float = 0.8,
     num_inference_steps: int = 50,
     guidance_scale: float = 9.0,
     seed: int = 42,
@@ -166,7 +166,7 @@ def generate_distilled_dataset(
     dtype: str = "float16",
     resolution: int = 1024,
     semantic_mode: str = "caption",
-    visual_mode: str = "centroid",
+    visual_mode: str = "medoid",
     refiner_model: str | None = None,
     refiner_strength: float = 0.3,
 ) -> GenerateResult:
@@ -339,7 +339,7 @@ def generate_distilled_dataset(
             init_image = Image.fromarray(decoded_np).resize((resolution, resolution), Image.LANCZOS)
 
         # Generate via img2img pipeline
-        generator = torch.Generator(device="cpu").manual_seed(seed + mode_idx)
+        generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
 
         if semantic_mode == "embedding":
             # Baseline: use mean text embedding from Stage 3 clustering.
@@ -378,6 +378,17 @@ def generate_distilled_dataset(
             )
 
         image = output.images[0]
+
+        # Optional refiner pass
+        if refiner is not None:
+            prompt = representative_caption if representative_caption else class_name
+            refiner_gen = torch.Generator(device=device).manual_seed(seed + mode_idx)
+            image = refiner(
+                prompt=prompt,
+                image=image,
+                strength=refiner_strength,
+                generator=refiner_gen,
+            ).images[0]
 
         # Save image: organize by class
         class_dir = images_dir / class_name_raw

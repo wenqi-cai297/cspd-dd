@@ -245,12 +245,12 @@ For implementation tracking in this repo, use the following stage view:
 - outputs: visual mode centroids/medoids, semantic mode mean embeddings, representative captions
 
 ### Stage 4
-- text-to-image distilled dataset generation
-- visual clustering selects WHICH captions to generate (one per mode)
-- representative caption from each mode used as text prompt
-- Stage 2 LoRA weights as generation backbone
+- img2img distilled dataset generation from real medoid images
+- visual clustering selects WHICH real images (medoids) to use as img2img init
+- representative caption from each mode used as text conditioning
+- Stage 2 LoRA weights as generation backbone, strength=0.8
 - optional SDXL refiner for detail/sharpness
-- legacy img2img path preserved for ablation (visual_mode=centroid/medoid)
+- text2img path preserved for ablation (visual_mode=none)
 
 ### Important naming caveat
 Historically, render was treated as a Stage 2 compatibility surface.
@@ -985,18 +985,18 @@ runs/stage3/<output_dir>/
 
 ---
 
-## 15. Stage 4 — Text-to-image distilled dataset generation
+## 15. Stage 4 — Img2img distilled dataset generation
 
 ### Implementation status
 **Implemented in repo. Running experiments on ImageNette.**
 
 ### Core purpose
-Generate the final distilled dataset using text-to-image generation. Stage 3 visual clustering selects WHICH captions to generate (one representative caption per mode). The Stage 2 LoRA-finetuned SDXL backbone generates the images.
+Generate the final distilled dataset using img2img generation from real medoid images. Stage 3 visual clustering selects the most representative real image (medoid) per mode as the img2img starting point, with the representative caption as text conditioning. This preserves the diversity of real images while applying the Stage 2 LoRA-tuned generation quality.
 
-### Generation flow per mode (recommended: visual_mode="none")
+### Generation flow per mode (recommended: visual_mode="medoid")
 ```
-Stage 3 mode → representative_caption (text string)
-  → SDXL text2img pipeline (+ Stage 2 LoRA)
+Stage 3 mode → visual medoid (real image) + representative_caption (text string)
+  → SDXL img2img pipeline (+ Stage 2 LoRA), strength=0.8
   → optional SDXL refiner pass
   → distilled image (PNG)
 ```
@@ -1029,23 +1029,14 @@ cspd-stage4 generate \
 ```
 
 ### Key parameters
-- **--resolution**: Output image resolution. Default `1024` (SDXL native). Training at 512 but generating at 1024 may cause quality issues.
-- **--guidance-scale**: CFG strength. Default `9.0`. Higher = sharper but less diverse, may cause artifacts.
+- **--visual-mode**: `"medoid"` (recommended) uses real medoid image as img2img init. `"centroid"` uses decoded VAE centroid. `"none"` for pure text2img.
+- **--strength**: Img2img denoising strength. Default `0.8`. Higher = more regeneration from LoRA, lower = closer to original image. Ignored when visual-mode=none.
+- **--resolution**: Output image resolution. Default `1024` (SDXL native).
+- **--guidance-scale**: CFG strength. Default `9.0`. Higher = sharper but less diverse.
 - **--num-inference-steps**: Diffusion sampling steps. Default `50`.
-- **--refiner-model**: Optional SDXL refiner model ID. When set, runs two-stage pipeline (base + refiner).
-- **--refiner-strength**: Denoising strength for refiner pass (0-1). Default `0.3`. Lower = more detail, less change.
-
-### Generation modes
-- **visual_mode** (hidden, default `"none"`):
-  - `"none"` — pure text-to-image using representative caption as prompt **(recommended)**
-  - `"centroid"` — img2img from decoded VAE centroid latent (legacy, may be blurry)
-  - `"medoid"` — img2img from real medoid image (legacy, sharper init)
-- **semantic_mode** (hidden, default `"caption"`):
-  - `"caption"` — use representative caption text as prompt **(recommended)**
-  - `"embedding"` — use mean text embedding from Stage 3 (legacy baseline, produces blurry results because averaged embedding doesn't correspond to any real caption)
-- **strength** (hidden, default `0.5`): img2img noise strength, only used when visual_mode != "none"
-
-Legacy img2img options are preserved via `argparse.SUPPRESS` for ablation experiments.
+- **--refiner-model**: Optional SDXL refiner model ID. When set, runs refiner pass after base generation for added detail/sharpness.
+- **--refiner-strength**: Denoising strength for refiner pass (0-1). Default `0.3`.
+- **--semantic-mode** (hidden, default `"caption"`): `"caption"` uses representative caption text as prompt. `"embedding"` uses mean text embedding (legacy baseline, blurry).
 
 ### Output artifacts
 ```text
@@ -1061,14 +1052,18 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 ```
 
 ### Design decisions
-- **Text2img over img2img**: img2img from averaged latent centroids produced blurry images; mean text embeddings didn't correspond to real captions. Text2img with representative caption as prompt produces much better results. Visual clustering's role is now caption selection, not image initialization.
+- **Img2img from medoid over pure text2img**: pure text2img produced homogeneous images because captions within a class are too similar. Img2img from real medoid images preserves the visual diversity of the original dataset while applying LoRA-tuned generation quality. Visual clustering selects WHICH real images to use as anchors and which captions to pair them with.
+- **High strength (0.8)**: allows significant regeneration so the LoRA backbone influences the output, while the real image provides composition and diversity.
 - **Per-mode seeding**: `seed + mode_index` for reproducibility with diversity
 - **ImageFolder output structure**: images organized by class for downstream classifier training
-- **SDXL refiner**: optional two-stage pipeline where base model generates and refiner adds detail/sharpness
+- **SDXL refiner**: optional second pass that adds detail/sharpness after base generation
 
-### Known quality issues (as of 2026-04-14)
-- **Resolution mismatch**: Stage 2 LoRA trains at 512 but Stage 4 defaults to 1024. This may cause artifacts because the LoRA learned 512-resolution feature distributions.
-- **Human body generation**: captions containing "being held" (e.g., tench fishing photos) force SDXL to generate humans, which often produces anatomical artifacts (extra heads, distorted limbs). This is an inherent SDXL limitation.
+### Evolution of generation strategy
+1. img2img + mean embedding → all-black (custom loop incompatible with SDXL)
+2. img2img + mean embedding + official pipeline → blurry (averaged embedding not real caption)
+3. img2img + representative caption → quality OK but Stage 2 vs 4 mismatch
+4. text2img + representative caption → matches Stage 2 inference but homogeneous output
+5. **img2img from medoid + representative caption + refiner** → current approach, preserves diversity
 
 ---
 
