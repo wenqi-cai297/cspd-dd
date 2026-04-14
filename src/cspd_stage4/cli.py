@@ -29,12 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
     gen_parser.add_argument("--resolution", type=int, default=512, help="Output image resolution")
     gen_parser.add_argument("--refiner-model", default=None, help="SDXL refiner model ID (e.g. stabilityai/stable-diffusion-xl-refiner-1.0). Adds detail/sharpness.")
     gen_parser.add_argument("--refiner-strength", type=float, default=0.3, help="Refiner denoising strength (0-1). Lower=more detail, less change.")
-    gen_parser.add_argument("--visual-mode", default="medoid", choices=["none", "centroid", "medoid"],
-                            help="Visual anchor: 'medoid' uses real medoid image as img2img init (recommended), "
-                                 "'centroid' uses decoded VAE centroid, 'none' for pure text2img")
+    gen_parser.add_argument("--visual-mode", default="none", choices=["none", "medoid"],
+                            help="'none' for text2img (recommended), 'medoid' for img2img from real medoid image")
     gen_parser.add_argument("--strength", type=float, default=0.8,
-                            help="Img2img denoising strength (0-1). Higher=more regeneration. Ignored when visual-mode=none.")
-    gen_parser.add_argument("--semantic-mode", default="caption", choices=["caption", "embedding"], help=argparse.SUPPRESS)
+                            help="Img2img denoising strength (0-1). Ignored when visual-mode=none.")
 
     return parser
 
@@ -58,7 +56,6 @@ def main() -> None:
             device=args.device,
             dtype=args.dtype,
             resolution=args.resolution,
-            semantic_mode=args.semantic_mode,
             visual_mode=args.visual_mode,
             refiner_model=args.refiner_model,
             refiner_strength=args.refiner_strength,

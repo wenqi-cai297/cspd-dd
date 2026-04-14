@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import numpy as np
 from PIL import Image
 from tqdm.auto import tqdm
 
@@ -42,20 +41,19 @@ class GenerateResult:
 
 
 def _load_modes(modes_dir: str | Path) -> dict[str, Any]:
-    """Load Stage 3 mode tensors and metadata."""
-    modes_dir = Path(modes_dir)
+    """Load Stage 3 mode metadata (modes_index.json only).
 
-    visual_modes = torch.load(modes_dir / "visual_modes.pt", weights_only=True)
-    semantic_modes = torch.load(modes_dir / "semantic_modes.pt", weights_only=True)
-    pooled_modes = torch.load(modes_dir / "pooled_modes.pt", weights_only=True)
+    No tensor files are needed — Stage 4 text2img uses representative captions
+    as plain text strings from modes_index.json.
+    """
+    modes_dir = Path(modes_dir)
 
     with open(modes_dir / "modes_index.json", encoding="utf-8") as f:
         modes_index = json.load(f)
 
     modes_list = modes_index.get("modes", [])
 
-    # Try to load encode_index for medoid image paths
-    # modes_dir is typically .../modes or .../modes_hdbscan, encode_dir is sibling .../encoded
+    # Try to load encode_index for medoid image paths (used by img2img path)
     encode_dir = modes_dir.parent / "encoded"
     encode_samples = []
     encode_index_path = encode_dir / "encode_index.json"
@@ -65,9 +63,6 @@ def _load_modes(modes_dir: str | Path) -> dict[str, Any]:
         encode_samples = encode_index.get("samples", [])
 
     return {
-        "visual_modes": visual_modes,
-        "semantic_modes": semantic_modes,
-        "pooled_modes": pooled_modes,
         "modes_list": modes_list,
         "ipc": modes_index.get("ipc", 0),
         "num_classes": modes_index.get("num_classes", 0),
@@ -165,15 +160,14 @@ def generate_distilled_dataset(
     device: str = "cuda",
     dtype: str = "float16",
     resolution: int = 512,
-    semantic_mode: str = "caption",
-    visual_mode: str = "medoid",
+    visual_mode: str = "none",
     refiner_model: str | None = None,
     refiner_strength: float = 0.3,
 ) -> GenerateResult:
     """Generate the distilled dataset using dual-anchor conditioning.
 
     Args:
-        modes_dir: Directory with Stage 3 mode outputs (visual_modes.pt, semantic_modes.pt, etc.).
+        modes_dir: Directory with Stage 3 mode outputs (modes_index.json).
         output_dir: Directory for distilled dataset output.
         lora_weights: Path to Stage 2 LoRA weights (.safetensors). None for baseline.
         model_name: SDXL model identifier.
@@ -184,14 +178,9 @@ def generate_distilled_dataset(
         device: Torch device.
         dtype: Weight dtype.
         resolution: Output image resolution.
-        semantic_mode: "caption" uses the representative caption text as prompt (recommended).
-            "embedding" uses the mean text embedding from Stage 3 (baseline, may produce blurry results).
-        visual_mode: "centroid" uses the cluster centroid latent decoded to image.
-            "medoid" uses the real image closest to centroid (sharper init image).
-            "none" skips visual anchor entirely — pure text-to-image (recommended).
-            When "none", the generation uses StableDiffusionXLPipeline (text2img) instead of img2img.
-            Stage 3 visual clustering is still used to SELECT which captions to generate,
-            but the generation itself is driven purely by text conditioning.
+        visual_mode: "none" for pure text-to-image (recommended).
+            "medoid" for img2img from real medoid image.
+            Stage 3 DINOv2 clustering selects which captions to generate (one per mode).
         refiner_model: Optional SDXL refiner model identifier (e.g. "stabilityai/stable-diffusion-xl-refiner-1.0").
             When provided, runs a two-stage pipeline: base generates at high_noise_frac, refiner
             refines the result. Adds detail and sharpness.
@@ -209,16 +198,13 @@ def generate_distilled_dataset(
     # Load Stage 3 modes
     print("[Stage 4] Loading Stage 3 modes...")
     modes = _load_modes(modes_dir)
-    visual_modes = modes["visual_modes"]       # (M, 4, H, W)
-    semantic_modes = modes["semantic_modes"]     # (M, seq_len, dim)
-    pooled_modes = modes["pooled_modes"]         # (M, pooled_dim)
     modes_list = modes["modes_list"]
     total_modes = modes["total_modes"]
 
     encode_samples = modes["encode_samples"]
 
     print(f"[Stage 4] Loaded {total_modes} modes ({modes['num_classes']} classes × IPC {modes['ipc']})")
-    print(f"[Stage 4] Visual mode: {visual_mode}, Semantic mode: {semantic_mode}")
+    print(f"[Stage 4] Visual mode: {visual_mode}")
 
     # Load SDXL pipeline
     if lora_weights:
@@ -235,9 +221,6 @@ def generate_distilled_dataset(
     if refiner_model:
         print(f"[Stage 4] Loading SDXL refiner: {refiner_model}")
         refiner = _load_refiner_pipeline(refiner_model, device, dtype)
-
-    vae = pipe.vae
-    vae_scaling_factor = vae.config.scaling_factor
 
     # Generate one image per mode
     metadata_rows = []
@@ -300,88 +283,37 @@ def generate_distilled_dataset(
             })
             continue
 
-        # --- Img2img path (visual_mode="centroid" or "medoid") ---
-        use_centroid = visual_mode == "centroid"
+        # --- Img2img path (visual_mode="medoid") ---
+        # Load medoid real image as img2img init
+        medoid_record_id = mode_meta.get("medoid_record_id", mode_meta.get("visual_medoid_record_id", ""))
+        medoid_image_path = ""
+        for s in encode_samples:
+            if s.get("record_id") == medoid_record_id:
+                medoid_image_path = s.get("image_path", "")
+                break
+        if not medoid_image_path or not Path(medoid_image_path).exists():
+            print(f"  [WARN] Medoid image not found for mode {mode_idx}, skipping")
+            continue
 
-        if visual_mode == "medoid":
-            # Use the real image closest to the cluster centroid (sharp, no decode artifacts)
-            medoid_index = mode_meta.get("visual_medoid_index", mode_idx)
-            medoid_image_path = ""
-            if encode_samples and medoid_index < len(encode_samples):
-                medoid_image_path = encode_samples[medoid_index].get("image_path", "")
-            if not medoid_image_path or not Path(medoid_image_path).exists():
-                # Fallback: try to find image path from record_id
-                medoid_record_id = mode_meta.get("visual_medoid_record_id", "")
-                for s in encode_samples:
-                    if s.get("record_id") == medoid_record_id:
-                        medoid_image_path = s.get("image_path", "")
-                        break
-            if medoid_image_path and Path(medoid_image_path).exists():
-                init_image = Image.open(medoid_image_path).convert("RGB")
-                init_image = init_image.resize((resolution, resolution), Image.LANCZOS)
-            else:
-                print(f"  [WARN] Medoid image not found for mode {mode_idx}, falling back to centroid")
-                use_centroid = True
+        init_image = Image.open(medoid_image_path).convert("RGB")
+        init_image = init_image.resize((resolution, resolution), Image.LANCZOS)
 
-        if use_centroid:
-            # Decode cluster centroid latent to PIL image (may be blurry due to averaging)
-            visual_latent = visual_modes[mode_idx].unsqueeze(0).to(device, dtype=torch.float32)
-            latent_for_decode = visual_latent / vae_scaling_factor
-
-            vae_orig_dtype = vae.dtype
-            vae.to(dtype=torch.float32)
-            decoded = vae.decode(latent_for_decode, return_dict=False)[0]
-            vae.to(dtype=vae_orig_dtype)
-
-            decoded = (decoded / 2 + 0.5).clamp(0, 1)
-            decoded_np = decoded.squeeze(0).permute(1, 2, 0).cpu().float().numpy()
-            decoded_np = (decoded_np * 255).round().astype(np.uint8)
-            init_image = Image.fromarray(decoded_np).resize((resolution, resolution), Image.LANCZOS)
-
-        # Generate via img2img pipeline
+        prompt = representative_caption if representative_caption else class_name
         generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
-
-        if semantic_mode == "embedding":
-            # Baseline: use mean text embedding from Stage 3 clustering.
-            # May produce blurry results because the averaged embedding
-            # doesn't correspond to any real caption the model has seen.
-            prompt_embeds = semantic_modes[mode_idx].unsqueeze(0).to(device, dtype=torch_dtype)
-            pooled_prompt_embeds = pooled_modes[mode_idx].unsqueeze(0).to(device, dtype=torch_dtype)
-            negative_prompt_embeds = torch.zeros_like(prompt_embeds)
-            negative_pooled_prompt_embeds = torch.zeros_like(pooled_prompt_embeds)
-            output = pipe(
-                image=init_image,
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                negative_prompt_embeds=negative_prompt_embeds,
-                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-                strength=strength,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                output_type="pil",
-            )
-        else:
-            # Recommended: use the representative caption (medoid caption) as
-            # text prompt. This produces a real, coherent text embedding that
-            # the Stage 2 LoRA model has seen during training.
-            prompt = representative_caption if representative_caption else class_name
-            output = pipe(
-                image=init_image,
-                prompt=prompt,
-                negative_prompt="",
-                strength=strength,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                output_type="pil",
-            )
-
+        output = pipe(
+            image=init_image,
+            prompt=prompt,
+            negative_prompt="",
+            strength=strength,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+            output_type="pil",
+        )
         image = output.images[0]
 
         # Optional refiner pass
         if refiner is not None:
-            prompt = representative_caption if representative_caption else class_name
             refiner_gen = torch.Generator(device=device).manual_seed(seed + mode_idx)
             image = refiner(
                 prompt=prompt,
