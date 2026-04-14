@@ -306,10 +306,14 @@ def cluster_class_hdbscan(
     n_samples = len(class_indices)
     flat_latents = np.stack([_flatten_latent(class_latents[i]) for i in range(n_samples)])
 
-    # Step 1: PCA dimensionality reduction
-    pca_components = min(pca_dim, n_samples, flat_latents.shape[1])
-    pca = PCA(n_components=pca_components, random_state=seed)
-    flat_reduced = pca.fit_transform(flat_latents)
+    # Step 1: Optional PCA dimensionality reduction
+    # pca_dim=0 skips PCA and runs HDBSCAN on raw latents
+    if pca_dim > 0:
+        pca_components = min(pca_dim, n_samples, flat_latents.shape[1])
+        pca = PCA(n_components=pca_components, random_state=seed)
+        flat_reduced = pca.fit_transform(flat_latents)
+    else:
+        flat_reduced = flat_latents
 
     # Step 2: HDBSCAN mode discovery
     min_cs = min(min_cluster_size, max(n_samples // ipc, 5))
