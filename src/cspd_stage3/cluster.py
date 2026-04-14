@@ -284,6 +284,7 @@ def cluster_class_hdbscan(
     ipc: int,
     seed: int = 42,
     min_cluster_size: int = 15,
+    min_samples: int = 3,
     pca_dim: int = 50,
     dino_embeds: torch.Tensor | None = None,
     cluster_space: str = "vae",
@@ -324,7 +325,7 @@ def cluster_class_hdbscan(
 
     # Step 2: HDBSCAN mode discovery
     min_cs = min(min_cluster_size, max(n_samples // ipc, 5))
-    clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cs, min_samples=3)
+    clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cs, min_samples=min_samples)
     hdb_labels = clusterer.fit_predict(flat_reduced)
 
     discovered_modes = sorted(set(int(l) for l in hdb_labels if l >= 0))
@@ -449,6 +450,7 @@ def cluster_class(
     seed: int = 42,
     method: str = "kmeans",
     min_cluster_size: int = 15,
+    min_samples: int = 3,
     pca_dim: int = 50,
     dino_embeds: torch.Tensor | None = None,
     cluster_space: str = "vae",
@@ -464,7 +466,7 @@ def cluster_class(
         return cluster_class_hdbscan(
             class_indices=class_indices, latents=latents, text_embeds=text_embeds,
             pooled_embeds=pooled_embeds, samples=samples, ipc=ipc, seed=seed,
-            min_cluster_size=min_cluster_size, pca_dim=pca_dim,
+            min_cluster_size=min_cluster_size, min_samples=min_samples, pca_dim=pca_dim,
             dino_embeds=dino_embeds, cluster_space=cluster_space,
         )
     else:
@@ -483,6 +485,7 @@ def run_stage3_clustering(
     seed: int = 42,
     method: str = "kmeans",
     min_cluster_size: int = 15,
+    min_samples: int = 3,
     pca_dim: int = 50,
     cluster_space: str = "vae",
 ) -> Stage3Result:
@@ -495,6 +498,7 @@ def run_stage3_clustering(
         seed: Random seed.
         method: "kmeans" (baseline) or "hdbscan" (mode discovery).
         min_cluster_size: HDBSCAN min_cluster_size parameter.
+        min_samples: HDBSCAN min_samples parameter (core point neighborhood density).
         pca_dim: PCA dimensions for HDBSCAN pre-processing (0 to skip PCA).
         cluster_space: "vae" uses flattened VAE latents for clustering (baseline).
             "dino" uses DINOv2 CLS features (768-dim, better mode separation).
@@ -560,6 +564,7 @@ def run_stage3_clustering(
             seed=seed,
             method=method,
             min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
             pca_dim=pca_dim,
             dino_embeds=dino_embeds,
             cluster_space=cluster_space,
