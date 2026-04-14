@@ -8,7 +8,7 @@ set -euo pipefail
 #   bash scripts/server/run_ipc_sweep.sh
 
 DATASET_ROOT="/media/4T_HDD/cai/datasets/ImageNette/train"
-RENDER_INPUT="runs/stage1/render/ImageNette_train/qwen_local/2026-04-11_004958/records.jsonl"
+RENDER_INPUT="runs/stage1/render/ImageNette_train/qwen_local/2026-04-13_111606/records.jsonl"
 ENCODE_DIR="runs/stage3/ImageNette_train/encoded"
 LORA="runs/stage2/train/ImageNette_train/stabilityai_stable-diffusion-xl-base-1.0/2026-04-14_181645/official_output/checkpoint-7254/pytorch_lora_weights.safetensors"
 VAL_DIR="/media/4T_HDD/cai/datasets/ImageNette/val"
