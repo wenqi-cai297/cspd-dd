@@ -19,8 +19,10 @@ set -euo pipefail
 # Environment:
 #   CSPD_ENV_NAME=cspd-dd
 #   STAGE4_STEPS=50
-#   STAGE4_GUIDANCE=7.5
+#   STAGE4_GUIDANCE=9.0
 #   STAGE4_SEED=42
+#   STAGE4_REFINER=stabilityai/stable-diffusion-xl-refiner-1.0  (optional)
+#   STAGE4_REFINER_STRENGTH=0.3  (optional)
 
 if [[ $# -lt 2 ]]; then
   echo "Usage: bash scripts/server/stage4/run_stage4_pipeline.sh <stage3_modes_dir> <stage2_lora_weights|none>"
@@ -31,8 +33,10 @@ MODES_DIR="$1"
 LORA_WEIGHTS="$2"
 ENV_NAME="${CSPD_ENV_NAME:-cspd-dd}"
 STEPS="${STAGE4_STEPS:-50}"
-GUIDANCE="${STAGE4_GUIDANCE:-7.5}"
+GUIDANCE="${STAGE4_GUIDANCE:-9.0}"
 SEED="${STAGE4_SEED:-42}"
+REFINER="${STAGE4_REFINER:-}"
+REFINER_STRENGTH="${STAGE4_REFINER_STRENGTH:-0.3}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
@@ -68,6 +72,7 @@ echo "  output_dir:    $OUTPUT_DIR"
 echo "  steps:         $STEPS"
 echo "  guidance:      $GUIDANCE"
 echo "  seed:          $SEED"
+echo "  refiner:       ${REFINER:-none}"
 echo "============================================================"
 
 CMD=(
@@ -81,6 +86,10 @@ CMD=(
 
 if [[ "$LORA_WEIGHTS" != "none" ]]; then
   CMD+=(--lora-weights "$LORA_WEIGHTS")
+fi
+
+if [[ -n "$REFINER" ]]; then
+  CMD+=(--refiner-model "$REFINER" --refiner-strength "$REFINER_STRENGTH")
 fi
 
 "${CMD[@]}"

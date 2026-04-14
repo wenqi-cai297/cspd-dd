@@ -22,11 +22,13 @@ def build_parser() -> argparse.ArgumentParser:
     gen_parser.add_argument("--lora-weights", default=None, help="Path to Stage 2 LoRA weights (.safetensors). Omit for baseline SDXL.")
     gen_parser.add_argument("--model-name", default="stabilityai/stable-diffusion-xl-base-1.0", help="SDXL model identifier")
     gen_parser.add_argument("--num-inference-steps", type=int, default=50, help="Diffusion sampling steps")
-    gen_parser.add_argument("--guidance-scale", type=float, default=7.5, help="Classifier-free guidance scale")
+    gen_parser.add_argument("--guidance-scale", type=float, default=9.0, help="Classifier-free guidance scale")
     gen_parser.add_argument("--seed", type=int, default=42, help="RNG seed")
     gen_parser.add_argument("--device", default="cuda", help="Torch device")
     gen_parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"], help="Weight dtype")
-    gen_parser.add_argument("--resolution", type=int, default=512, help="Output image resolution")
+    gen_parser.add_argument("--resolution", type=int, default=1024, help="Output image resolution")
+    gen_parser.add_argument("--refiner-model", default=None, help="SDXL refiner model ID (e.g. stabilityai/stable-diffusion-xl-refiner-1.0). Adds detail/sharpness.")
+    gen_parser.add_argument("--refiner-strength", type=float, default=0.3, help="Refiner denoising strength (0-1). Lower=more detail, less change.")
     # Legacy options preserved for ablation experiments
     gen_parser.add_argument("--visual-mode", default="none", choices=["none", "centroid", "medoid"], help=argparse.SUPPRESS)
     gen_parser.add_argument("--semantic-mode", default="caption", choices=["caption", "embedding"], help=argparse.SUPPRESS)
@@ -56,6 +58,8 @@ def main() -> None:
             resolution=args.resolution,
             semantic_mode=args.semantic_mode,
             visual_mode=args.visual_mode,
+            refiner_model=args.refiner_model,
+            refiner_strength=args.refiner_strength,
         )
         print(json.dumps({
             "output_dir": result.output_dir,

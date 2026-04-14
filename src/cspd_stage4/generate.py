@@ -104,6 +104,26 @@ def _load_text2img_pipeline(
     return pipe
 
 
+def _load_refiner_pipeline(
+    refiner_model: str,
+    device: str,
+    dtype: str,
+) -> Any:
+    """Load SDXL refiner pipeline for two-stage generation."""
+    from diffusers import StableDiffusionXLImg2ImgPipeline
+
+    torch_dtype = torch.float16 if dtype == "float16" else torch.bfloat16
+
+    refiner = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+        refiner_model,
+        torch_dtype=torch_dtype,
+        use_safetensors=True,
+    )
+    refiner = refiner.to(device)
+    refiner.set_progress_bar_config(disable=False)
+    return refiner
+
+
 def _load_img2img_pipeline(
     model_name: str,
     lora_weights: str | None,
@@ -140,13 +160,15 @@ def generate_distilled_dataset(
     model_name: str = "stabilityai/stable-diffusion-xl-base-1.0",
     strength: float = 0.5,
     num_inference_steps: int = 50,
-    guidance_scale: float = 7.5,
+    guidance_scale: float = 9.0,
     seed: int = 42,
     device: str = "cuda",
     dtype: str = "float16",
-    resolution: int = 512,
+    resolution: int = 1024,
     semantic_mode: str = "caption",
     visual_mode: str = "centroid",
+    refiner_model: str | None = None,
+    refiner_strength: float = 0.3,
 ) -> GenerateResult:
     """Generate the distilled dataset using dual-anchor conditioning.
 
@@ -170,6 +192,10 @@ def generate_distilled_dataset(
             When "none", the generation uses StableDiffusionXLPipeline (text2img) instead of img2img.
             Stage 3 visual clustering is still used to SELECT which captions to generate,
             but the generation itself is driven purely by text conditioning.
+        refiner_model: Optional SDXL refiner model identifier (e.g. "stabilityai/stable-diffusion-xl-refiner-1.0").
+            When provided, runs a two-stage pipeline: base generates at high_noise_frac, refiner
+            refines the result. Adds detail and sharpness.
+        refiner_strength: Denoising strength for refiner pass (0-1). Lower = less change, more detail.
 
     Returns:
         GenerateResult with paths to generated images and metadata.
@@ -204,6 +230,12 @@ def generate_distilled_dataset(
         print(f"[Stage 4] Loading SDXL img2img pipeline...")
         pipe = _load_img2img_pipeline(model_name, lora_weights, device, dtype)
 
+    # Load optional refiner
+    refiner = None
+    if refiner_model:
+        print(f"[Stage 4] Loading SDXL refiner: {refiner_model}")
+        refiner = _load_refiner_pipeline(refiner_model, device, dtype)
+
     vae = pipe.vae
     vae_scaling_factor = vae.config.scaling_factor
 
@@ -236,6 +268,16 @@ def generate_distilled_dataset(
                 guidance_scale=guidance_scale,
                 generator=generator,
             ).images[0]
+
+            # Optional refiner pass
+            if refiner is not None:
+                refiner_gen = torch.Generator(device=device).manual_seed(seed + mode_idx)
+                image = refiner(
+                    prompt=prompt,
+                    image=image,
+                    strength=refiner_strength,
+                    generator=refiner_gen,
+                ).images[0]
 
             # Save image
             class_dir = images_dir / class_name_raw
@@ -369,6 +411,8 @@ def generate_distilled_dataset(
         "guidance_scale": guidance_scale,
         "seed": seed,
         "resolution": resolution,
+        "refiner_model": refiner_model,
+        "refiner_strength": refiner_strength if refiner_model else None,
         "modes_dir": str(Path(modes_dir).resolve()),
         "images": metadata_rows,
     })
