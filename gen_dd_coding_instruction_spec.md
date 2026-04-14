@@ -1031,8 +1031,8 @@ cspd-stage4 generate \
 ### Key parameters
 - **--visual-mode**: `"medoid"` (recommended) uses real medoid image as img2img init. `"centroid"` uses decoded VAE centroid. `"none"` for pure text2img.
 - **--strength**: Img2img denoising strength. Default `0.8`. Higher = more regeneration from LoRA, lower = closer to original image. Ignored when visual-mode=none.
-- **--resolution**: Output image resolution. Default `1024` (SDXL native).
-- **--guidance-scale**: CFG strength. Default `9.0`. Higher = sharper but less diverse.
+- **--resolution**: Output image resolution. Default `512` (matches Stage 2 LoRA training resolution).
+- **--guidance-scale**: CFG strength. Default `7.5`.
 - **--num-inference-steps**: Diffusion sampling steps. Default `50`.
 - **--refiner-model**: Optional SDXL refiner model ID. When set, runs refiner pass after base generation for added detail/sharpness.
 - **--refiner-strength**: Denoising strength for refiner pass (0-1). Default `0.3`.
