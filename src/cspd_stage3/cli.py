@@ -39,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     cluster_parser.add_argument("--cluster-method", default="kmeans", choices=["kmeans", "hdbscan"], help="Clustering method: kmeans (baseline) or hdbscan (mode discovery)")
     cluster_parser.add_argument("--min-cluster-size", type=int, default=15, help="HDBSCAN min_cluster_size (ignored for kmeans)")
     cluster_parser.add_argument("--pca-dim", type=int, default=50, help="PCA dimensions for HDBSCAN pre-processing (ignored for kmeans)")
+    cluster_parser.add_argument("--cluster-space", default="vae", choices=["vae", "dino"], help="Feature space for clustering: 'vae' (baseline) or 'dino' (DINOv2, better mode separation)")
 
     # --- run (encode + cluster in one shot) ---
     run_parser = subparsers.add_parser(
@@ -58,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--cluster-method", default="kmeans", choices=["kmeans", "hdbscan"], help="Clustering method: kmeans (baseline) or hdbscan (mode discovery)")
     run_parser.add_argument("--min-cluster-size", type=int, default=15, help="HDBSCAN min_cluster_size (ignored for kmeans)")
     run_parser.add_argument("--pca-dim", type=int, default=50, help="PCA dimensions for HDBSCAN pre-processing (ignored for kmeans)")
+    run_parser.add_argument("--cluster-space", default="vae", choices=["vae", "dino"], help="Feature space for clustering: 'vae' (baseline) or 'dino' (DINOv2, better mode separation)")
 
     return parser
 
@@ -97,6 +99,7 @@ def main() -> None:
             method=args.cluster_method,
             min_cluster_size=args.min_cluster_size,
             pca_dim=args.pca_dim,
+            cluster_space=args.cluster_space,
         )
         print(json.dumps({
             "output_dir": result.output_dir,
@@ -139,6 +142,7 @@ def main() -> None:
             method=args.cluster_method,
             min_cluster_size=args.min_cluster_size,
             pca_dim=args.pca_dim,
+            cluster_space=args.cluster_space,
         )
 
         print()

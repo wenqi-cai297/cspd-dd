@@ -233,6 +233,8 @@ def cluster_class_kmeans(
     samples: list[dict[str, Any]],
     ipc: int,
     seed: int = 42,
+    dino_embeds: torch.Tensor | None = None,
+    cluster_space: str = "vae",
 ) -> tuple[ClassClusterResult, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Cluster one class using K-Means (baseline method)."""
     class_meta = samples[class_indices[0]]
@@ -247,10 +249,12 @@ def cluster_class_kmeans(
     n_samples = len(class_indices)
     n_clusters = min(ipc, n_samples)
 
+    # Cluster on selected feature space; mode extraction always uses VAE latents
+    cluster_features = _get_cluster_features(class_indices, latents, dino_embeds, cluster_space)
     flat_latents = np.stack([_flatten_latent(class_latents[i]) for i in range(n_samples)])
 
     kmeans = KMeans(n_clusters=n_clusters, random_state=seed, n_init=10)
-    labels = kmeans.fit_predict(flat_latents)
+    labels = kmeans.fit_predict(cluster_features)
 
     modes, vis_list, sem_list, pool_list = _extract_modes_from_labels(
         labels=labels, n_clusters=n_clusters,
@@ -281,6 +285,8 @@ def cluster_class_hdbscan(
     seed: int = 42,
     min_cluster_size: int = 15,
     pca_dim: int = 50,
+    dino_embeds: torch.Tensor | None = None,
+    cluster_space: str = "vae",
 ) -> tuple[ClassClusterResult, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Cluster one class using HDBSCAN mode discovery + proportional IPC allocation.
 
@@ -304,16 +310,17 @@ def cluster_class_hdbscan(
     class_pooled = pooled_embeds[class_indices]
 
     n_samples = len(class_indices)
+    cluster_features = _get_cluster_features(class_indices, latents, dino_embeds, cluster_space)
     flat_latents = np.stack([_flatten_latent(class_latents[i]) for i in range(n_samples)])
 
     # Step 1: Optional PCA dimensionality reduction
-    # pca_dim=0 skips PCA and runs HDBSCAN on raw latents
-    if pca_dim > 0:
-        pca_components = min(pca_dim, n_samples, flat_latents.shape[1])
+    # pca_dim=0 skips PCA; DINO features (768-dim) usually don't need PCA
+    if pca_dim > 0 and cluster_features.shape[1] > pca_dim:
+        pca_components = min(pca_dim, n_samples, cluster_features.shape[1])
         pca = PCA(n_components=pca_components, random_state=seed)
-        flat_reduced = pca.fit_transform(flat_latents)
+        flat_reduced = pca.fit_transform(cluster_features)
     else:
-        flat_reduced = flat_latents
+        flat_reduced = cluster_features
 
     # Step 2: HDBSCAN mode discovery
     min_cs = min(min_cluster_size, max(n_samples // ipc, 5))
@@ -340,6 +347,7 @@ def cluster_class_hdbscan(
         return cluster_class_kmeans(
             class_indices=class_indices, latents=latents, text_embeds=text_embeds,
             pooled_embeds=pooled_embeds, samples=samples, ipc=ipc, seed=seed,
+            dino_embeds=dino_embeds, cluster_space=cluster_space,
         )
 
     # Build per-mode member lists
@@ -351,19 +359,19 @@ def cluster_class_hdbscan(
     # Step 3+5: If more modes than IPC, select most diverse via farthest-point sampling
     if n_discovered > ipc:
         mode_centroids = np.stack([
-            flat_latents[mode_members[m]].mean(axis=0) for m in discovered_modes
+            cluster_features[mode_members[m]].mean(axis=0) for m in discovered_modes
         ])
         selected_mode_indices = _farthest_point_sampling(mode_centroids, ipc)
         discovered_modes = [discovered_modes[i] for i in selected_mode_indices]
         mode_sizes = [len(mode_members[m]) for m in discovered_modes]
         # Reassign unselected modes' members to nearest selected mode
         selected_centroids = np.stack([
-            flat_latents[mode_members[m]].mean(axis=0) for m in discovered_modes
+            cluster_features[mode_members[m]].mean(axis=0) for m in discovered_modes
         ])
         all_mode_ids = set(int(l) for l in hdb_labels if l >= 0)
         unselected = all_mode_ids - set(discovered_modes)
         for um in unselected:
-            um_centroid = flat_latents[mode_members[um]].mean(axis=0)
+            um_centroid = cluster_features[mode_members[um]].mean(axis=0)
             dists = np.linalg.norm(selected_centroids - um_centroid, axis=1)
             nearest = discovered_modes[int(np.argmin(dists))]
             for idx in mode_members[um]:
@@ -414,6 +422,22 @@ def cluster_class_hdbscan(
     ), visual_modes, semantic_modes, pooled_modes
 
 
+def _get_cluster_features(
+    class_indices: list[int],
+    latents: torch.Tensor,
+    dino_embeds: torch.Tensor | None,
+    cluster_space: str,
+) -> np.ndarray:
+    """Get the feature vectors used for clustering (not for mode extraction)."""
+    if cluster_space == "dino" and dino_embeds is not None:
+        # DINOv2 CLS features: (M, 768) — already flat, good for clustering
+        return dino_embeds[class_indices].numpy()
+    else:
+        # VAE latents: flatten (M, 4, 64, 64) → (M, 16384)
+        class_latents = latents[class_indices]
+        return np.stack([_flatten_latent(class_latents[i]) for i in range(len(class_indices))])
+
+
 def cluster_class(
     *,
     class_indices: list[int],
@@ -426,22 +450,28 @@ def cluster_class(
     method: str = "kmeans",
     min_cluster_size: int = 15,
     pca_dim: int = 50,
+    dino_embeds: torch.Tensor | None = None,
+    cluster_space: str = "vae",
 ) -> tuple[ClassClusterResult, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Cluster one class and extract visual/semantic modes.
 
     Args:
         method: "kmeans" (baseline) or "hdbscan" (mode discovery).
+        dino_embeds: Optional DINOv2 features tensor.
+        cluster_space: "vae" or "dino" — which features to cluster on.
     """
     if method == "hdbscan":
         return cluster_class_hdbscan(
             class_indices=class_indices, latents=latents, text_embeds=text_embeds,
             pooled_embeds=pooled_embeds, samples=samples, ipc=ipc, seed=seed,
             min_cluster_size=min_cluster_size, pca_dim=pca_dim,
+            dino_embeds=dino_embeds, cluster_space=cluster_space,
         )
     else:
         return cluster_class_kmeans(
             class_indices=class_indices, latents=latents, text_embeds=text_embeds,
             pooled_embeds=pooled_embeds, samples=samples, ipc=ipc, seed=seed,
+            dino_embeds=dino_embeds, cluster_space=cluster_space,
         )
 
 
@@ -454,6 +484,7 @@ def run_stage3_clustering(
     method: str = "kmeans",
     min_cluster_size: int = 15,
     pca_dim: int = 50,
+    cluster_space: str = "vae",
 ) -> Stage3Result:
     """Run full Stage 3 pipeline: load encoded tensors, cluster per class, extract modes.
 
@@ -464,7 +495,9 @@ def run_stage3_clustering(
         seed: Random seed.
         method: "kmeans" (baseline) or "hdbscan" (mode discovery).
         min_cluster_size: HDBSCAN min_cluster_size parameter.
-        pca_dim: PCA dimensions for HDBSCAN pre-processing.
+        pca_dim: PCA dimensions for HDBSCAN pre-processing (0 to skip PCA).
+        cluster_space: "vae" uses flattened VAE latents for clustering (baseline).
+            "dino" uses DINOv2 CLS features (768-dim, better mode separation).
 
     Returns:
         Stage3Result with paths to mode tensors and metadata.
@@ -478,6 +511,17 @@ def run_stage3_clustering(
     latents = torch.load(encode_dir / "latents.pt", weights_only=True)
     text_embeds = torch.load(encode_dir / "text_embeds.pt", weights_only=True)
     pooled_embeds = torch.load(encode_dir / "pooled_embeds.pt", weights_only=True)
+
+    # Load DINOv2 features if available and requested
+    dino_embeds = None
+    dino_path = encode_dir / "dino_embeds.pt"
+    if cluster_space == "dino":
+        if dino_path.exists():
+            dino_embeds = torch.load(dino_path, weights_only=True)
+            print(f"[Stage 3] Loaded DINOv2 features: {list(dino_embeds.shape)}")
+        else:
+            print("[Stage 3] WARNING: dino_embeds.pt not found, falling back to VAE latents")
+            cluster_space = "vae"
 
     with open(encode_dir / "encode_index.json", encoding="utf-8") as f:
         encode_index = json.load(f)
@@ -517,6 +561,8 @@ def run_stage3_clustering(
             method=method,
             min_cluster_size=min_cluster_size,
             pca_dim=pca_dim,
+            dino_embeds=dino_embeds,
+            cluster_space=cluster_space,
         )
 
         # Assign global mode indices
@@ -571,6 +617,7 @@ def run_stage3_clustering(
         "ipc": ipc,
         "seed": seed,
         "cluster_method": method,
+        "cluster_space": cluster_space,
         "num_classes": len(all_class_results),
         "total_modes": total_modes,
         "visual_modes_shape": list(total_visual_modes.shape),

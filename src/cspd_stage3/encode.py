@@ -25,11 +25,13 @@ class EncodeResult:
     latents_path: str          # .pt file with stacked VAE latents
     text_embeds_path: str      # .pt file with stacked text embeddings
     pooled_embeds_path: str    # .pt file with stacked pooled text embeddings
+    dino_embeds_path: str      # .pt file with stacked DINOv2 features
     index_path: str            # .json mapping index → record metadata
     num_samples: int
     latent_shape: list[int]
     text_embed_dim: int
     pooled_embed_dim: int
+    dino_embed_dim: int
 
 
 def _load_image(path: str | Path, resolution: int) -> Image.Image:
@@ -201,15 +203,53 @@ def encode_dataset(
     print(f"[Stage 3A] Text embedding shape: {list(all_prompt_embeds.shape)}")
     print(f"[Stage 3A] Pooled embedding shape: {list(all_pooled_embeds.shape)}")
 
+    # Free SDXL pipeline before loading DINOv2
+    del pipe, vae, tokenizer_1, tokenizer_2, text_encoder_1, text_encoder_2
+    torch.cuda.empty_cache()
+
+    # Encode images → DINOv2 features (for clustering)
+    # DINOv2 produces semantically rich features with natural cluster structure,
+    # much better suited for mode discovery than VAE latents.
+    print(f"[Stage 3A] Loading DINOv2 (dinov2_vitb14)...")
+    dino_model = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
+    dino_model = dino_model.to(device)
+    dino_model.eval()
+
+    # DINOv2 expects images normalized with ImageNet stats, resized to 224
+    from torchvision import transforms as T
+    dino_transform = T.Compose([
+        T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
+        T.CenterCrop(224),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+    print(f"[Stage 3A] Encoding {len(pairs)} images to DINOv2 features...")
+    all_dino_embeds = []
+    for i in tqdm(range(0, len(pairs), batch_size), desc="DINOv2 encode"):
+        batch_pairs = pairs[i : i + batch_size]
+        images = [_load_image(p["image_path"], resolution) for p in batch_pairs]
+        pixel_values = torch.stack([dino_transform(img) for img in images]).to(device)
+        features = dino_model(pixel_values)  # (B, 768) CLS token
+        all_dino_embeds.append(features.cpu().float())
+
+    all_dino_embeds = torch.cat(all_dino_embeds, dim=0)  # (N, 768)
+    print(f"[Stage 3A] DINOv2 embedding shape: {list(all_dino_embeds.shape)}")
+
+    del dino_model
+    torch.cuda.empty_cache()
+
     # Save tensors
     latents_path = output_dir / "latents.pt"
     text_embeds_path = output_dir / "text_embeds.pt"
     pooled_embeds_path = output_dir / "pooled_embeds.pt"
+    dino_embeds_path = output_dir / "dino_embeds.pt"
     index_path = output_dir / "encode_index.json"
 
     torch.save(all_latents, latents_path)
     torch.save(all_prompt_embeds, text_embeds_path)
     torch.save(all_pooled_embeds, pooled_embeds_path)
+    torch.save(all_dino_embeds, dino_embeds_path)
 
     # Save index (lightweight metadata without tensors)
     index_data = {
@@ -219,23 +259,22 @@ def encode_dataset(
         "latent_shape": list(all_latents.shape),
         "text_embed_shape": list(all_prompt_embeds.shape),
         "pooled_embed_shape": list(all_pooled_embeds.shape),
+        "dino_embed_shape": list(all_dino_embeds.shape),
         "vae_scaling_factor": vae_scaling_factor,
         "samples": [{k: v for k, v in p.items()} for p in pairs],
     }
     write_json(index_path, index_data)
-
-    # Cleanup GPU
-    del vae, text_encoder_1, text_encoder_2
-    torch.cuda.empty_cache()
 
     print(f"[Stage 3A] Encoding complete. Saved to {output_dir}")
     return EncodeResult(
         latents_path=str(latents_path),
         text_embeds_path=str(text_embeds_path),
         pooled_embeds_path=str(pooled_embeds_path),
+        dino_embeds_path=str(dino_embeds_path),
         index_path=str(index_path),
         num_samples=len(pairs),
         latent_shape=list(all_latents.shape),
         text_embed_dim=all_prompt_embeds.shape[-1],
         pooled_embed_dim=all_pooled_embeds.shape[-1],
+        dino_embed_dim=all_dino_embeds.shape[-1],
     )
