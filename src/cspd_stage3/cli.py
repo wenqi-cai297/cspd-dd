@@ -16,16 +16,14 @@ def build_parser() -> argparse.ArgumentParser:
     # --- encode ---
     encode_parser = subparsers.add_parser(
         "encode",
-        help="Encode dataset images to VAE latents and captions to text embeddings (Stage 3A)",
+        help="Encode dataset images to DINOv2 features for clustering (Stage 3A)",
     )
     encode_parser.add_argument("--dataset-root", required=True, help="ImageFolder-style dataset root")
     encode_parser.add_argument("--render-input", required=True, help="Stage 1C render records.jsonl path")
     encode_parser.add_argument("--output-dir", required=True, help="Directory for encoded tensor outputs")
-    encode_parser.add_argument("--model-name", default="stabilityai/stable-diffusion-xl-base-1.0", help="SDXL model identifier")
-    encode_parser.add_argument("--resolution", type=int, default=512, help="Image resolution for VAE encoding")
+    encode_parser.add_argument("--resolution", type=int, default=512, help="Image resolution for loading")
     encode_parser.add_argument("--batch-size", type=int, default=8, help="Encoding batch size")
     encode_parser.add_argument("--device", default="cuda", help="Torch device")
-    encode_parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"], help="Weight dtype")
 
     # --- cluster ---
     cluster_parser = subparsers.add_parser(
@@ -50,11 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--render-input", required=True, help="Stage 1C render records.jsonl path")
     run_parser.add_argument("--output-dir", required=True, help="Root output directory for Stage 3")
     run_parser.add_argument("--ipc", type=int, required=True, help="Images per class")
-    run_parser.add_argument("--model-name", default="stabilityai/stable-diffusion-xl-base-1.0", help="SDXL model identifier")
     run_parser.add_argument("--resolution", type=int, default=512, help="Image resolution")
     run_parser.add_argument("--batch-size", type=int, default=8, help="Encoding batch size")
     run_parser.add_argument("--device", default="cuda", help="Torch device")
-    run_parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"], help="Weight dtype")
     run_parser.add_argument("--seed", type=int, default=42, help="Random seed")
     run_parser.add_argument("--cluster-method", default="kmeans", choices=["kmeans", "hdbscan"], help="Clustering method: kmeans (baseline) or hdbscan (mode discovery)")
     run_parser.add_argument("--min-cluster-size", type=int, default=15, help="HDBSCAN min_cluster_size (ignored for kmeans)")
@@ -75,17 +71,14 @@ def main() -> None:
             dataset_root=args.dataset_root,
             render_input=args.render_input,
             output_dir=args.output_dir,
-            model_name=args.model_name,
             resolution=args.resolution,
             batch_size=args.batch_size,
             device=args.device,
-            dtype=args.dtype,
         )
         print(json.dumps({
-            "latents_path": result.latents_path,
-            "text_embeds_path": result.text_embeds_path,
+            "dino_embeds_path": result.dino_embeds_path,
             "num_samples": result.num_samples,
-            "latent_shape": result.latent_shape,
+            "dino_embed_dim": result.dino_embed_dim,
         }, indent=2))
 
     elif args.command == "cluster":
@@ -123,11 +116,9 @@ def main() -> None:
             dataset_root=args.dataset_root,
             render_input=args.render_input,
             output_dir=str(encode_dir),
-            model_name=args.model_name,
             resolution=args.resolution,
             batch_size=args.batch_size,
             device=args.device,
-            dtype=args.dtype,
         )
 
         print()
@@ -149,9 +140,7 @@ def main() -> None:
         print("=" * 60)
         print(f"[Stage 3] Complete: {cluster_result.total_modes} modes "
               f"({cluster_result.num_classes} classes × IPC={args.ipc})")
-        print(f"[Stage 3] Visual modes:   {cluster_result.visual_modes_path}")
-        print(f"[Stage 3] Semantic modes:  {cluster_result.semantic_modes_path}")
-        print(f"[Stage 3] Modes index:     {cluster_result.modes_index_path}")
+        print(f"[Stage 3] Modes index: {cluster_result.modes_index_path}")
         print("=" * 60)
 
     else:

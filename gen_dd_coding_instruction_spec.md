@@ -894,8 +894,8 @@ Discover representative visual and semantic modes per class via clustering. Visu
 
 ```
 Stage 3A: Encode
-  captions → SDXL CLIP × 2 (standalone, no VAE/UNet) → text embeddings (N, 77, 2048) + pooled (N, 1280)
   images → DINOv2 (dinov2_vitb14) → CLS features (N, 768) [for clustering + medoid selection]
+  (no VAE, no text encoding — Stage 4 uses captions as plain text strings)
 
 Stage 3B+3C: Cluster + Extract
   per class:
@@ -958,12 +958,9 @@ cspd-stage3 cluster --encode-dir runs/stage3/encoded --output-dir runs/stage3/mo
 ```text
 runs/stage3/<output_dir>/
 ├── encoded/
-│   ├── text_embeds.pt          # (N, 77, 2048) concatenated CLIP embeddings
-│   ├── pooled_embeds.pt        # (N, 1280) pooled text embeddings
 │   ├── dino_embeds.pt          # (N, 768) DINOv2 CLS features
-│   └── encode_index.json       # per-sample metadata
+│   └── encode_index.json       # per-sample metadata (with canonical captions)
 ├── modes_<method>/             # e.g. modes_kmeans, modes_hdbscan
-│   ├── semantic_modes.pt       # (total_modes, 77, 2048) mean text embeddings
 │   ├── pooled_modes.pt         # (total_modes, 1280) mean pooled embeddings
 │   ├── modes_index.json        # per-mode metadata (class, archetype, captions, cluster sizes)
 │   └── stage3_summary.json     # clustering summary
