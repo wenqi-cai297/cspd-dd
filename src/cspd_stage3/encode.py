@@ -1,7 +1,10 @@
-"""Stage 3A — Encode images to VAE latents and captions to text embeddings.
+"""Stage 3A — Encode captions to text embeddings and images to DINOv2 features.
 
-Uses the official diffusers SDXL pipeline components for encoding, ensuring
-exact consistency with the Stage 4 img2img generation pipeline.
+Text embeddings are encoded via SDXL's dual CLIP text encoders (loaded standalone,
+without the full pipeline/VAE/UNet). DINOv2 CLS features are used for clustering.
+
+VAE encoding is no longer performed since Stage 4 uses text2img generation,
+which does not require VAE latents.
 """
 
 from __future__ import annotations
@@ -22,13 +25,11 @@ from cspd_stage1.io_utils import write_json
 class EncodeResult:
     """Result of encoding a dataset split."""
 
-    latents_path: str          # .pt file with stacked VAE latents
     text_embeds_path: str      # .pt file with stacked text embeddings
     pooled_embeds_path: str    # .pt file with stacked pooled text embeddings
     dino_embeds_path: str      # .pt file with stacked DINOv2 features
     index_path: str            # .json mapping index → record metadata
     num_samples: int
-    latent_shape: list[int]
     text_embed_dim: int
     pooled_embed_dim: int
     dino_embed_dim: int
@@ -111,14 +112,17 @@ def encode_dataset(
     device: str = "cuda",
     dtype: str = "float16",
 ) -> EncodeResult:
-    """Encode all paired images and captions to latent/embedding tensors.
+    """Encode captions to text embeddings and images to DINOv2 features.
+
+    VAE encoding is skipped — Stage 4 uses text2img and does not need VAE latents.
+    Text encoders are loaded standalone (without UNet/VAE) to save memory.
 
     Args:
         dataset_root: ImageFolder dataset root (same as Stage 2).
         render_input: Path to Stage 1C records.jsonl.
         output_dir: Directory for output .pt and index files.
-        model_name: SDXL model identifier.
-        resolution: Image resolution for VAE encoding.
+        model_name: SDXL model identifier (for text encoders).
+        resolution: Image resolution for DINOv2 encoding.
         batch_size: Encoding batch size.
         device: Torch device.
         dtype: Weight dtype (float16 or bfloat16).
@@ -126,7 +130,7 @@ def encode_dataset(
     Returns:
         EncodeResult with paths to saved tensors and metadata.
     """
-    from diffusers import StableDiffusionXLPipeline
+    from transformers import CLIPTextModel, CLIPTextModelWithProjection, AutoTokenizer
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -139,47 +143,20 @@ def encode_dataset(
         raise ValueError("No pairs found. Check dataset_root and render_input paths.")
     print(f"[Stage 3A] Found {len(pairs)} paired samples")
 
-    # Load the full SDXL pipeline — use its components for encoding
-    # This ensures VAE encode and text encode produce outputs exactly matching
-    # what the img2img pipeline in Stage 4 expects.
-    print(f"[Stage 3A] Loading SDXL pipeline from {model_name}...")
-    pipe = StableDiffusionXLPipeline.from_pretrained(
-        model_name, torch_dtype=torch_dtype, use_safetensors=True,
+    # Load SDXL text encoders standalone (no VAE, no UNet — saves ~6GB VRAM)
+    print(f"[Stage 3A] Loading SDXL text encoders from {model_name}...")
+    tokenizer_1 = AutoTokenizer.from_pretrained(model_name, subfolder="tokenizer", use_fast=False)
+    tokenizer_2 = AutoTokenizer.from_pretrained(model_name, subfolder="tokenizer_2", use_fast=False)
+    text_encoder_1 = CLIPTextModel.from_pretrained(
+        model_name, subfolder="text_encoder", torch_dtype=torch_dtype,
     ).to(device)
+    text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+        model_name, subfolder="text_encoder_2", torch_dtype=torch_dtype,
+    ).to(device)
+    text_encoder_1.eval()
+    text_encoder_2.eval()
 
-    vae = pipe.vae
-    tokenizer_1 = pipe.tokenizer
-    tokenizer_2 = pipe.tokenizer_2
-    text_encoder_1 = pipe.text_encoder
-    text_encoder_2 = pipe.text_encoder_2
-    vae_scaling_factor = vae.config.scaling_factor
-
-    # Encode images → VAE latents (float32 for numerical stability)
-    print(f"[Stage 3A] Encoding {len(pairs)} images to VAE latents (float32)...")
-    vae_orig_dtype = vae.dtype
-    vae.to(dtype=torch.float32)
-    all_latents = []
-    for i in tqdm(range(0, len(pairs), batch_size), desc="VAE encode"):
-        batch_pairs = pairs[i : i + batch_size]
-        images = [_load_image(p["image_path"], resolution) for p in batch_pairs]
-        # Convert PIL images to tensor: [0,255] → [0,1] → [-1,1]
-        import numpy as np
-        tensors = []
-        for img in images:
-            arr = np.array(img, dtype=np.float32) / 255.0
-            t = torch.from_numpy(arr).permute(2, 0, 1)  # HWC → CHW
-            t = t * 2.0 - 1.0
-            tensors.append(t)
-        pixel_values = torch.stack(tensors).to(device, dtype=torch.float32)
-        latent_dist = vae.encode(pixel_values).latent_dist
-        latents = latent_dist.sample() * vae_scaling_factor
-        all_latents.append(latents.cpu().float())
-    vae.to(dtype=vae_orig_dtype)
-
-    all_latents = torch.cat(all_latents, dim=0)  # (N, C, H, W)
-    print(f"[Stage 3A] Latent tensor shape: {list(all_latents.shape)}")
-
-    # Encode captions → text embeddings using pipeline's encode_prompt
+    # Encode captions → text embeddings
     print(f"[Stage 3A] Encoding {len(pairs)} captions to text embeddings...")
     all_prompt_embeds = []
     all_pooled_embeds = []
@@ -187,35 +164,46 @@ def encode_dataset(
         batch_pairs = pairs[i : i + batch_size]
         captions = [p["canonical_caption"] for p in batch_pairs]
 
-        # Use the pipeline's encode_prompt — guarantees exact match with generation
-        prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, _ = pipe.encode_prompt(
-            prompt=captions,
-            device=device,
-            num_images_per_prompt=1,
-            do_classifier_free_guidance=False,
-        )
+        # Tokenize for both encoders
+        tokens_1 = tokenizer_1(
+            captions, padding="max_length", max_length=tokenizer_1.model_max_length,
+            truncation=True, return_tensors="pt",
+        ).input_ids.to(device)
+        tokens_2 = tokenizer_2(
+            captions, padding="max_length", max_length=tokenizer_2.model_max_length,
+            truncation=True, return_tensors="pt",
+        ).input_ids.to(device)
+
+        # Encode with both text encoders
+        enc1_out = text_encoder_1(tokens_1, output_hidden_states=True)
+        enc2_out = text_encoder_2(tokens_2, output_hidden_states=True)
+
+        # SDXL concatenates penultimate hidden states from both encoders
+        prompt_embeds_1 = enc1_out.hidden_states[-2]  # (B, seq_len, 768)
+        prompt_embeds_2 = enc2_out.hidden_states[-2]  # (B, seq_len, 1280)
+        prompt_embeds = torch.cat([prompt_embeds_1, prompt_embeds_2], dim=-1)  # (B, seq_len, 2048)
+
+        # Pooled from text_encoder_2
+        pooled_prompt_embeds = enc2_out.text_embeds  # (B, 1280)
 
         all_prompt_embeds.append(prompt_embeds.cpu().float())
         all_pooled_embeds.append(pooled_prompt_embeds.cpu().float())
 
-    all_prompt_embeds = torch.cat(all_prompt_embeds, dim=0)    # (N, seq_len, dim)
-    all_pooled_embeds = torch.cat(all_pooled_embeds, dim=0)    # (N, pooled_dim)
+    all_prompt_embeds = torch.cat(all_prompt_embeds, dim=0)    # (N, seq_len, 2048)
+    all_pooled_embeds = torch.cat(all_pooled_embeds, dim=0)    # (N, 1280)
     print(f"[Stage 3A] Text embedding shape: {list(all_prompt_embeds.shape)}")
     print(f"[Stage 3A] Pooled embedding shape: {list(all_pooled_embeds.shape)}")
 
-    # Free SDXL pipeline before loading DINOv2
-    del pipe, vae, tokenizer_1, tokenizer_2, text_encoder_1, text_encoder_2
+    # Free text encoders before loading DINOv2
+    del text_encoder_1, text_encoder_2, tokenizer_1, tokenizer_2
     torch.cuda.empty_cache()
 
     # Encode images → DINOv2 features (for clustering)
-    # DINOv2 produces semantically rich features with natural cluster structure,
-    # much better suited for mode discovery than VAE latents.
     print(f"[Stage 3A] Loading DINOv2 (dinov2_vitb14)...")
     dino_model = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
     dino_model = dino_model.to(device)
     dino_model.eval()
 
-    # DINOv2 expects images normalized with ImageNet stats, resized to 224
     from torchvision import transforms as T
     dino_transform = T.Compose([
         T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
@@ -240,13 +228,11 @@ def encode_dataset(
     torch.cuda.empty_cache()
 
     # Save tensors
-    latents_path = output_dir / "latents.pt"
     text_embeds_path = output_dir / "text_embeds.pt"
     pooled_embeds_path = output_dir / "pooled_embeds.pt"
     dino_embeds_path = output_dir / "dino_embeds.pt"
     index_path = output_dir / "encode_index.json"
 
-    torch.save(all_latents, latents_path)
     torch.save(all_prompt_embeds, text_embeds_path)
     torch.save(all_pooled_embeds, pooled_embeds_path)
     torch.save(all_dino_embeds, dino_embeds_path)
@@ -256,24 +242,20 @@ def encode_dataset(
         "num_samples": len(pairs),
         "model_name": model_name,
         "resolution": resolution,
-        "latent_shape": list(all_latents.shape),
         "text_embed_shape": list(all_prompt_embeds.shape),
         "pooled_embed_shape": list(all_pooled_embeds.shape),
         "dino_embed_shape": list(all_dino_embeds.shape),
-        "vae_scaling_factor": vae_scaling_factor,
         "samples": [{k: v for k, v in p.items()} for p in pairs],
     }
     write_json(index_path, index_data)
 
     print(f"[Stage 3A] Encoding complete. Saved to {output_dir}")
     return EncodeResult(
-        latents_path=str(latents_path),
         text_embeds_path=str(text_embeds_path),
         pooled_embeds_path=str(pooled_embeds_path),
         dino_embeds_path=str(dino_embeds_path),
         index_path=str(index_path),
         num_samples=len(pairs),
-        latent_shape=list(all_latents.shape),
         text_embed_dim=all_prompt_embeds.shape[-1],
         pooled_embed_dim=all_pooled_embeds.shape[-1],
         dino_embed_dim=all_dino_embeds.shape[-1],

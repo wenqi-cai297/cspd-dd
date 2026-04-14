@@ -894,9 +894,8 @@ Discover representative visual and semantic modes per class via clustering. Visu
 
 ```
 Stage 3A: Encode
-  images → SDXL VAE → latents (N, 4, H/8, W/8)          [for mode extraction]
-  captions → SDXL CLIP × 2 → text embeddings (N, 77, 2048) + pooled (N, 1280)
-  images → DINOv2 (dinov2_vitb14) → CLS features (N, 768) [for clustering]
+  captions → SDXL CLIP × 2 (standalone, no VAE/UNet) → text embeddings (N, 77, 2048) + pooled (N, 1280)
+  images → DINOv2 (dinov2_vitb14) → CLS features (N, 768) [for clustering + medoid selection]
 
 Stage 3B+3C: Cluster + Extract
   per class:
@@ -934,8 +933,8 @@ cspd-stage3 cluster --encode-dir runs/stage3/encoded --output-dir runs/stage3/mo
 ```
 
 ### Clustering parameters
-- **--cluster-space**: `"vae"` (flatten VAE latents, 16384-dim, baseline) or `"dino"` (DINOv2 CLS features, 768-dim, better mode separation)
 - **--cluster-method**: `"kmeans"` (baseline, K=IPC) or `"hdbscan"` (density-based mode discovery)
+- Clustering always uses DINOv2 features (VAE latents no longer computed)
 - **--min-cluster-size**: HDBSCAN parameter — minimum points for a subtree to count as a real cluster split in the condensed tree. Controls minimum legitimate cluster size. (ignored for kmeans)
 - **--min-samples**: HDBSCAN parameter — k in k-NN for core distance computation. Controls density estimation smoothness. Lower = finer density landscape, more clusters. Higher = smoother, fewer clusters. (ignored for kmeans)
 - **--pca-dim**: PCA dimensions for HDBSCAN pre-processing. `0` skips PCA. DINOv2 features (768-dim) usually don't need PCA.
@@ -959,13 +958,11 @@ cspd-stage3 cluster --encode-dir runs/stage3/encoded --output-dir runs/stage3/mo
 ```text
 runs/stage3/<output_dir>/
 ├── encoded/
-│   ├── latents.pt              # (N, 4, H/8, W/8) VAE latents
 │   ├── text_embeds.pt          # (N, 77, 2048) concatenated CLIP embeddings
 │   ├── pooled_embeds.pt        # (N, 1280) pooled text embeddings
 │   ├── dino_embeds.pt          # (N, 768) DINOv2 CLS features
 │   └── encode_index.json       # per-sample metadata
-├── modes_<method>/             # e.g. modes_dino_kmeans, modes_dino_hdbscan
-│   ├── visual_modes.pt         # (total_modes, 4, H/8, W/8) centroid latents
+├── modes_<method>/             # e.g. modes_kmeans, modes_hdbscan
 │   ├── semantic_modes.pt       # (total_modes, 77, 2048) mean text embeddings
 │   ├── pooled_modes.pt         # (total_modes, 1280) mean pooled embeddings
 │   ├── modes_index.json        # per-mode metadata (class, archetype, captions, cluster sizes)

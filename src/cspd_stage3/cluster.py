@@ -69,15 +69,9 @@ class Stage3Result:
     num_classes: int
     total_modes: int
     class_results: list[ClassClusterResult]
-    visual_modes_path: str       # .pt: (total_modes, C, H, W)
     semantic_modes_path: str     # .pt: (total_modes, seq_len, dim)
     pooled_modes_path: str       # .pt: (total_modes, pooled_dim)
     modes_index_path: str        # .json: per-mode metadata
-
-
-def _flatten_latent(latent: torch.Tensor) -> np.ndarray:
-    """Flatten a (C, H, W) latent to a 1D vector for clustering."""
-    return latent.reshape(-1).numpy()
 
 
 def _extract_modes_from_labels(
@@ -85,18 +79,20 @@ def _extract_modes_from_labels(
     labels: np.ndarray,
     n_clusters: int,
     class_indices: list[int],
-    class_latents: torch.Tensor,
+    class_dino: np.ndarray,
     class_text: torch.Tensor,
     class_pooled: torch.Tensor,
-    flat_latents: np.ndarray,
     samples: list[dict[str, Any]],
     class_name: str,
     class_name_raw: str,
     archetype: str,
-) -> tuple[list[ClusterMode], list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
-    """Shared mode extraction logic: given cluster labels, extract visual/semantic modes."""
+) -> tuple[list[ClusterMode], list[torch.Tensor], list[torch.Tensor]]:
+    """Shared mode extraction logic: given cluster labels, extract semantic modes.
+
+    Visual medoid is computed in DINOv2 space (closest to DINOv2 centroid).
+    No VAE latents are needed — Stage 4 uses text2img.
+    """
     modes = []
-    visual_mode_latents = []
     semantic_mode_embeds = []
     pooled_mode_embeds = []
 
@@ -110,13 +106,10 @@ def _extract_modes_from_labels(
         if len(member_local_indices) == 0:
             continue
 
-        # --- Visual mode ---
-        cluster_latents = class_latents[member_local_indices]
-        visual_centroid = cluster_latents.mean(dim=0)
-
-        centroid_flat = _flatten_latent(visual_centroid)
-        member_flat = flat_latents[member_local_indices]
-        distances_to_centroid = np.linalg.norm(member_flat - centroid_flat, axis=1)
+        # --- Visual medoid (in DINOv2 space) ---
+        member_dino = class_dino[member_local_indices]
+        dino_centroid = member_dino.mean(axis=0)
+        distances_to_centroid = np.linalg.norm(member_dino - dino_centroid, axis=1)
         visual_medoid_local = member_local_indices[int(np.argmin(distances_to_centroid))]
         visual_medoid_global = class_indices[visual_medoid_local]
 
@@ -132,7 +125,6 @@ def _extract_modes_from_labels(
         semantic_medoid_local = member_local_indices[int(np.argmin(distances_to_text_centroid))]
         semantic_medoid_global = class_indices[semantic_medoid_local]
 
-        visual_mode_latents.append(visual_centroid)
         semantic_mode_embeds.append(semantic_centroid)
         pooled_mode_embeds.append(pooled_centroid)
 
@@ -152,7 +144,7 @@ def _extract_modes_from_labels(
             member_indices=member_global_indices,
         ))
 
-    return modes, visual_mode_latents, semantic_mode_embeds, pooled_mode_embeds
+    return modes, semantic_mode_embeds, pooled_mode_embeds
 
 
 def _farthest_point_sampling(points: np.ndarray, n: int) -> list[int]:
@@ -227,57 +219,50 @@ def _sub_cluster_mode(
 def cluster_class_kmeans(
     *,
     class_indices: list[int],
-    latents: torch.Tensor,
+    dino_embeds: torch.Tensor,
     text_embeds: torch.Tensor,
     pooled_embeds: torch.Tensor,
     samples: list[dict[str, Any]],
     ipc: int,
     seed: int = 42,
-    dino_embeds: torch.Tensor | None = None,
-    cluster_space: str = "vae",
-) -> tuple[ClassClusterResult, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Cluster one class using K-Means (baseline method)."""
+) -> tuple[ClassClusterResult, torch.Tensor, torch.Tensor]:
+    """Cluster one class using K-Means on DINOv2 features."""
     class_meta = samples[class_indices[0]]
     class_name = class_meta["class_name"]
     class_name_raw = class_meta["class_name_raw"]
     archetype = class_meta["archetype"]
 
-    class_latents = latents[class_indices]
     class_text = text_embeds[class_indices]
     class_pooled = pooled_embeds[class_indices]
+    class_dino = dino_embeds[class_indices].numpy()
 
     n_samples = len(class_indices)
     n_clusters = min(ipc, n_samples)
 
-    # Cluster on selected feature space; mode extraction always uses VAE latents
-    cluster_features = _get_cluster_features(class_indices, latents, dino_embeds, cluster_space)
-    flat_latents = np.stack([_flatten_latent(class_latents[i]) for i in range(n_samples)])
-
     kmeans = KMeans(n_clusters=n_clusters, random_state=seed, n_init=10)
-    labels = kmeans.fit_predict(cluster_features)
+    labels = kmeans.fit_predict(class_dino)
 
-    modes, vis_list, sem_list, pool_list = _extract_modes_from_labels(
+    modes, sem_list, pool_list = _extract_modes_from_labels(
         labels=labels, n_clusters=n_clusters,
-        class_indices=class_indices, class_latents=class_latents,
+        class_indices=class_indices, class_dino=class_dino,
         class_text=class_text, class_pooled=class_pooled,
-        flat_latents=flat_latents, samples=samples,
+        samples=samples,
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
     )
 
-    visual_modes = torch.stack(vis_list) if vis_list else torch.empty(0)
     semantic_modes = torch.stack(sem_list) if sem_list else torch.empty(0)
     pooled_modes = torch.stack(pool_list) if pool_list else torch.empty(0)
 
     return ClassClusterResult(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
         num_samples=n_samples, ipc=ipc, num_clusters=len(modes), modes=modes,
-    ), visual_modes, semantic_modes, pooled_modes
+    ), semantic_modes, pooled_modes
 
 
 def cluster_class_hdbscan(
     *,
     class_indices: list[int],
-    latents: torch.Tensor,
+    dino_embeds: torch.Tensor,
     text_embeds: torch.Tensor,
     pooled_embeds: torch.Tensor,
     samples: list[dict[str, Any]],
@@ -286,9 +271,7 @@ def cluster_class_hdbscan(
     min_cluster_size: int = 15,
     min_samples: int = 3,
     pca_dim: int = 50,
-    dino_embeds: torch.Tensor | None = None,
-    cluster_space: str = "vae",
-) -> tuple[ClassClusterResult, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[ClassClusterResult, torch.Tensor, torch.Tensor]:
     """Cluster one class using HDBSCAN mode discovery + proportional IPC allocation.
 
     Steps:
@@ -306,13 +289,12 @@ def cluster_class_hdbscan(
     class_name_raw = class_meta["class_name_raw"]
     archetype = class_meta["archetype"]
 
-    class_latents = latents[class_indices]
     class_text = text_embeds[class_indices]
     class_pooled = pooled_embeds[class_indices]
+    class_dino = dino_embeds[class_indices].numpy()
 
     n_samples = len(class_indices)
-    cluster_features = _get_cluster_features(class_indices, latents, dino_embeds, cluster_space)
-    flat_latents = np.stack([_flatten_latent(class_latents[i]) for i in range(n_samples)])
+    cluster_features = class_dino
 
     # Step 1: Optional PCA dimensionality reduction
     # pca_dim=0 skips PCA; DINO features (768-dim) usually don't need PCA
@@ -346,9 +328,8 @@ def cluster_class_hdbscan(
     # Fallback: if HDBSCAN found 0 or 1 modes, fall back to K-Means
     if n_discovered <= 1:
         return cluster_class_kmeans(
-            class_indices=class_indices, latents=latents, text_embeds=text_embeds,
+            class_indices=class_indices, dino_embeds=dino_embeds, text_embeds=text_embeds,
             pooled_embeds=pooled_embeds, samples=samples, ipc=ipc, seed=seed,
-            dino_embeds=dino_embeds, cluster_space=cluster_space,
         )
 
     # Build per-mode member lists
@@ -394,7 +375,7 @@ def cluster_class_hdbscan(
                 final_labels[mi] = final_cluster_id
             final_cluster_id += 1
         else:
-            sub_groups = _sub_cluster_mode(flat_latents, members, n_alloc, seed)
+            sub_groups = _sub_cluster_mode(class_dino, members, n_alloc, seed)
             for group in sub_groups:
                 for mi in group:
                     final_labels[mi] = final_cluster_id
@@ -405,44 +386,27 @@ def cluster_class_hdbscan(
         if final_labels[i] < 0:
             final_labels[i] = 0
 
-    modes, vis_list, sem_list, pool_list = _extract_modes_from_labels(
+    modes, sem_list, pool_list = _extract_modes_from_labels(
         labels=final_labels, n_clusters=final_cluster_id,
-        class_indices=class_indices, class_latents=class_latents,
+        class_indices=class_indices, class_dino=class_dino,
         class_text=class_text, class_pooled=class_pooled,
-        flat_latents=flat_latents, samples=samples,
+        samples=samples,
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
     )
 
-    visual_modes = torch.stack(vis_list) if vis_list else torch.empty(0)
     semantic_modes = torch.stack(sem_list) if sem_list else torch.empty(0)
     pooled_modes = torch.stack(pool_list) if pool_list else torch.empty(0)
 
     return ClassClusterResult(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
         num_samples=n_samples, ipc=ipc, num_clusters=len(modes), modes=modes,
-    ), visual_modes, semantic_modes, pooled_modes
-
-
-def _get_cluster_features(
-    class_indices: list[int],
-    latents: torch.Tensor,
-    dino_embeds: torch.Tensor | None,
-    cluster_space: str,
-) -> np.ndarray:
-    """Get the feature vectors used for clustering (not for mode extraction)."""
-    if cluster_space == "dino" and dino_embeds is not None:
-        # DINOv2 CLS features: (M, 768) — already flat, good for clustering
-        return dino_embeds[class_indices].numpy()
-    else:
-        # VAE latents: flatten (M, 4, 64, 64) → (M, 16384)
-        class_latents = latents[class_indices]
-        return np.stack([_flatten_latent(class_latents[i]) for i in range(len(class_indices))])
+    ), semantic_modes, pooled_modes
 
 
 def cluster_class(
     *,
     class_indices: list[int],
-    latents: torch.Tensor,
+    dino_embeds: torch.Tensor,
     text_embeds: torch.Tensor,
     pooled_embeds: torch.Tensor,
     samples: list[dict[str, Any]],
@@ -452,28 +416,23 @@ def cluster_class(
     min_cluster_size: int = 15,
     min_samples: int = 3,
     pca_dim: int = 50,
-    dino_embeds: torch.Tensor | None = None,
-    cluster_space: str = "vae",
-) -> tuple[ClassClusterResult, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Cluster one class and extract visual/semantic modes.
+) -> tuple[ClassClusterResult, torch.Tensor, torch.Tensor]:
+    """Cluster one class using DINOv2 features and extract semantic modes.
 
     Args:
         method: "kmeans" (baseline) or "hdbscan" (mode discovery).
-        dino_embeds: Optional DINOv2 features tensor.
-        cluster_space: "vae" or "dino" — which features to cluster on.
+        dino_embeds: DINOv2 features tensor (required).
     """
     if method == "hdbscan":
         return cluster_class_hdbscan(
-            class_indices=class_indices, latents=latents, text_embeds=text_embeds,
+            class_indices=class_indices, dino_embeds=dino_embeds, text_embeds=text_embeds,
             pooled_embeds=pooled_embeds, samples=samples, ipc=ipc, seed=seed,
             min_cluster_size=min_cluster_size, min_samples=min_samples, pca_dim=pca_dim,
-            dino_embeds=dino_embeds, cluster_space=cluster_space,
         )
     else:
         return cluster_class_kmeans(
-            class_indices=class_indices, latents=latents, text_embeds=text_embeds,
+            class_indices=class_indices, dino_embeds=dino_embeds, text_embeds=text_embeds,
             pooled_embeds=pooled_embeds, samples=samples, ipc=ipc, seed=seed,
-            dino_embeds=dino_embeds, cluster_space=cluster_space,
         )
 
 
@@ -487,12 +446,13 @@ def run_stage3_clustering(
     min_cluster_size: int = 15,
     min_samples: int = 3,
     pca_dim: int = 50,
-    cluster_space: str = "vae",
 ) -> Stage3Result:
     """Run full Stage 3 pipeline: load encoded tensors, cluster per class, extract modes.
 
+    Clustering uses DINOv2 features. VAE latents are not needed (Stage 4 uses text2img).
+
     Args:
-        encode_dir: Directory containing Stage 3A encode outputs (latents.pt, text_embeds.pt, etc.).
+        encode_dir: Directory containing Stage 3A encode outputs (text_embeds.pt, dino_embeds.pt, etc.).
         output_dir: Directory for Stage 3 mode outputs.
         ipc: Images per class — number of clusters per class.
         seed: Random seed.
@@ -500,8 +460,6 @@ def run_stage3_clustering(
         min_cluster_size: HDBSCAN min_cluster_size parameter.
         min_samples: HDBSCAN min_samples parameter (core point neighborhood density).
         pca_dim: PCA dimensions for HDBSCAN pre-processing (0 to skip PCA).
-        cluster_space: "vae" uses flattened VAE latents for clustering (baseline).
-            "dino" uses DINOv2 CLS features (768-dim, better mode separation).
 
     Returns:
         Stage3Result with paths to mode tensors and metadata.
@@ -512,26 +470,17 @@ def run_stage3_clustering(
 
     # Load encoded tensors
     print("[Stage 3] Loading encoded tensors...")
-    latents = torch.load(encode_dir / "latents.pt", weights_only=True)
     text_embeds = torch.load(encode_dir / "text_embeds.pt", weights_only=True)
     pooled_embeds = torch.load(encode_dir / "pooled_embeds.pt", weights_only=True)
 
-    # Load DINOv2 features if available and requested
-    dino_embeds = None
-    dino_path = encode_dir / "dino_embeds.pt"
-    if cluster_space == "dino":
-        if dino_path.exists():
-            dino_embeds = torch.load(dino_path, weights_only=True)
-            print(f"[Stage 3] Loaded DINOv2 features: {list(dino_embeds.shape)}")
-        else:
-            print("[Stage 3] WARNING: dino_embeds.pt not found, falling back to VAE latents")
-            cluster_space = "vae"
+    dino_embeds = torch.load(encode_dir / "dino_embeds.pt", weights_only=True)
+    print(f"[Stage 3] Loaded DINOv2 features: {list(dino_embeds.shape)}")
 
     with open(encode_dir / "encode_index.json", encoding="utf-8") as f:
         encode_index = json.load(f)
     samples = encode_index["samples"]
 
-    print(f"[Stage 3] Loaded {len(samples)} samples, latents {list(latents.shape)}")
+    print(f"[Stage 3] Loaded {len(samples)} samples, DINOv2 {list(dino_embeds.shape)}")
 
     # Group samples by class
     class_groups: dict[str, list[int]] = {}
@@ -554,9 +503,9 @@ def run_stage3_clustering(
         class_name = samples[indices[0]]["class_name"]
         print(f"[Stage 3] Clustering class '{class_name}' ({len(indices)} samples, method={method})...")
 
-        class_result, vis_modes, sem_modes, pool_modes = cluster_class(
+        class_result, sem_modes, pool_modes = cluster_class(
             class_indices=indices,
-            latents=latents,
+            dino_embeds=dino_embeds,
             text_embeds=text_embeds,
             pooled_embeds=pooled_embeds,
             samples=samples,
@@ -566,8 +515,6 @@ def run_stage3_clustering(
             min_cluster_size=min_cluster_size,
             min_samples=min_samples,
             pca_dim=pca_dim,
-            dino_embeds=dino_embeds,
-            cluster_space=cluster_space,
         )
 
         # Assign global mode indices
@@ -576,28 +523,23 @@ def run_stage3_clustering(
             global_mode_index += 1
 
         all_class_results.append(class_result)
-        if vis_modes.numel() > 0:
-            all_visual_modes.append(vis_modes)
+        if sem_modes.numel() > 0:
             all_semantic_modes.append(sem_modes)
             all_pooled_modes.append(pool_modes)
 
     # Stack all modes
-    total_visual_modes = torch.cat(all_visual_modes, dim=0) if all_visual_modes else torch.empty(0)
     total_semantic_modes = torch.cat(all_semantic_modes, dim=0) if all_semantic_modes else torch.empty(0)
     total_pooled_modes = torch.cat(all_pooled_modes, dim=0) if all_pooled_modes else torch.empty(0)
 
-    total_modes = total_visual_modes.shape[0]
+    total_modes = total_semantic_modes.shape[0]
     print(f"[Stage 3] Total modes: {total_modes}")
-    print(f"[Stage 3] Visual modes shape: {list(total_visual_modes.shape)}")
     print(f"[Stage 3] Semantic modes shape: {list(total_semantic_modes.shape)}")
 
     # Save mode tensors
-    visual_modes_path = output_dir / "visual_modes.pt"
     semantic_modes_path = output_dir / "semantic_modes.pt"
     pooled_modes_path = output_dir / "pooled_modes.pt"
     modes_index_path = output_dir / "modes_index.json"
 
-    torch.save(total_visual_modes, visual_modes_path)
     torch.save(total_semantic_modes, semantic_modes_path)
     torch.save(total_pooled_modes, pooled_modes_path)
 
@@ -622,10 +564,9 @@ def run_stage3_clustering(
         "ipc": ipc,
         "seed": seed,
         "cluster_method": method,
-        "cluster_space": cluster_space,
+        "cluster_space": "dino",
         "num_classes": len(all_class_results),
         "total_modes": total_modes,
-        "visual_modes_shape": list(total_visual_modes.shape),
         "semantic_modes_shape": list(total_semantic_modes.shape),
         "pooled_modes_shape": list(total_pooled_modes.shape),
         "encode_dir": str(encode_dir.resolve()),
@@ -653,7 +594,6 @@ def run_stage3_clustering(
         num_classes=len(all_class_results),
         total_modes=total_modes,
         class_results=all_class_results,
-        visual_modes_path=str(visual_modes_path),
         semantic_modes_path=str(semantic_modes_path),
         pooled_modes_path=str(pooled_modes_path),
         modes_index_path=str(modes_index_path),
