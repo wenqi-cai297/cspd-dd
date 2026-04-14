@@ -1150,12 +1150,20 @@ Given current repo state (as of 2026-04-14):
 - **DINO K-Means**: uneven cluster sizes reflecting real density variation (max/min ratio 2.4x-9.0x)
 - **DINO HDBSCAN** (min_cluster_size=15, min_samples=3, pca_dim=50): 9/10 classes discovered modes independently (only chain saw fell back). But gas pump had a 2-member micro-cluster — min_samples=3 too low.
 
-### Stage 4 generation arc (2026-04-13 → 2026-04-14)
+### Stage 4 generation arc (2026-04-13 → 2026-04-15)
 - **img2img + mean embedding**: all-black images (custom denoising loop incompatible with SDXL scheduler)
 - **img2img + official pipeline + mean embedding**: blurry/gray (averaged embedding doesn't correspond to real caption)
 - **img2img + representative caption**: better quality, but Stage 2 vs Stage 4 output mismatch (different generator device, call signature)
-- **text2img + representative caption** (current recommended): matches Stage 2 inference quality exactly
+- **text2img + representative caption**: matches Stage 2 inference quality exactly
 - **text2img at 1024 + guidance 9.0**: sharper, but human anatomy artifacts on "being held" captions; resolution mismatch with 512-trained LoRA
+- **img2img from medoid (strength=0.8)**: more diverse images but eval accuracy significantly worse than text2img
+- **Conclusion**: text2img > img2img for classifier training; K-Means > HDBSCAN for mode selection
+
+### Current best configuration (as of 2026-04-15)
+- **Stage 2**: rank=64, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, **epoch 9 (checkpoint-7254)**
+- **Stage 3**: DINO K-Means, cluster_space=dino, IPC=10
+- **Stage 4**: text2img (visual_mode=none), resolution=512, guidance=7.5, steps=50
+- **Key insight**: text2img produces more "prototypical" class representations that train classifiers better, even though images look more homogeneous to the human eye. Img2img from medoid introduces specific-photograph noise that hurts generalization.
 
 ### Server environment
 - Path: `/media/4T_HDD/cai/cspd-dd/cspd-dd`
