@@ -257,8 +257,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument('--sdxl-num-processes', type=int, default=None, help='Optional accelerate --num_processes override for the official SDXL launch path')
     train_parser.add_argument('--sdxl-accelerate-extra-arg', action='append', dest='sdxl_accelerate_extra_args', default=None, help='Extra argument forwarded to accelerate launch for the SDXL official path; may be repeated')
     train_parser.add_argument('--sdxl-mixed-precision', default='fp16', help='mixed_precision value for the official diffusers SDXL launch path')
-    train_parser.add_argument('--sdxl-lr-scheduler', default='constant', help='Learning-rate scheduler forwarded to the official diffusers SDXL script')
-    train_parser.add_argument('--sdxl-lr-warmup-steps', type=int, default=0, help='Warmup steps forwarded to the official diffusers SDXL script')
+    train_parser.add_argument('--sdxl-lr-scheduler', default='cosine', help='Learning-rate scheduler forwarded to the official diffusers SDXL script')
+    train_parser.add_argument('--sdxl-lr-warmup-steps', type=int, default=500, help='Warmup steps forwarded to the official diffusers SDXL script')
     train_parser.add_argument('--sdxl-validation-epochs', type=int, default=1, help='validation_epochs forwarded to the official diffusers SDXL script')
     train_parser.add_argument('--sdxl-validation-prompt', default=None, help='Optional validation prompt forwarded to the official diffusers SDXL script')
     train_parser.add_argument('--sdxl-report-to', default='none', help='report_to backend for the official diffusers SDXL script, e.g. none or wandb')
@@ -267,7 +267,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument('--sdxl-disable-gradient-checkpointing', action='store_true', help='Disable --gradient_checkpointing on the official diffusers SDXL script path')
     train_parser.add_argument('--sdxl-train-text-encoder', action='store_true', help='Forward --train_text_encoder to the official diffusers SDXL script')
     train_parser.add_argument('--sdxl-caption-dropout-probability', type=float, default=None, help='Optional caption dropout probability forwarded to the official diffusers SDXL script')
-    train_parser.add_argument('--sdxl-noise-offset', type=float, default=None, help='Optional noise offset forwarded to the official diffusers SDXL script')
+    train_parser.add_argument('--sdxl-noise-offset', type=float, default=0.05, help='Noise offset for improved contrast/brightness range (default 0.05)')
+    train_parser.add_argument('--sdxl-snr-gamma', type=float, default=5.0, help='Min-SNR gamma for balanced timestep loss weighting (default 5.0, None to disable)')
     train_parser.add_argument('--sdxl-extra-arg', action='append', dest='sdxl_extra_args', default=None, help='Extra raw argument appended to the official diffusers SDXL script command; may be repeated')
 
 
@@ -550,6 +551,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         sdxl_train_text_encoder=args.sdxl_train_text_encoder,
         sdxl_caption_dropout_probability=args.sdxl_caption_dropout_probability,
         sdxl_noise_offset=args.sdxl_noise_offset,
+        sdxl_snr_gamma=args.sdxl_snr_gamma,
         sdxl_extra_args=args.sdxl_extra_args or [],
     )
     config.adapter_plan.target_module_patterns = (

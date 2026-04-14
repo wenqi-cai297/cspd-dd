@@ -249,6 +249,8 @@ def _build_sdxl_official_command(*, config: Any, script_path: str, materialized:
         command.extend(['--caption_dropout_probability', str(float(getattr(config, 'sdxl_caption_dropout_probability')))])
     if getattr(config, 'sdxl_noise_offset', None) is not None:
         command.extend(['--noise_offset', str(float(getattr(config, 'sdxl_noise_offset')))])
+    if getattr(config, 'sdxl_snr_gamma', None) is not None:
+        command.extend(['--snr_gamma', str(float(getattr(config, 'sdxl_snr_gamma')))])
     validation_prompt = str(getattr(config, 'sdxl_validation_prompt', '') or '').strip()
     if validation_prompt:
         command.extend(['--validation_prompt', validation_prompt])

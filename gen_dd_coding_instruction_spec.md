@@ -782,7 +782,9 @@ Stage 2 SDXL delegates training to the **official diffusers `train_text_to_image
 - GPUs: **2** (default `--sdxl-num-processes 2`)
 - mixed precision: fp16
 - gradient checkpointing: enabled
-- lr: 2e-5, scheduler: constant, no warmup
+- lr: 2e-5, scheduler: **cosine**, warmup: **500 steps**
+- noise offset: **0.05** (improves contrast/brightness range)
+- Min-SNR gamma: **5.0** (balances loss weighting across timesteps)
 - VAE + text encoders: frozen
 - `--report_to` is omitted (not `"none"`) to avoid accelerate tracker init errors
 

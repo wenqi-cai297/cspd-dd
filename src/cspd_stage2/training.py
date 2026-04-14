@@ -158,8 +158,8 @@ class Stage2TrainConfig:
     sdxl_num_processes: int | None = None
     sdxl_accelerate_extra_args: list[str] = field(default_factory=list)
     sdxl_mixed_precision: str = "fp16"
-    sdxl_lr_scheduler: str = "constant"
-    sdxl_lr_warmup_steps: int = 0
+    sdxl_lr_scheduler: str = "cosine"
+    sdxl_lr_warmup_steps: int = 500
     sdxl_validation_epochs: int = 1
     sdxl_validation_prompt: str | None = None
     sdxl_report_to: str = "none"
@@ -168,7 +168,8 @@ class Stage2TrainConfig:
     sdxl_gradient_checkpointing: bool = True
     sdxl_train_text_encoder: bool = False
     sdxl_caption_dropout_probability: float | None = None
-    sdxl_noise_offset: float | None = None
+    sdxl_noise_offset: float | None = 0.05
+    sdxl_snr_gamma: float | None = 5.0
     sdxl_extra_args: list[str] = field(default_factory=list)
 
 
