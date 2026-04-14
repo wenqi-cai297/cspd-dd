@@ -17,7 +17,7 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
-for IPC in 20 50; do
+for IPC in 10 20 50; do
   echo ""
   echo "############################################################"
   echo "# IPC=$IPC"
