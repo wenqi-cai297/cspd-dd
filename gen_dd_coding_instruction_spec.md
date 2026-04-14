@@ -1164,6 +1164,7 @@ Given current repo state (as of 2026-04-14):
 - **Stage 3**: DINO K-Means, cluster_space=dino, IPC=10
 - **Stage 4**: text2img (visual_mode=none), resolution=512, guidance=7.5, steps=50
 - **Key insight**: text2img produces more "prototypical" class representations that train classifiers better, even though images look more homogeneous to the human eye. Img2img from medoid introduces specific-photograph noise that hurts generalization.
+- **Eval fix (2026-04-15)**: train transform order and augmentation implementations aligned with mode_guidance exactly (RRC → ToTensor → HFlip → custom ColorJitter on tensor → Lighting → Normalize). Previous version used torchvision ColorJitter on PIL and had Lighting after Normalize.
 
 ### Server environment
 - Path: `/media/4T_HDD/cai/cspd-dd/cspd-dd`

@@ -37,6 +37,7 @@ from cspd_eval.train_utils import (
     random_indices,
     rand_bbox,
     Lighting,
+    ColorJitter,
 )
 
 # ImageNet normalization constants
@@ -108,14 +109,18 @@ def build_model(arch: str, nclass: int, size: int = 224, nch: int = 3) -> nn.Mod
 
 
 def build_train_transform(size: int) -> transforms.Compose:
-    """ImageNet train transform with RRC + augmentation (matching mode_guidance)."""
+    """ImageNet train transform with RRC + augmentation (matching mode_guidance).
+
+    Order matches mode_guidance exactly:
+      RRC → ToTensor → HFlip → ColorJitter(custom, tensor-space) → Lighting → Normalize
+    """
     return transforms.Compose([
         transforms.RandomResizedCrop(size, scale=(0.5, 1.0)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
         transforms.ToTensor(),
-        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        transforms.RandomHorizontalFlip(),
+        ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
         Lighting(0.1, IMAGENET_PCA_EIGVAL, IMAGENET_PCA_EIGVEC),
+        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
     ])
 
 
