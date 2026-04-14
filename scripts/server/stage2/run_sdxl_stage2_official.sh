@@ -118,7 +118,6 @@ CMD=(
   --epochs "$EPOCHS"
   --resolution 512
   --sdxl-mixed-precision fp16
-  --sdxl-lr-scheduler constant
   --sdxl-report-to none
 )
 
