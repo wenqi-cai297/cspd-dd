@@ -298,14 +298,15 @@ def generate_distilled_dataset(
                 for i, t in enumerate(timesteps):
                     latent_model_input = torch.cat([latents] * 2)
                     latent_model_input = pipe.scheduler.scale_model_input(latent_model_input, t)
+                    latent_model_input = latent_model_input.to(dtype=torch_dtype)
 
                     added_cond_kwargs = {
-                        "text_embeds": pooled_prompt_embeds,
-                        "time_ids": add_time_ids,
+                        "text_embeds": pooled_prompt_embeds.to(dtype=torch_dtype),
+                        "time_ids": add_time_ids.to(dtype=torch_dtype),
                     }
                     noise_pred = pipe.unet(
                         latent_model_input, t,
-                        encoder_hidden_states=prompt_embeds,
+                        encoder_hidden_states=prompt_embeds.to(dtype=torch_dtype),
                         added_cond_kwargs=added_cond_kwargs,
                         return_dict=False,
                     )[0]
