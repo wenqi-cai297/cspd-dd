@@ -26,4 +26,5 @@ dependencies:
       - safetensors
       - scikit-learn
       - hdbscan
+      - qwen-vl-utils
       - -e .

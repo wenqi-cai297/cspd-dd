@@ -134,13 +134,10 @@ Right now, the repo is best understood as:
 
 ### Data / analysis scripts
 - `scripts/data/convert_class_py_to_json.py`
-- `scripts/data/generate_class_to_archetype_map.py`
 - `scripts/data/generate_class_to_archetype_map_vlm.py`
-- `scripts/data/generate_archetype_taxonomy_candidate_vlm.py`
 - `scripts/data/analyze_attribute_values.py`
 - `scripts/data/normalize_stage1_attributes.py`
 - `scripts/data/review_normalization_with_vlm.py` (kept as the original prototype / reference path)
-- `scripts/data/make_imagefolder_subset.py`
 
 ### VLM sanity / smoke test helpers
 - `scripts/vlm/test_qwen_vl_load.py`
@@ -169,6 +166,8 @@ Right now, the repo is best understood as:
 - `scripts/server/stage3/run_stage3_pipeline.sh` — Stage 3 encode + cluster
 - `scripts/server/stage4/run_stage4_pipeline.sh` — Stage 4 generate distilled dataset
 - `scripts/server/eval/run_eval_pipeline.sh` — train classifier + evaluate
+- `scripts/server/run_full_pipeline.sh` — end-to-end pipeline with resume support (Stage 1→2→3→4→Eval)
+- `scripts/server/run_ipc_sweep.sh` — IPC sweep for Stage 3+4+Eval
 
 ### Stage 2 output-dir rule (must remember)
 - The repo-standard Stage 2 run root is:

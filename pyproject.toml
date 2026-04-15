@@ -24,6 +24,7 @@ dependencies = [
   "safetensors",
   "scikit-learn",
   "hdbscan",
+  "qwen-vl-utils",
 ]
 
 [project.optional-dependencies]
