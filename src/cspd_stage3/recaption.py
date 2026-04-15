@@ -16,12 +16,17 @@ from pathlib import Path
 from cspd_stage1.io_utils import write_json
 
 
-RECAPTION_PROMPT = (
-    "Describe this image in one detailed sentence. "
-    "Include: the main subject, its appearance (color, texture, shape), "
-    "what it is doing or its state, the background/environment, "
-    "and the camera angle. Be specific and descriptive."
-)
+def _build_recaption_prompt(class_name: str, archetype: str, original_caption: str) -> str:
+    """Build a grounded recaption prompt using known attributes from Stage 1."""
+    return (
+        f"This image shows a {class_name} (category: {archetype}).\n"
+        f"A template description is: \"{original_caption}\"\n\n"
+        f"Based on what you see in the image, write a single detailed sentence "
+        f"describing this {class_name}. Keep the class name \"{class_name}\" as the subject. "
+        f"Add specific visual details the template misses: lighting, texture, composition, "
+        f"surrounding objects, spatial relationships, and atmosphere. "
+        f"Be concrete and specific to THIS particular image, not generic."
+    )
 
 
 def recaption_modes(
@@ -67,16 +72,16 @@ def recaption_modes(
             record_to_path[rid] = s.get("image_path", "")
 
     # Collect medoid images to re-caption
-    medoid_images: list[tuple[int, str, str]] = []  # (mode_idx, image_path, record_id)
+    medoid_items: list[tuple[int, str, dict]] = []  # (mode_idx, image_path, mode_meta)
     for i, mode in enumerate(modes_list):
         record_id = mode.get("medoid_record_id", mode.get("visual_medoid_record_id", ""))
         image_path = record_to_path.get(record_id, "")
         if image_path and Path(image_path).exists():
-            medoid_images.append((i, image_path, record_id))
+            medoid_items.append((i, image_path, mode))
         else:
             print(f"[Recaption] WARNING: Image not found for mode {i} ({record_id})")
 
-    print(f"[Recaption] Re-captioning {len(medoid_images)} medoid images with {model_name}...")
+    print(f"[Recaption] Re-captioning {len(medoid_items)} medoid images with {model_name}...")
 
     # Load VLM
     import torch
@@ -90,13 +95,19 @@ def recaption_modes(
 
     # Re-caption each medoid
     from tqdm.auto import tqdm
-    for mode_idx, image_path, record_id in tqdm(medoid_images, desc="Recaptioning"):
+    for mode_idx, image_path, mode_meta in tqdm(medoid_items, desc="Recaptioning"):
+        class_name = mode_meta.get("class_name", "object")
+        archetype = mode_meta.get("archetype", "")
+        original_caption = mode_meta.get("representative_caption", "")
+
+        prompt = _build_recaption_prompt(class_name, archetype, original_caption)
+
         messages = [
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": f"file://{image_path}"},
-                    {"type": "text", "text": RECAPTION_PROMPT},
+                    {"type": "text", "text": prompt},
                 ],
             }
         ]
@@ -127,5 +138,5 @@ def recaption_modes(
 
     # Save updated modes_index.json
     write_json(modes_index_path, modes_index)
-    print(f"[Recaption] Updated {len(medoid_images)} captions in {modes_index_path}")
+    print(f"[Recaption] Updated {len(medoid_items)} captions in {modes_index_path}")
     print(f"[Recaption] Original captions preserved in 'original_caption' field")
