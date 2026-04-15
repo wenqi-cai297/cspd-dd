@@ -519,15 +519,14 @@ def run_stage3_clustering(
 
     print(f"[Stage 3] Found {len(class_groups)} classes, IPC={ipc}, method={method}")
 
-    # Cluster each class
+    # Cluster each class (DINOv2 for caption selection)
     all_class_results = []
-    all_vae_centroids = []
 
     for class_raw, indices in sorted(class_groups.items()):
         class_name = samples[indices[0]]["class_name"]
         print(f"[Stage 3] Clustering class '{class_name}' ({len(indices)} samples, method={method})...")
 
-        class_result, vae_cents = cluster_class(
+        class_result, _ = cluster_class(
             class_indices=indices,
             dino_embeds=dino_embeds,
             samples=samples,
@@ -537,24 +536,39 @@ def run_stage3_clustering(
             min_cluster_size=min_cluster_size,
             min_samples=min_samples,
             pca_dim=pca_dim,
-            vae_latents=vae_latents,
+            vae_latents=None,  # Don't compute VAE centroids from DINOv2 clusters
         )
 
         all_class_results.append(class_result)
-        if vae_cents is not None:
-            all_vae_centroids.extend(vae_cents)
 
     total_modes = sum(cr.num_clusters for cr in all_class_results)
     print(f"[Stage 3] Total modes: {total_modes}")
 
-    # Save VAE mode centroids if available
+    # Compute VAE-native mode centroids via separate K-Means in VAE space
+    # This ensures centroids are maximally separated in the space where
+    # mode guidance operates (unlike DINOv2-derived VAE means which cluster together)
     mode_centroids_path = None
-    if all_vae_centroids:
+    if vae_latents is not None:
+        print(f"[Stage 3] Computing VAE-native mode centroids (K-Means in VAE space, K={ipc})...")
+        all_vae_centroids = []
+        for class_raw, indices in sorted(class_groups.items()):
+            class_vae = vae_latents[indices]
+            n_samples = len(indices)
+            n_clusters = min(ipc, n_samples)
+            # Flatten for K-Means: (N, 4, H, W) → (N, 4*H*W)
+            flat_vae = class_vae.reshape(n_samples, -1).numpy()
+            km = KMeans(n_clusters=n_clusters, random_state=seed, n_init=10)
+            km.fit(flat_vae)
+            # Reshape centroids back: (K, 4*H*W) → (K, 4, H, W)
+            latent_shape = class_vae.shape[1:]  # (4, H, W)
+            for center in km.cluster_centers_:
+                all_vae_centroids.append(torch.from_numpy(center).reshape(latent_shape).float())
+
         centroids_tensor = torch.stack(all_vae_centroids)  # (total_modes, 4, H, W)
         centroids_file = output_dir / "mode_centroids.pt"
         torch.save(centroids_tensor, centroids_file)
         mode_centroids_path = str(centroids_file)
-        print(f"[Stage 3] Saved {centroids_tensor.shape[0]} VAE mode centroids: {list(centroids_tensor.shape)}")
+        print(f"[Stage 3] Saved {centroids_tensor.shape[0]} VAE-native centroids: {list(centroids_tensor.shape)}")
 
     # Save modes index
     modes_index_path = output_dir / "modes_index.json"
