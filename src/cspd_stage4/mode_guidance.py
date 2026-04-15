@@ -35,27 +35,31 @@ def apply_mode_guidance(
 ) -> torch.Tensor:
     """Apply mode guidance to latents during one denoising step.
 
+    Implements MGD³ (ICML 2025) guidance formula:
+        guidance = -(pred_x0 - centroid) * scale * sigma
+    Applied during the first `stop_timestep` steps (high-noise, coarse structure).
+
     Args:
         latents: Current noisy latents (B, C, H, W).
         pred_original_sample: Model's prediction of clean x0 (B, C, H, W).
         mode_centroid: Target VAE latent centroid (1, C, H, W) or (C, H, W).
         sigma: Current noise level (sigma_t from scheduler).
-        mode_guidance_scale: Guidance strength (default 0.1 in MGD³).
-        timestep: Current timestep.
-        stop_timestep: Stop guidance below this timestep to avoid over-conditioning.
+        mode_guidance_scale: Guidance strength (0.1 = MGD³ default).
+        timestep: Current step index (0 = first step).
+        stop_timestep: Apply guidance only for steps 0..stop_timestep-1 (MGD³ default: 25 of 50 = 50%).
 
     Returns:
         Adjusted latents with mode guidance applied.
     """
-    if timestep <= stop_timestep:
+    # Guidance already checked by caller (timestep < stop_timestep), but double-check
+    if timestep >= stop_timestep:
         return latents
 
     # Ensure centroid has batch dimension
     if mode_centroid.dim() == 3:
         mode_centroid = mode_centroid.unsqueeze(0)
 
-    # Match shapes: centroid might be (1, 4, 64, 64) but latents could be different size
-    # If resolution mismatch, interpolate centroid
+    # Match spatial shapes if needed (e.g., centroid encoded at different resolution)
     if mode_centroid.shape[-2:] != pred_original_sample.shape[-2:]:
         mode_centroid = torch.nn.functional.interpolate(
             mode_centroid.float(),
@@ -67,6 +71,7 @@ def apply_mode_guidance(
     mode_centroid = mode_centroid.to(device=latents.device, dtype=latents.dtype)
 
     # MGD³ formula: guidance = -(pred_x0 - centroid) * scale * sigma
+    # sigma decays with the noise schedule: strong guidance early, weak late
     guidance = -(pred_original_sample - mode_centroid) * mode_guidance_scale * sigma
 
     return latents + guidance

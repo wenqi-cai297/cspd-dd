@@ -34,9 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     gen_parser.add_argument("--strength", type=float, default=0.8,
                             help="Img2img denoising strength (0-1). Ignored when visual-mode=none.")
     gen_parser.add_argument("--mode-guidance-scale", type=float, default=0.0,
-                            help="Mode guidance strength (0=disabled). Steers generation toward VAE latent centroids for visual diversity.")
-    gen_parser.add_argument("--mode-guidance-stop-step", type=int, default=5,
-                            help="Stop mode guidance below this step (from end) to avoid over-conditioning fine details.")
+                            help="Mode guidance strength (0=disabled, 0.1=MGD3 default). Steers generation toward VAE latent centroids.")
+    gen_parser.add_argument("--mode-guidance-stop-step", type=int, default=25,
+                            help="Stop mode guidance after this many steps (from start). Default 25 = 50%% of 50 steps, matching MGD3.")
 
     return parser
 

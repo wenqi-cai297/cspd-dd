@@ -171,7 +171,7 @@ def generate_distilled_dataset(
     refiner_model: str | None = None,
     refiner_strength: float = 0.3,
     mode_guidance_scale: float = 0.0,
-    mode_guidance_stop_step: int = 5,
+    mode_guidance_stop_step: int = 25,
 ) -> GenerateResult:
     """Generate the distilled dataset using dual-anchor conditioning.
 
@@ -312,18 +312,17 @@ def generate_distilled_dataset(
                     step_output = pipe.scheduler.step(noise_pred, t, latents, return_dict=True)
                     latents = step_output.prev_sample
 
-                    # Apply mode guidance
+                    # Apply mode guidance (first stop_step steps only, matching MGD3)
                     pred_x0 = step_output.pred_original_sample
-                    if pred_x0 is not None:
-                        sigma = pipe.scheduler.sigmas[i] if hasattr(pipe.scheduler, 'sigmas') and i < len(pipe.scheduler.sigmas) else (1.0 - float(t) / 1000.0)
-                        step_from_end = len(timesteps) - 1 - i
+                    if pred_x0 is not None and i < mode_guidance_stop_step:
+                        sigma = pipe.scheduler.sigmas[i].item() if hasattr(pipe.scheduler, 'sigmas') and i < len(pipe.scheduler.sigmas) else 1.0
                         latents = apply_mode_guidance(
                             latents=latents,
                             pred_original_sample=pred_x0,
                             mode_centroid=centroid,
-                            sigma=float(sigma),
+                            sigma=sigma,
                             mode_guidance_scale=mode_guidance_scale,
-                            timestep=step_from_end,
+                            timestep=i,
                             stop_timestep=mode_guidance_stop_step,
                         )
 
