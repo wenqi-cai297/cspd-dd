@@ -85,16 +85,18 @@ class CandidateSelector:
         self.probe = torch.nn.Linear(dim, self.num_classes).to(self.device)
         optimizer = torch.optim.SGD(self.probe.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
 
-        features = features.to(self.device)
+        features = features.to(self.device).detach()
         labels = labels.to(self.device)
 
-        self.probe.train()
-        for _ in range(epochs):
-            logits = self.probe(features)
-            loss = F.cross_entropy(logits, labels)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        # Enable grad temporarily (caller may be in torch.no_grad() context)
+        with torch.enable_grad():
+            self.probe.train()
+            for _ in range(epochs):
+                logits = self.probe(features)
+                loss = F.cross_entropy(logits, labels)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
         self.probe.eval()
         with torch.no_grad():
