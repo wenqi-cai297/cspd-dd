@@ -267,16 +267,22 @@ def generate_distilled_dataset(
 
                 centroid = mode_centroids[mode_idx]
 
-                # Encode prompt
-                prompt_embeds, _, pooled_prompt_embeds, _ = pipe.encode_prompt(
+                # Encode prompt (returns separate cond/uncond tensors)
+                (prompt_embeds, negative_prompt_embeds,
+                 pooled_prompt_embeds, negative_pooled_prompt_embeds) = pipe.encode_prompt(
                     prompt=prompt, device=device,
                     num_images_per_prompt=1, do_classifier_free_guidance=True,
                     negative_prompt="",
                 )
+                # Concatenate for CFG: [uncond, cond]
+                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+                pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
                 # Add SDXL time ids
+                text_encoder_projection_dim = pipe.text_encoder_2.config.projection_dim
                 add_time_ids = pipe._get_add_time_ids(
                     (resolution, resolution), (0, 0), (resolution, resolution),
                     dtype=prompt_embeds.dtype,
+                    text_encoder_projection_dim=text_encoder_projection_dim,
                 )
                 add_time_ids = torch.cat([add_time_ids, add_time_ids], dim=0).to(device)
 
