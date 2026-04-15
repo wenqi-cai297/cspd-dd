@@ -262,30 +262,22 @@ def generate_distilled_dataset(
             generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
 
             if use_mode_guidance:
-                # Use callback_on_step_end to inject mode guidance into the
-                # official pipeline's denoising loop — avoids hand-writing the
-                # loop and all the dtype/scaling issues that come with it.
-                from cspd_stage4.mode_guidance import apply_mode_guidance
+                # Swap scheduler to mode-guided version for this image,
+                # then set the target centroid. The custom scheduler injects
+                # guidance inside step() with access to pred_x0.
+                from cspd_stage4.mode_guidance import EulerModeGuidanceScheduler
 
                 centroid = mode_centroids[mode_idx]
-                _step_counter = [0]  # mutable counter for closure
 
-                def _mode_guidance_callback(pipe_self, step_index, timestep, callback_kwargs):
-                    latents_cb = callback_kwargs["latents"]
-                    if step_index < mode_guidance_stop_step:
-                        # Decay guidance linearly: full strength at step 0, zero at stop_step
-                        decay = 1.0 - step_index / mode_guidance_stop_step
-                        latents_cb = apply_mode_guidance(
-                            latents=latents_cb,
-                            pred_original_sample=latents_cb,
-                            mode_centroid=centroid,
-                            sigma=decay,
-                            mode_guidance_scale=mode_guidance_scale,
-                            timestep=step_index,
-                            stop_timestep=mode_guidance_stop_step,
-                        )
-                    callback_kwargs["latents"] = latents_cb
-                    return callback_kwargs
+                # Replace scheduler (only once, reuse across images)
+                if not isinstance(pipe.scheduler, EulerModeGuidanceScheduler):
+                    pipe.scheduler = EulerModeGuidanceScheduler.from_config(pipe.scheduler.config)
+
+                pipe.scheduler.set_mode_guidance(
+                    centroid=centroid,
+                    scale=mode_guidance_scale,
+                    stop_step=mode_guidance_stop_step,
+                )
 
                 image = pipe(
                     prompt=prompt,
@@ -294,8 +286,6 @@ def generate_distilled_dataset(
                     num_inference_steps=num_inference_steps,
                     guidance_scale=guidance_scale,
                     generator=generator,
-                    callback_on_step_end=_mode_guidance_callback,
-                    callback_on_step_end_tensor_inputs=["latents"],
                 ).images[0]
             else:
                 # Standard text2img without guidance

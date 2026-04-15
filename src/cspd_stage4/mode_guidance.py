@@ -1,77 +1,125 @@
-"""Mode guidance for SDXL denoising — steers generation toward VAE latent centroids.
+"""Mode guidance scheduler for SDXL — steers generation toward VAE latent centroids.
 
-Adapts MGD³ (ICML 2025) mode guidance to the SDXL pipeline. During each denoising
-step, a guidance term pushes the predicted x0 toward the target mode centroid in
-VAE latent space, ensuring each generated image belongs to a distinct visual mode.
+Subclasses EulerDiscreteScheduler to inject mode guidance inside step(),
+exactly matching MGD³ (ICML 2025) but adapted for Euler ODE sampling.
 
-Combined with our structured caption conditioning (from Stage 1), this provides
-dual control: text controls WHAT to generate (semantic attributes), mode guidance
-controls HOW it should look (visual layout/composition).
+MGD³ original (DDPM):
+    guidance = -(pred_x0 - centroid) * scale * sqrt(beta_t)
+    prev_sample = predicted_mean + guidance + noise
 
-The guidance formula per step:
-    guidance = -(pred_x0 - mode_centroid) * mode_guidance_scale * sigma_t
-    latent = latent + guidance
+Ours (Euler):
+    guidance = -(pred_x0 - centroid) * scale * dt_ratio
+    prev_sample = euler_step_result + guidance
 
-Where sigma_t decays with the noise schedule, so guidance is strong in early
-steps (coarse structure) and weak in late steps (fine details).
+dt_ratio normalizes guidance by the step size to keep it scale-invariant
+across different numbers of sampling steps.
 """
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
+from diffusers import EulerDiscreteScheduler
+from diffusers.schedulers.scheduling_euler_discrete import EulerDiscreteSchedulerOutput
 
 
-def apply_mode_guidance(
-    *,
-    latents: torch.Tensor,
-    pred_original_sample: torch.Tensor,
-    mode_centroid: torch.Tensor,
-    sigma: float,
-    mode_guidance_scale: float,
-    timestep: int,
-    stop_timestep: int,
-) -> torch.Tensor:
-    """Apply mode guidance to latents during one denoising step.
+class EulerModeGuidanceScheduler(EulerDiscreteScheduler):
+    """EulerDiscreteScheduler with mode guidance injection in step().
 
-    Implements MGD³ (ICML 2025) guidance formula:
-        guidance = -(pred_x0 - centroid) * scale * sigma
-    Applied during the first `stop_timestep` steps (high-noise, coarse structure).
-
-    Args:
-        latents: Current noisy latents (B, C, H, W).
-        pred_original_sample: Model's prediction of clean x0 (B, C, H, W).
-        mode_centroid: Target VAE latent centroid (1, C, H, W) or (C, H, W).
-        sigma: Current noise level (sigma_t from scheduler).
-        mode_guidance_scale: Guidance strength (0.1 = MGD³ default).
-        timestep: Current step index (0 = first step).
-        stop_timestep: Apply guidance only for steps 0..stop_timestep-1 (MGD³ default: 25 of 50 = 50%).
-
-    Returns:
-        Adjusted latents with mode guidance applied.
+    Usage:
+        scheduler = EulerModeGuidanceScheduler.from_config(pipe.scheduler.config)
+        scheduler.set_mode_guidance(centroid, scale=0.1, stop_step=25)
+        pipe.scheduler = scheduler
     """
-    # Guidance already checked by caller (timestep < stop_timestep), but double-check
-    if timestep >= stop_timestep:
-        return latents
 
-    # Ensure centroid has batch dimension
-    if mode_centroid.dim() == 3:
-        mode_centroid = mode_centroid.unsqueeze(0)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._mode_centroid: torch.Tensor | None = None
+        self._mode_guidance_scale: float = 0.0
+        self._mode_guidance_stop_step: int = 25
 
-    # Match spatial shapes if needed (e.g., centroid encoded at different resolution)
-    if mode_centroid.shape[-2:] != pred_original_sample.shape[-2:]:
-        mode_centroid = torch.nn.functional.interpolate(
-            mode_centroid.float(),
-            size=pred_original_sample.shape[-2:],
-            mode="bilinear",
-            align_corners=False,
-        ).to(pred_original_sample.dtype)
+    def set_mode_guidance(
+        self,
+        centroid: torch.Tensor | None,
+        scale: float = 0.1,
+        stop_step: int = 25,
+    ) -> None:
+        """Set the target mode centroid and guidance parameters.
 
-    mode_centroid = mode_centroid.to(device=latents.device, dtype=latents.dtype)
+        Args:
+            centroid: VAE latent centroid (4, H, W) or (1, 4, H, W). None to disable.
+            scale: Guidance strength (0.1 = MGD³ default).
+            stop_step: Apply guidance for the first N steps only (25 = 50% of 50 steps).
+        """
+        self._mode_centroid = centroid
+        self._mode_guidance_scale = scale
+        self._mode_guidance_stop_step = stop_step
 
-    # MGD³ formula: guidance = -(pred_x0 - centroid) * scale * sigma
-    # sigma decays with the noise schedule: strong guidance early, weak late
-    guidance = -(pred_original_sample - mode_centroid) * mode_guidance_scale * sigma
+    def step(
+        self,
+        model_output: torch.Tensor,
+        timestep: float | torch.Tensor,
+        sample: torch.Tensor,
+        s_churn: float = 0.0,
+        s_tmin: float = 0.0,
+        s_tmax: float = float("inf"),
+        s_noise: float = 1.0,
+        generator: torch.Generator | None = None,
+        return_dict: bool = True,
+    ) -> EulerDiscreteSchedulerOutput | tuple:
+        """Euler step with optional mode guidance injection."""
 
-    return latents + guidance
+        # Run the standard Euler step
+        output = super().step(
+            model_output=model_output,
+            timestep=timestep,
+            sample=sample,
+            s_churn=s_churn,
+            s_tmin=s_tmin,
+            s_tmax=s_tmax,
+            s_noise=s_noise,
+            generator=generator,
+            return_dict=True,
+        )
+
+        prev_sample = output.prev_sample
+        pred_original_sample = output.pred_original_sample
+
+        # Apply mode guidance if active
+        # step_index was already incremented by super().step(), so current step = step_index - 1
+        current_step = self._step_index - 1 if self._step_index is not None else 0
+
+        if (
+            self._mode_centroid is not None
+            and self._mode_guidance_scale > 0
+            and pred_original_sample is not None
+            and current_step < self._mode_guidance_stop_step
+        ):
+            centroid = self._mode_centroid
+            if centroid.dim() == 3:
+                centroid = centroid.unsqueeze(0)
+
+            # Match spatial shape if needed
+            if centroid.shape[-2:] != pred_original_sample.shape[-2:]:
+                centroid = torch.nn.functional.interpolate(
+                    centroid.float(),
+                    size=pred_original_sample.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+
+            centroid = centroid.to(device=prev_sample.device, dtype=prev_sample.dtype)
+            pred_x0 = pred_original_sample.to(prev_sample.dtype)
+
+            # Guidance with linear decay: strong at step 0, zero at stop_step
+            decay = 1.0 - current_step / self._mode_guidance_stop_step
+            guidance = -(pred_x0 - centroid) * self._mode_guidance_scale * decay
+
+            prev_sample = prev_sample + guidance
+
+        if not return_dict:
+            return (prev_sample, pred_original_sample)
+
+        return EulerDiscreteSchedulerOutput(
+            prev_sample=prev_sample,
+            pred_original_sample=pred_original_sample,
+        )
