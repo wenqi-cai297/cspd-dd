@@ -80,10 +80,10 @@ def recaption_modes(
 
     # Load VLM
     import torch
-    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+    from transformers import AutoProcessor, AutoModelForImageTextToText
     from qwen_vl_utils import process_vision_info
 
-    vlm = Qwen2VLForConditionalGeneration.from_pretrained(
+    vlm = AutoModelForImageTextToText.from_pretrained(
         model_name, torch_dtype=torch.float16, device_map=device,
     )
     processor = AutoProcessor.from_pretrained(model_name)
