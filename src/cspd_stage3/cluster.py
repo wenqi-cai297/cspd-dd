@@ -115,6 +115,59 @@ def _extract_modes_from_labels(
     return modes
 
 
+def _caption_token_distance(cap1: str, cap2: str) -> float:
+    """Token-level Jaccard distance between two captions. 1.0 = completely different."""
+    words1 = set(cap1.lower().split())
+    words2 = set(cap2.lower().split())
+    if not words1 or not words2:
+        return 1.0
+    intersection = len(words1 & words2)
+    union = len(words1 | words2)
+    return 1.0 - intersection / union
+
+
+def _diversify_captions(
+    modes: list[ClusterMode],
+    samples: list[dict[str, Any]],
+) -> None:
+    """Replace representative captions with most diverse alternatives from each cluster.
+
+    Greedy selection: process modes in order, for each mode pick the member caption
+    that maximizes minimum token distance from all already-selected captions.
+    The medoid_index/medoid_record_id stay as the visual medoid (DINOv2 centroid);
+    only the representative_caption may change to a different member's caption.
+    """
+    if len(modes) <= 1:
+        return
+
+    selected_captions: list[str] = []
+
+    for mode in modes:
+        member_captions = [
+            (idx, samples[idx]["canonical_caption"])
+            for idx in mode.member_indices
+            if samples[idx].get("canonical_caption")
+        ]
+
+        if not selected_captions:
+            # First mode: keep medoid caption
+            selected_captions.append(mode.representative_caption)
+            continue
+
+        # Find the member caption most different from all already-selected
+        best_caption = mode.representative_caption
+        best_min_dist = -1.0
+
+        for _, caption in member_captions:
+            min_dist = min(_caption_token_distance(caption, sel) for sel in selected_captions)
+            if min_dist > best_min_dist:
+                best_min_dist = min_dist
+                best_caption = caption
+
+        mode.representative_caption = best_caption
+        selected_captions.append(best_caption)
+
+
 def _farthest_point_sampling(points: np.ndarray, n: int) -> list[int]:
     """Greedy farthest-point sampling. Returns indices of n most spread-out points."""
     if n >= len(points):
@@ -211,6 +264,7 @@ def cluster_class_kmeans(
         samples=samples,
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
     )
+    _diversify_captions(modes, samples)
 
     return ClassClusterResult(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
@@ -347,6 +401,7 @@ def cluster_class_hdbscan(
         samples=samples,
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
     )
+    _diversify_captions(modes, samples)
 
     return ClassClusterResult(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,

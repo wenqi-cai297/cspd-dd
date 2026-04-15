@@ -103,9 +103,10 @@ Right now, the repo is best understood as:
 
 - `src/cspd_stage3/`
   - `__init__.py`
-  - `encode.py` — VAE latent + text embedding + DINOv2 feature encoding (Stage 3A)
-  - `cluster.py` — per-class clustering (K-Means or HDBSCAN) + visual/semantic mode extraction (Stage 3B+3C)
-  - `cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
+  - `encode.py` — DINOv2 feature encoding (Stage 3A)
+  - `cluster.py` — per-class clustering (K-Means or HDBSCAN) + mode extraction with caption diversity (Stage 3B+3C)
+  - `recaption.py` — VLM re-captioning of medoid images for richer descriptions (Stage 3D)
+  - `cli.py` — CLI with `encode`, `cluster`, `recaption`, and `run` subcommands
 
 - `src/cspd_stage4/`
   - `__init__.py`

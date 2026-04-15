@@ -57,6 +57,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--min-samples", type=int, default=3, help="HDBSCAN min_samples: core point neighborhood density (ignored for kmeans)")
     run_parser.add_argument("--pca-dim", type=int, default=50, help="PCA dimensions for HDBSCAN pre-processing (ignored for kmeans)")
 
+    # --- recaption ---
+    recaption_parser = subparsers.add_parser(
+        "recaption",
+        help="Re-caption medoid images with VLM for richer descriptions (Stage 3D)",
+    )
+    recaption_parser.add_argument("--modes-dir", required=True, help="Directory with modes_index.json")
+    recaption_parser.add_argument("--encode-dir", required=True, help="Directory with encode_index.json (for image paths)")
+    recaption_parser.add_argument("--model-name", default="Qwen/Qwen2.5-VL-7B-Instruct", help="VLM model name")
+    recaption_parser.add_argument("--device", default="cuda", help="Torch device")
+    recaption_parser.add_argument("--max-new-tokens", type=int, default=150, help="Max tokens for VLM generation")
+
     return parser
 
 
@@ -142,6 +153,17 @@ def main() -> None:
               f"({cluster_result.num_classes} classes × IPC={args.ipc})")
         print(f"[Stage 3] Modes index: {cluster_result.modes_index_path}")
         print("=" * 60)
+
+    elif args.command == "recaption":
+        from cspd_stage3.recaption import recaption_modes
+
+        recaption_modes(
+            modes_dir=args.modes_dir,
+            encode_dir=args.encode_dir,
+            model_name=args.model_name,
+            device=args.device,
+            max_new_tokens=args.max_new_tokens,
+        )
 
     else:
         parser.print_help()
