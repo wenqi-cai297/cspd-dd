@@ -1123,8 +1123,8 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 3. img2img + representative caption → quality OK but Stage 2 vs 4 mismatch
 4. text2img + representative caption → matches Stage 2 inference, best eval accuracy
 5. img2img from medoid + representative caption → more diverse but eval accuracy significantly worse
-6. text2img + caption diversity selection → improved diversity
-7. **text2img + caption diversity + mode guidance** → structured caption controls semantics, VAE centroid guidance controls visual diversity (novel combination)
+6. **text2img + caption diversity selection** → current best approach
+7. text2img + mode guidance (MGD³-style) → failed: detailed captions dominate, guidance either has no effect (low scale) or destroys image quality (high scale), no usable sweet spot
 
 ---
 
@@ -1154,31 +1154,38 @@ VLM review is no longer limited to `review_required` slots. It also triggers `re
 ### 16.6 Do not pass --report_to none to the official SDXL script
 Latest accelerate rejects `"none"` as an unsupported tracker. The repo already handles this by omitting `--report_to` when the value is `"none"`.
 
-### 16.7 Stage 2 best known config is rank=64, epoch=15
-From checkpoint comparison on ImageNette. The checkpoint at step 12090 (epoch 15 of 20) gives the best quality/overfitting tradeoff.
+### 16.7 Stage 2 best known config is rank=64, epoch=9
+From checkpoint comparison on ImageNette with cosine LR. The checkpoint at step 7254 (epoch 9 of 15) gives the best quality. Cosine LR peaks earlier than constant LR.
+
+### 16.10 Mode guidance (MGD³-style) is incompatible with detailed captions
+Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditioning is weak (class name only) but fails with our detailed structured captions. With strong text conditioning (CFG=7.5 + detailed caption), the UNet locks onto the caption's content. Mode guidance either has no effect (scale ≤ 0.1) or destroys image quality (scale ≥ 0.2). There is no sweet spot. The fundamental issue: text conditioning and latent guidance compete for control over the same features. MGD³ works because its text is weak ("tench"), leaving room for guidance. Our text is strong ("a brown speckled long and flat body tench being held in riverbank..."), leaving no room.
 
 ---
 
 ## 17. Immediate next implementation work
 
-Given current repo state (as of 2026-04-15):
+Given current repo state (as of 2026-04-16):
 
-1. **Evaluate Stage 1D caption enrichment end-to-end**
-   - Run Stage 1D enrich on ImageNette → retrain Stage 2 LoRA on enriched captions → Stage 3→4→Eval
-   - Compare vs template-only captions to measure accuracy impact
-   - This tests whether richer captions improve downstream generation diversity AND classifier accuracy
+1. **Wait for Stage 1D caption enrichment results**
+   - Stage 1D enrich is running on ImageNette (13K images × VLM)
+   - Need to retrain Stage 2 LoRA on enriched captions → Stage 3→4→Eval
+   - This tests whether richer captions improve downstream accuracy when LoRA trains on them
 
-2. **IPC sweep with caption diversity**
-   - Run Stage 3+4+Eval for IPC=10,20,50 with the caption diversity selection (already implemented)
+2. **IPC sweep**
+   - Run Stage 3+4+Eval for IPC=10,20,50 with caption diversity selection
    - Compare accuracy across IPC values
 
-3. **ImageNet-1k full pipeline**
-   - Stage 1 full run on ImageNet-1k is in progress on server
-   - Once complete: Stage 1D (optional) → Stage 2 → Stage 3 → Stage 4 → Eval on full 1000 classes
+3. **Find alternative diversity mechanism**
+   - Mode guidance (MGD³-style latent centroid steering) failed with detailed captions
+   - Options to explore: per-mode multi-seed generation + selection, lower CFG + guidance, compositional slot mixing
+   - Or accept that our method's diversity comes from caption diversity, not generation-time guidance
+
+4. **ImageNet-1k full pipeline**
+   - Stage 1 full run on ImageNet-1k in progress
    - Use `scripts/server/run_full_pipeline.sh` for end-to-end execution with resume
 
-4. **Evaluation benchmarking**
-   - Compare against baselines (random selection, SRe2L, etc.)
+5. **Evaluation benchmarking**
+   - Compare against baselines (random selection, SRe2L, RDED, etc.)
    - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10)
    - Report mean ± std across 3 repeats
 
@@ -1218,12 +1225,29 @@ Given current repo state (as of 2026-04-15):
 - **Conclusion**: text2img > img2img for classifier training; K-Means > HDBSCAN for mode selection
 - **Stage 3 recaption experiment**: VLM re-captioned medoid images with free-form descriptions → accuracy dropped from ~62% to ~57%. Cause: enriched captions are OOD for the LoRA trained on template captions. Fix: enrich at Stage 1 level so LoRA trains on enriched captions (Stage 1D).
 
-### Current best configuration (as of 2026-04-15)
+### Stage 2 cosine LR training arc (2026-04-14 → 2026-04-15)
+- Added cosine LR, warmup=500, noise_offset=0.05, snr_gamma=5.0
+- Epoch sweep (5-15): **epoch 9 is best** with cosine LR (peaks earlier than constant LR's epoch 15)
+- Checkpoint-7254 selected as the standard LoRA
+
+### Mode guidance experiment arc (2026-04-16)
+- **Goal**: combine structured caption conditioning (text) + VAE latent centroid guidance (visual) — a combination not in prior work
+- **Implementation**: EulerModeGuidanceScheduler subclasses EulerDiscreteScheduler, injects guidance in step()
+- **Attempt 1** (manual denoising loop): all-black images — SDXL scheduler incompatibility
+- **Attempt 2** (callback_on_step_end): gray images — no access to pred_x0, sigma too large
+- **Attempt 3** (custom scheduler step()): images OK but guidance has no content effect at scale=0.1
+- **Root cause**: DINOv2 cluster VAE means are too similar → switched to VAE-space K-Means centroids
+- **Attempt 4** (VAE-native centroids): images OK, color/contrast changes but still no content diversity
+- **Scale sweep** (0.1 → 0.18): either no effect or image quality collapses, no sweet spot
+- **Conclusion**: mode guidance is fundamentally incompatible with detailed text conditioning. Strong CFG + detailed caption locks content; guidance can only affect low-level features (color/contrast) before breaking. MGD³ works because its text is weak ("tench"), ours is strong ("a brown speckled long and flat body tench being held in...").
+
+### Current best configuration (as of 2026-04-16)
 - **Stage 2**: rank=64, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, **epoch 9 (checkpoint-7254)**
-- **Stage 3**: DINO K-Means, cluster_space=dino, IPC=10
-- **Stage 4**: text2img (visual_mode=none), resolution=512, guidance=7.5, steps=50
-- **Key insight**: text2img produces more "prototypical" class representations that train classifiers better, even though images look more homogeneous to the human eye. Img2img from medoid introduces specific-photograph noise that hurts generalization.
-- **Eval fix (2026-04-15)**: train transform order and augmentation implementations aligned with mode_guidance exactly (RRC → ToTensor → HFlip → custom ColorJitter on tensor → Lighting → Normalize). Previous version used torchvision ColorJitter on PIL and had Lighting after Normalize.
+- **Stage 3**: DINO K-Means, caption diversity selection, IPC=10
+- **Stage 4**: text2img (visual_mode=none), resolution=512, guidance=7.5, steps=50, **no mode guidance**
+- **Accuracy**: ~62% on ImageNette IPC=10 (ResNetAP-10, 3 repeats)
+- **Key insight**: text2img with detailed captions produces prototypical class representations. Diversity must come from caption diversity (Stage 3 selection / Stage 1D enrichment), not from generation-time latent guidance.
+- **Eval**: aligned with mode_guidance protocol exactly (RRC → ToTensor → HFlip → custom ColorJitter → Lighting → Normalize)
 
 ### Server environment
 - Path: `/media/4T_HDD/cai/cspd-dd/cspd-dd`
