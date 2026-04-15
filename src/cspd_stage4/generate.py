@@ -273,18 +273,13 @@ def generate_distilled_dataset(
                 def _mode_guidance_callback(pipe_self, step_index, timestep, callback_kwargs):
                     latents_cb = callback_kwargs["latents"]
                     if step_index < mode_guidance_stop_step:
-                        # Estimate pred_x0 from current latents and noise prediction
-                        # Use the scheduler's sigma for guidance strength scaling
-                        sigmas = pipe_self.scheduler.sigmas if hasattr(pipe_self.scheduler, 'sigmas') else None
-                        sigma = sigmas[step_index].item() if sigmas is not None and step_index < len(sigmas) else 1.0
-                        # For EulerDiscrete, latents at this point are already the
-                        # denoised prev_sample. We approximate pred_x0 as the latents
-                        # themselves (close enough for guidance direction).
+                        # Decay guidance linearly: full strength at step 0, zero at stop_step
+                        decay = 1.0 - step_index / mode_guidance_stop_step
                         latents_cb = apply_mode_guidance(
                             latents=latents_cb,
                             pred_original_sample=latents_cb,
                             mode_centroid=centroid,
-                            sigma=sigma,
+                            sigma=decay,
                             mode_guidance_scale=mode_guidance_scale,
                             timestep=step_index,
                             stop_timestep=mode_guidance_stop_step,
