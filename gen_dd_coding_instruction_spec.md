@@ -97,20 +97,22 @@ Right now, the repo is best understood as:
   - `training_common.py` — shared training utilities (optimizer, scheduler, freeze logic)
   - `data.py` — pairing, manifest, dataloader
   - `backbone.py` — backbone loading, module inspection, LoRA injection
-  - `families/flux/backbone.py`, `families/flux/training.py` — FLUX family (stub training)
-  - `families/pixart/backbone.py`, `families/pixart/training.py` — PixArt family (functional but deprioritized)
+  - `families/flux/backbone.py` — FLUX backbone loading (training removed)
+  - `families/pixart/backbone.py` — PixArt backbone loading (training removed)
   - `families/sdxl/backbone.py`, `families/sdxl/training.py` — SDXL family (**working end-to-end**)
   - implements Stage 2 pairing / planning / backbone inspection / SDXL LoRA training via official diffusers delegation
 
 - `src/cspd_stage3/`
   - `__init__.py`
-  - `encode.py` — DINOv2 feature encoding (Stage 3A)
-  - `cluster.py` — per-class clustering (K-Means or HDBSCAN) + mode extraction with caption diversity (Stage 3B+3C)
+  - `encode.py` — DINOv2 feature encoding + optional VAE latent encoding (Stage 3A)
+  - `cluster.py` — per-class clustering (K-Means or HDBSCAN) + caption diversity + optional VAE centroids (Stage 3B+3C)
   - `cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
 
 - `src/cspd_stage4/`
   - `__init__.py`
-  - `generate.py` — text2img distilled generation with optional refiner and legacy img2img paths
+  - `generate.py` — text2img distilled generation with multi-candidate selection, optional mode guidance/refiner/img2img
+  - `candidate_selection.py` — DINOv2 linear probe scorer for multi-candidate selection (discriminative + diversity)
+  - `mode_guidance.py` — EulerModeGuidanceScheduler for latent centroid guidance (experimental, see 16.10)
   - `cli.py` — CLI with `generate` subcommand
 
 - `src/cspd_eval/`
@@ -168,6 +170,7 @@ Right now, the repo is best understood as:
 - `scripts/server/eval/run_eval_pipeline.sh` — train classifier + evaluate
 - `scripts/server/run_full_pipeline.sh` — end-to-end pipeline with resume support (Stage 1→2→3→4→Eval)
 - `scripts/server/run_ipc_sweep.sh` — IPC sweep for Stage 3+4+Eval
+- `scripts/server/run_candidate_sweep.sh` — IPC sweep with multi-candidate selection (10 candidates/mode)
 
 ### Stage 2 output-dir rule (must remember)
 - The repo-standard Stage 2 run root is:
@@ -1127,7 +1130,8 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 4. text2img + representative caption → matches Stage 2 inference, best eval accuracy
 5. img2img from medoid + representative caption → more diverse but eval accuracy significantly worse
 6. **text2img + caption diversity selection** → current best approach
-7. text2img + mode guidance (MGD³-style) → failed: detailed captions dominate, guidance either has no effect (low scale) or destroys image quality (high scale), no usable sweet spot
+7. text2img + mode guidance (MGD³-style) → failed: detailed captions dominate, no usable sweet spot (see 16.10)
+8. **text2img + multi-candidate selection** → generate N candidates per mode, score by DINOv2 discriminative + diversity, select best (under evaluation)
 
 ---
 
@@ -1169,28 +1173,28 @@ Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditionin
 
 Given current repo state (as of 2026-04-16):
 
-1. **Wait for Stage 1D caption enrichment results**
-   - Stage 1D enrich is running on ImageNette (13K images × VLM)
-   - Need to retrain Stage 2 LoRA on enriched captions → Stage 3→4→Eval
-   - This tests whether richer captions improve downstream accuracy when LoRA trains on them
+1. **Multi-candidate selection sweep (running)**
+   - IPC=10,20,50 with 10 candidates/mode, DINOv2 discriminative+diversity scoring
+   - Running via `scripts/server/run_candidate_sweep.sh`
+   - Compare vs single-candidate baseline (~62% on IPC=10)
 
-2. **IPC sweep**
-   - Run Stage 3+4+Eval for IPC=10,20,50 with caption diversity selection
-   - Compare accuracy across IPC values
+2. **Tune candidate selection parameters**
+   - `candidate_beta`: tradeoff discriminative vs diversity (currently 0.5)
+   - `num_candidates`: 10 vs 20 vs more
+   - After sweep results, tune for best accuracy
 
-3. **Find alternative diversity mechanism**
-   - Mode guidance (MGD³-style latent centroid steering) failed with detailed captions
-   - Options to explore: per-mode multi-seed generation + selection, lower CFG + guidance, compositional slot mixing
-   - Or accept that our method's diversity comes from caption diversity, not generation-time guidance
-
-4. **ImageNet-1k full pipeline**
+3. **ImageNet-1k full pipeline**
    - Stage 1 full run on ImageNet-1k in progress
    - Use `scripts/server/run_full_pipeline.sh` for end-to-end execution with resume
 
-5. **Evaluation benchmarking**
-   - Compare against baselines (random selection, SRe2L, RDED, etc.)
+4. **Evaluation benchmarking**
+   - Compare against baselines (random selection, SRe2L, RDED, MGD³, DD-VLCP)
    - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10)
    - Report mean ± std across 3 repeats
+
+5. **Stage 1D caption enrichment (paused)**
+   - Too expensive for iterative development (13K × VLM inference)
+   - Revisit after candidate selection results confirm the direction
 
 ---
 
@@ -1243,6 +1247,13 @@ Given current repo state (as of 2026-04-16):
 - **Attempt 4** (VAE-native centroids): images OK, color/contrast changes but still no content diversity
 - **Scale sweep** (0.1 → 0.18): either no effect or image quality collapses, no sweet spot
 - **Conclusion**: mode guidance is fundamentally incompatible with detailed text conditioning. Strong CFG + detailed caption locks content; guidance can only affect low-level features (color/contrast) before breaking. MGD³ works because its text is weak ("tench"), ours is strong ("a brown speckled long and flat body tench being held in...").
+
+### Multi-candidate selection (2026-04-16, running)
+- **Approach**: generate N candidates per mode with different seeds, score by DINOv2 linear probe (discriminative) + cosine distance to accepted set (diversity), select best
+- Inspired by IGDS (arXiv 2507.04619) and Label-Consistent DGR (arXiv 2507.13074)
+- Implemented as post-generation filtering — no gradient injection, fully compatible with text2img
+- Linear probe trained on-the-fly from real DINOv2 features (~99% accuracy on 10 classes)
+- Running IPC=10,20,50 sweep with 10 candidates/mode, beta=0.5
 
 ### Current best configuration (as of 2026-04-16)
 - **Stage 2**: rank=64, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, **epoch 9 (checkpoint-7254)**
