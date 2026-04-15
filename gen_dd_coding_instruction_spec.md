@@ -1093,8 +1093,11 @@ cspd-stage4 generate \
 - **--num-inference-steps**: Diffusion sampling steps. Default `50`.
 - **--refiner-model**: Optional SDXL refiner model ID. When set, runs refiner pass after base generation for added detail/sharpness.
 - **--refiner-strength**: Denoising strength for refiner pass (0-1). Default `0.3`.
-- **--mode-guidance-scale**: Mode guidance strength. Default `0.0` (disabled). When >0, steers each generated image toward its VAE latent centroid for visual diversity. Requires `mode_centroids.pt` from Stage 3 (produced when `--encode-vae` is used).
-- **--mode-guidance-stop-step**: Stop guidance below this step (from end). Default `5`. Prevents over-conditioning of fine details.
+- **--mode-guidance-scale**: Mode guidance strength. Default `0.0` (disabled). Experimental — incompatible with detailed captions (see 16.10).
+- **--mode-guidance-stop-step**: Stop guidance after N steps. Default `25`.
+- **--num-candidates**: Generate N candidates per mode, select the best by discriminative+diversity scoring. Default `1` (no selection). Recommended `10-20`.
+- **--candidate-beta**: Diversity weight in scoring. Default `0.5`. 0=pure discriminative, higher=more diversity.
+- **--candidate-probe-dir**: Directory with DINOv2 features for training the linear probe (default: auto-detect).
 - **--semantic-mode** (hidden, default `"caption"`): `"caption"` uses representative caption text as prompt. `"embedding"` uses mean text embedding (legacy baseline, blurry).
 
 ### Output artifacts

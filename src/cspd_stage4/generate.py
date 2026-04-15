@@ -172,6 +172,9 @@ def generate_distilled_dataset(
     refiner_strength: float = 0.3,
     mode_guidance_scale: float = 0.0,
     mode_guidance_stop_step: int = 25,
+    num_candidates: int = 1,
+    candidate_beta: float = 0.5,
+    candidate_probe_dir: str | None = None,
 ) -> GenerateResult:
     """Generate the distilled dataset using dual-anchor conditioning.
 
@@ -239,6 +242,41 @@ def generate_distilled_dataset(
         print(f"[Stage 4] Loading SDXL refiner: {refiner_model}")
         refiner = _load_refiner_pipeline(refiner_model, device, dtype)
 
+    # Initialize candidate selector if multi-candidate mode
+    selector = None
+    if num_candidates > 1:
+        from cspd_stage4.candidate_selection import CandidateSelector
+
+        # Collect all class names from modes
+        all_class_names_raw = sorted(set(m.get("class_name_raw", "") for m in modes_list))
+        selector = CandidateSelector(
+            class_names_raw=all_class_names_raw,
+            device=device,
+            beta=candidate_beta,
+        )
+
+        # Train linear probe on real data DINOv2 features if encode_dir has them
+        modes_dir_path = Path(modes_dir)
+        encode_dir = candidate_probe_dir or str(modes_dir_path.parent / "encoded")
+        dino_path = Path(encode_dir) / "dino_embeds.pt"
+        index_path = Path(encode_dir) / "encode_index.json"
+        if dino_path.exists() and index_path.exists():
+            import json as _json
+            dino_features = torch.load(dino_path, weights_only=True)
+            with open(index_path, encoding="utf-8") as _f:
+                _encode_index = _json.load(_f)
+            _samples = _encode_index.get("samples", [])
+            _labels = torch.tensor([
+                selector.class_to_id.get(s.get("class_name_raw", ""), 0)
+                for s in _samples
+            ])
+            print(f"[Stage 4] Training linear probe on {len(_samples)} real DINOv2 features...")
+            selector.train_probe(dino_features, _labels)
+        else:
+            print(f"[Stage 4] WARNING: No DINOv2 features at {dino_path}, running without discriminative scoring")
+
+        print(f"[Stage 4] Multi-candidate mode: {num_candidates} candidates/mode, beta={candidate_beta}")
+
     # Generate one image per mode
     metadata_rows = []
     print(f"[Stage 4] Generating {total_modes} distilled images (strength={strength}, steps={num_inference_steps})...")
@@ -288,15 +326,39 @@ def generate_distilled_dataset(
                     generator=generator,
                 ).images[0]
             else:
-                # Standard text2img without guidance
-                image = pipe(
-                    prompt=prompt,
-                    height=resolution,
-                    width=resolution,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    generator=generator,
-                ).images[0]
+                if selector is not None and num_candidates > 1:
+                    # Multi-candidate: generate N, score, select best
+                    best_image = None
+                    best_score = -float("inf")
+                    best_embedding = None
+                    for cand_idx in range(num_candidates):
+                        cand_seed = seed + mode_idx * num_candidates + cand_idx
+                        cand_gen = torch.Generator(device=device).manual_seed(cand_seed)
+                        cand_image = pipe(
+                            prompt=prompt,
+                            height=resolution,
+                            width=resolution,
+                            num_inference_steps=num_inference_steps,
+                            guidance_scale=guidance_scale,
+                            generator=cand_gen,
+                        ).images[0]
+                        total, disc, div, emb = selector.score_candidate(cand_image, class_name_raw)
+                        if total > best_score:
+                            best_score = total
+                            best_image = cand_image
+                            best_embedding = emb
+                    image = best_image
+                    selector.accept_candidate(class_name_raw, best_embedding)
+                else:
+                    # Standard: single candidate
+                    image = pipe(
+                        prompt=prompt,
+                        height=resolution,
+                        width=resolution,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        generator=generator,
+                    ).images[0]
 
             # Optional refiner pass
             if refiner is not None:

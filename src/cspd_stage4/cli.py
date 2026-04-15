@@ -37,6 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
                             help="Mode guidance strength (0=disabled, 0.1=MGD3 default). Steers generation toward VAE latent centroids.")
     gen_parser.add_argument("--mode-guidance-stop-step", type=int, default=25,
                             help="Stop mode guidance after this many steps (from start). Default 25 = 50%% of 50 steps, matching MGD3.")
+    gen_parser.add_argument("--num-candidates", type=int, default=1,
+                            help="Generate N candidates per mode and select the best (1=no selection, 10-20 recommended)")
+    gen_parser.add_argument("--candidate-beta", type=float, default=0.5,
+                            help="Diversity weight in candidate scoring. 0=pure discriminative, higher=more diversity.")
+    gen_parser.add_argument("--candidate-probe-dir", default=None,
+                            help="Directory with DINOv2 features for training the linear probe (default: encode_dir sibling of modes_dir)")
 
     return parser
 
@@ -65,6 +71,9 @@ def main() -> None:
             refiner_strength=args.refiner_strength,
             mode_guidance_scale=args.mode_guidance_scale,
             mode_guidance_stop_step=args.mode_guidance_stop_step,
+            num_candidates=args.num_candidates,
+            candidate_beta=args.candidate_beta,
+            candidate_probe_dir=args.candidate_probe_dir,
         )
         print(json.dumps({
             "output_dir": result.output_dir,
