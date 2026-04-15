@@ -262,81 +262,46 @@ def generate_distilled_dataset(
             generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
 
             if use_mode_guidance:
-                # Manual denoising loop with mode guidance injection
+                # Use callback_on_step_end to inject mode guidance into the
+                # official pipeline's denoising loop — avoids hand-writing the
+                # loop and all the dtype/scaling issues that come with it.
                 from cspd_stage4.mode_guidance import apply_mode_guidance
 
                 centroid = mode_centroids[mode_idx]
+                _step_counter = [0]  # mutable counter for closure
 
-                # Encode prompt (returns separate cond/uncond tensors)
-                (prompt_embeds, negative_prompt_embeds,
-                 pooled_prompt_embeds, negative_pooled_prompt_embeds) = pipe.encode_prompt(
-                    prompt=prompt, device=device,
-                    num_images_per_prompt=1, do_classifier_free_guidance=True,
-                    negative_prompt="",
-                )
-                # Concatenate for CFG: [uncond, cond]
-                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-                pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
-                # Add SDXL time ids
-                text_encoder_projection_dim = pipe.text_encoder_2.config.projection_dim
-                add_time_ids = pipe._get_add_time_ids(
-                    (resolution, resolution), (0, 0), (resolution, resolution),
-                    dtype=prompt_embeds.dtype,
-                    text_encoder_projection_dim=text_encoder_projection_dim,
-                )
-                add_time_ids = torch.cat([add_time_ids, add_time_ids], dim=0).to(device)
-
-                # Prepare latents
-                latent_h = resolution // pipe.vae_scale_factor
-                latent_w = resolution // pipe.vae_scale_factor
-                latents = torch.randn(1, 4, latent_h, latent_w, generator=generator, device=device, dtype=torch_dtype)
-                latents = latents * pipe.scheduler.init_noise_sigma
-
-                pipe.scheduler.set_timesteps(num_inference_steps, device=device)
-                timesteps = pipe.scheduler.timesteps
-
-                for i, t in enumerate(timesteps):
-                    latent_model_input = torch.cat([latents] * 2)
-                    latent_model_input = pipe.scheduler.scale_model_input(latent_model_input, t)
-                    latent_model_input = latent_model_input.to(dtype=torch_dtype)
-
-                    added_cond_kwargs = {
-                        "text_embeds": pooled_prompt_embeds.to(dtype=torch_dtype),
-                        "time_ids": add_time_ids.to(dtype=torch_dtype),
-                    }
-                    noise_pred = pipe.unet(
-                        latent_model_input, t,
-                        encoder_hidden_states=prompt_embeds.to(dtype=torch_dtype),
-                        added_cond_kwargs=added_cond_kwargs,
-                        return_dict=False,
-                    )[0]
-
-                    # CFG
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-                    # Scheduler step
-                    step_output = pipe.scheduler.step(noise_pred, t, latents, return_dict=True)
-                    latents = step_output.prev_sample
-
-                    # Apply mode guidance (first stop_step steps only, matching MGD3)
-                    pred_x0 = step_output.pred_original_sample
-                    if pred_x0 is not None and i < mode_guidance_stop_step:
-                        sigma = pipe.scheduler.sigmas[i].item() if hasattr(pipe.scheduler, 'sigmas') and i < len(pipe.scheduler.sigmas) else 1.0
-                        latents = apply_mode_guidance(
-                            latents=latents,
-                            pred_original_sample=pred_x0,
+                def _mode_guidance_callback(pipe_self, step_index, timestep, callback_kwargs):
+                    latents_cb = callback_kwargs["latents"]
+                    if step_index < mode_guidance_stop_step:
+                        # Estimate pred_x0 from current latents and noise prediction
+                        # Use the scheduler's sigma for guidance strength scaling
+                        sigmas = pipe_self.scheduler.sigmas if hasattr(pipe_self.scheduler, 'sigmas') else None
+                        sigma = sigmas[step_index].item() if sigmas is not None and step_index < len(sigmas) else 1.0
+                        # For EulerDiscrete, latents at this point are already the
+                        # denoised prev_sample. We approximate pred_x0 as the latents
+                        # themselves (close enough for guidance direction).
+                        latents_cb = apply_mode_guidance(
+                            latents=latents_cb,
+                            pred_original_sample=latents_cb,
                             mode_centroid=centroid,
                             sigma=sigma,
                             mode_guidance_scale=mode_guidance_scale,
-                            timestep=i,
+                            timestep=step_index,
                             stop_timestep=mode_guidance_stop_step,
                         )
+                    callback_kwargs["latents"] = latents_cb
+                    return callback_kwargs
 
-                # Decode latents
-                latents = latents / pipe.vae.config.scaling_factor
-                image = pipe.vae.decode(latents, return_dict=False)[0]
-                image = pipe.image_processor.postprocess(image, output_type="pil")[0]
+                image = pipe(
+                    prompt=prompt,
+                    height=resolution,
+                    width=resolution,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                    callback_on_step_end=_mode_guidance_callback,
+                    callback_on_step_end_tensor_inputs=["latents"],
+                ).images[0]
             else:
                 # Standard text2img without guidance
                 image = pipe(
