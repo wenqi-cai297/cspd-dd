@@ -31,10 +31,11 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - **Stage 1 extraction** is implemented and runnable.
 - **Stage 1 normalization** is implemented as a deterministic-first canonicalization step with inline constrained VLM review enabled by default.
 - **Stage 1 render** is implemented as a deterministic archetype-template renderer.
+- **Stage 1 enrich** (optional) is implemented: VLM expands template captions with image-specific visual details.
 - **Stage 2 SDXL LoRA training** is implemented and has completed successful end-to-end runs on ImageNette.
 - **Stage 2 inference / sampling** script is implemented for LoRA vs baseline A/B comparison.
-- **Stage 3 visual/semantic mode discovery** is implemented: VAE/text/DINOv2 encoding + per-class clustering (K-Means or HDBSCAN) + mode extraction.
-- **Stage 4 distilled dataset generation** is implemented: text-to-image generation using Stage 3 caption selection + Stage 2 LoRA backbone. Optional SDXL refiner support.
+- **Stage 3 mode discovery** is implemented: DINOv2 encoding + per-class clustering (K-Means or HDBSCAN) + mode extraction with caption diversity selection.
+- **Stage 4 distilled dataset generation** is implemented: text-to-image generation using Stage 3 caption selection + Stage 2 LoRA backbone. Optional img2img (medoid) and SDXL refiner support.
 - **Evaluation** is implemented: train classifier (ConvNet-6/ResNet-18/ResNetAP-10) on distilled dataset, evaluate on real val set.
 - Supporting server scripts, metadata prep, mock/regression runs, and full workflow wiring exist.
 
@@ -48,14 +49,13 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 ### Important practical reading
 Right now, the repo is best understood as:
 - a working **Prep** pipeline for class metadata,
-- a working **Stage 1** pipeline consisting of extraction -> normalization -> render,
+- a working **Stage 1** pipeline consisting of extraction → normalization → render → optional VLM enrichment,
 - a working **Stage 2 SDXL LoRA** training pipeline that delegates to the official diffusers trainer,
 - a working **Stage 2 inference** script for sampling from trained LoRA weights,
-- a working **Stage 3** pipeline for VAE/text/DINOv2 encoding, per-class clustering (K-Means or HDBSCAN), and visual/semantic mode extraction,
-- a working **Stage 4** pipeline for text-to-image distilled dataset generation with caption selection by visual clustering,
+- a working **Stage 3** pipeline for DINOv2 encoding, per-class clustering (K-Means or HDBSCAN), and mode extraction with caption diversity,
+- a working **Stage 4** pipeline for text-to-image distilled dataset generation with caption selection by DINOv2 clustering,
 - a working **Evaluation** pipeline for training classifiers on distilled datasets and evaluating on real validation sets,
-- where Stage 1 normalization is deterministic-first but can invoke constrained VLM review on ambiguous slots,
-- plus planning/spec notes for Stage 4.
+- where Stage 1 normalization is deterministic-first but can invoke constrained VLM review on ambiguous slots.
 
 ### Packaging / environment reality check
 - The installable project in `pyproject.toml` is currently named **`cspd-stage1`**.
@@ -65,7 +65,7 @@ Right now, the repo is best understood as:
   - **`cspd-stage3`** for Stage 3 encoding / clustering / mode extraction
   - **`cspd-stage4`** for Stage 4 dual-anchor distilled dataset generation
 - The repo now also bundles `environment.yml` for the shared conda environment name **`cspd-dd`** used by the server shell helpers.
-- Core dependencies: `torch`, `torchvision`, `numpy`, `tqdm`, `pillow`, `diffusers`, `transformers`, `accelerate`, `peft`, `sentencepiece`, `protobuf`, `tiktoken`, `safetensors`, `scikit-learn`.
+- Core dependencies: `torch`, `torchvision`, `numpy`, `tqdm`, `pillow`, `diffusers`, `transformers`, `accelerate`, `peft`, `sentencepiece`, `protobuf`, `tiktoken`, `safetensors`, `scikit-learn`, `hdbscan`, `qwen-vl-utils`.
 - Optional dependencies (declared in `pyproject.toml`): `wandb` (W&B logging), `xformers` (memory-efficient attention), `bitsandbytes` (8-bit Adam).
 - For new environment setup: `conda env create -f environment.yml && conda activate cspd-dd` installs everything needed.
 
@@ -84,6 +84,7 @@ Right now, the repo is best understood as:
   - `render_pipeline.py`
   - `render_utils.py`
   - `templates.py`
+  - `enrich.py` — VLM-based caption enrichment (Stage 1D)
   - `vlm/base.py`
   - `vlm/factory.py`
   - `vlm/json_utils.py`
@@ -105,7 +106,7 @@ Right now, the repo is best understood as:
   - `__init__.py`
   - `encode.py` — DINOv2 feature encoding (Stage 3A)
   - `cluster.py` — per-class clustering (K-Means or HDBSCAN) + mode extraction with caption diversity (Stage 3B+3C)
-  - `recaption.py` — VLM re-captioning of medoid images for richer descriptions (Stage 3D)
+  - `recaption.py` — VLM re-captioning of medoid images (Stage 3D, experimental — worse than template captions with LoRA)
   - `cli.py` — CLI with `encode`, `cluster`, `recaption`, and `run` subcommands
 
 - `src/cspd_stage4/`
@@ -759,13 +760,68 @@ The normalization rules in `configs/stage1/normalization/stage1_attribute_normal
 
 ---
 
+## 11.5 Stage 1D — VLM caption enrichment (optional)
+
+### Implementation status
+**Implemented in repo. Not yet evaluated end-to-end.**
+
+### Core purpose
+Expand template captions with image-specific visual details using a VLM. Solves the caption homogeneity problem: template captions within a class are too similar (same slot values), leading to homogeneous generated images in Stage 4.
+
+### Main code
+- `src/cspd_stage1/enrich.py`
+- CLI: `cspd-stage1 enrich`
+
+### How it works
+1. Reads Stage 1C `records.jsonl` (template captions)
+2. For each record, loads the original image + template caption
+3. VLM generates an enriched caption (under 40 words) that keeps the template structure but adds image-specific details
+4. Outputs `records_enriched.jsonl` with enriched `canonical_caption` and preserved `template_caption`
+
+### VLM prompt design
+```
+You are enriching a template caption with visual details from the image.
+
+Template: "{template_caption}"
+Subject: {class_name}
+
+Rewrite as ONE sentence (under 40 words) following these rules:
+- Keep "{class_name}" as the subject, do not rename it
+- Keep the template's basic content (color, pose, background, viewpoint)
+- ADD details visible in the image that the template lacks
+- Do NOT invent details not visible in the image
+- Do NOT use lists or multiple sentences
+```
+
+### Why this must be at Stage 1 level, not Stage 3
+Stage 3 recaption (enriching only the K medoid captions) was tested and degraded accuracy by ~5% because the enriched captions were out-of-distribution for the Stage 2 LoRA. By enriching at Stage 1, the LoRA trains on enriched captions, so Stage 4 text2img uses them in-distribution.
+
+### CLI usage
+```bash
+cspd-stage1 enrich \
+  --input runs/stage1/render/.../records.jsonl \
+  --dataset-root /path/to/ImageNette/train \
+  --output runs/stage1/render/.../records_enriched.jsonl
+```
+
+### Output
+- `records_enriched.jsonl` — same format as `records.jsonl`, with:
+  - `canonical_caption`: enriched caption (used by Stage 2+)
+  - `template_caption`: original template caption (preserved for reference)
+  - `enrichment_status`: "success" or "failed"
+
+### Resume support
+If interrupted, re-running skips already-enriched records. Use `--no-resume` to force re-enrichment.
+
+---
+
 ## 12. Stage 2 — SDXL LoRA training (current mainline)
 
 ### Implementation status
 **Implemented and successfully run on ImageNette.**
 
 ### Core purpose
-Train the SDXL UNet via LoRA so the model's semantic space learns to recognize our Stage 1C canonical captions. The training pairs are `(real image, canonical_caption)` from Stage 1 render outputs.
+Train the SDXL UNet via LoRA so the model's semantic space learns to recognize our Stage 1 canonical captions. The training pairs are `(real image, canonical_caption)` from Stage 1 render (or enriched) outputs.
 
 ### Architecture
 Stage 2 SDXL delegates training to the **official diffusers `train_text_to_image_lora_sdxl.py`** script. The repo owns:
@@ -1054,8 +1110,8 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 ```
 
 ### Design decisions
-- **Img2img from medoid over pure text2img**: pure text2img produced homogeneous images because captions within a class are too similar. Img2img from real medoid images preserves the visual diversity of the original dataset while applying LoRA-tuned generation quality. Visual clustering selects WHICH real images to use as anchors and which captions to pair them with.
-- **High strength (0.8)**: allows significant regeneration so the LoRA backbone influences the output, while the real image provides composition and diversity.
+- **Text2img is the recommended default**: eval showed text2img significantly outperforms img2img for classifier training accuracy. Text2img produces more "prototypical" class representations even though images look more homogeneous to the human eye.
+- **Img2img from medoid available as alternative**: `--visual-mode medoid --strength 0.8` preserves diversity from real images but eval accuracy is lower.
 - **Per-mode seeding**: `seed + mode_index` for reproducibility with diversity
 - **ImageFolder output structure**: images organized by class for downstream classifier training
 - **SDXL refiner**: optional second pass that adds detail/sharpness after base generation
@@ -1064,8 +1120,9 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 1. img2img + mean embedding → all-black (custom loop incompatible with SDXL)
 2. img2img + mean embedding + official pipeline → blurry (averaged embedding not real caption)
 3. img2img + representative caption → quality OK but Stage 2 vs 4 mismatch
-4. text2img + representative caption → matches Stage 2 inference but homogeneous output
-5. **img2img from medoid + representative caption + refiner** → current approach, preserves diversity
+4. text2img + representative caption → matches Stage 2 inference, best eval accuracy
+5. img2img from medoid + representative caption → more diverse but eval accuracy significantly worse
+6. **text2img + caption diversity selection** → current recommended approach
 
 ---
 
@@ -1074,8 +1131,14 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 ### 16.1 All optimization must be archetype-level, never class-level
 This is a hard methodological boundary. Do not write normalization rules, render drop rules, or prompt guidance that references specific class names or class-level statistics. The only place class identity is used is in Prep (class-to-archetype mapping). Everything downstream operates on archetype + slot name only.
 
-### 16.2 All four stages + evaluation are implemented
-The repo covers Prep, Stage 1 (1A+1B+1C), Stage 2 (SDXL LoRA + inference), Stage 3 (encoding + clustering + mode extraction), Stage 4 (text2img distilled generation), and Evaluation (classifier training + accuracy measurement). FID evaluation is not yet automated.
+### 16.2 All stages + evaluation are implemented
+The repo covers Prep, Stage 1 (1A+1B+1C+optional 1D enrichment), Stage 2 (SDXL LoRA + inference), Stage 3 (DINOv2 encoding + clustering + caption diversity selection), Stage 4 (text2img distilled generation), and Evaluation (classifier training + accuracy measurement). FID evaluation is not yet automated.
+
+### 16.8 Do not enrich captions at Stage 3 level
+Stage 3 VLM recaption (enriching only medoid captions) was tested and degraded accuracy by ~5% because enriched captions are OOD for the LoRA trained on template captions. If captions need enrichment, do it at Stage 1D so the LoRA trains on them.
+
+### 16.9 Caption format and LoRA training must stay in sync
+The LoRA can only generate well from captions in the same format it was trained on. Changing caption format in later stages without retraining the LoRA will degrade generation quality.
 
 ### 16.3 Stage 1A prompt now uses per-slot guidance
 The prompt template no longer uses generic `"short phrase"` placeholders. Each slot has specific guidance with examples and anti-patterns defined in `SLOT_GUIDANCE` dict in `prompting.py`. This was added on 2026-04-12.
@@ -1096,33 +1159,26 @@ From checkpoint comparison on ImageNette. The checkpoint at step 12090 (epoch 15
 
 ## 17. Immediate next implementation work
 
-Given current repo state (as of 2026-04-14):
+Given current repo state (as of 2026-04-15):
 
-1. **Resolve Stage 2 ↔ Stage 4 resolution mismatch**
-   - Stage 2 LoRA trains at 512, Stage 4 generates at 1024
-   - Options: retrain Stage 2 at 1024 (expensive), or generate at 512 and improve quality via other means
-   - 1024 generation produces sharper images but LoRA features are 512-calibrated
+1. **Evaluate Stage 1D caption enrichment end-to-end**
+   - Run Stage 1D enrich on ImageNette → retrain Stage 2 LoRA on enriched captions → Stage 3→4→Eval
+   - Compare vs template-only captions to measure accuracy impact
+   - This tests whether richer captions improve downstream generation diversity AND classifier accuracy
 
-2. **Tune HDBSCAN parameters for better mode discovery**
-   - Current min_samples=3 is too low (creates micro-clusters like 2-member gas pump mode)
-   - Need to experiment with min_samples and min_cluster_size on DINOv2 space
-   - Both parameters now exposed as CLI args
+2. **IPC sweep with caption diversity**
+   - Run Stage 3+4+Eval for IPC=10,20,50 with the caption diversity selection (already implemented)
+   - Compare accuracy across IPC values
 
-3. **Improve generation quality**
-   - Test SDXL refiner (implemented, not yet evaluated)
-   - Tune guidance_scale (currently 9.0, may cause artifacts on human subjects)
-   - Consider LoRA rank increase (currently 64, could try 128)
-   - Address human body artifacts in captions with "being held" etc.
-
-4. **ImageNet-1k full pipeline**
+3. **ImageNet-1k full pipeline**
    - Stage 1 full run on ImageNet-1k is in progress on server
-   - Once complete: Stage 2 → Stage 3 → Stage 4 → Eval on full 1000 classes
-   - This is the target evaluation for the method
+   - Once complete: Stage 1D (optional) → Stage 2 → Stage 3 → Stage 4 → Eval on full 1000 classes
+   - Use `scripts/server/run_full_pipeline.sh` for end-to-end execution with resume
 
-5. **Evaluation benchmarking**
-   - Compare DINO K-Means vs DINO HDBSCAN distilled datasets via classifier accuracy
+4. **Evaluation benchmarking**
    - Compare against baselines (random selection, SRe2L, etc.)
-   - Eval code is implemented (ConvNet-6, ResNet-18, ResNetAP-10)
+   - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10)
+   - Report mean ± std across 3 repeats
 
 ---
 
@@ -1158,6 +1214,7 @@ Given current repo state (as of 2026-04-14):
 - **text2img at 1024 + guidance 9.0**: sharper, but human anatomy artifacts on "being held" captions; resolution mismatch with 512-trained LoRA
 - **img2img from medoid (strength=0.8)**: more diverse images but eval accuracy significantly worse than text2img
 - **Conclusion**: text2img > img2img for classifier training; K-Means > HDBSCAN for mode selection
+- **Stage 3 recaption experiment**: VLM re-captioned medoid images with free-form descriptions → accuracy dropped from ~62% to ~57%. Cause: enriched captions are OOD for the LoRA trained on template captions. Fix: enrich at Stage 1 level so LoRA trains on enriched captions (Stage 1D).
 
 ### Current best configuration (as of 2026-04-15)
 - **Stage 2**: rank=64, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, **epoch 9 (checkpoint-7254)**
