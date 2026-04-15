@@ -314,7 +314,7 @@ def run_evaluation(
                 epoch, epochs,
             )
 
-            if epoch == epochs:
+            if epoch % epoch_print_freq == 0 or epoch == epochs:
                 acc1_val, acc5_val, loss_val = validate(model, val_loader, criterion)
 
                 if acc1_val > best_acc1:
