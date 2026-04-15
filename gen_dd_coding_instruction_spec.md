@@ -1093,6 +1093,8 @@ cspd-stage4 generate \
 - **--num-inference-steps**: Diffusion sampling steps. Default `50`.
 - **--refiner-model**: Optional SDXL refiner model ID. When set, runs refiner pass after base generation for added detail/sharpness.
 - **--refiner-strength**: Denoising strength for refiner pass (0-1). Default `0.3`.
+- **--mode-guidance-scale**: Mode guidance strength. Default `0.0` (disabled). When >0, steers each generated image toward its VAE latent centroid for visual diversity. Requires `mode_centroids.pt` from Stage 3 (produced when `--encode-vae` is used).
+- **--mode-guidance-stop-step**: Stop guidance below this step (from end). Default `5`. Prevents over-conditioning of fine details.
 - **--semantic-mode** (hidden, default `"caption"`): `"caption"` uses representative caption text as prompt. `"embedding"` uses mean text embedding (legacy baseline, blurry).
 
 ### Output artifacts
@@ -1121,7 +1123,8 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 3. img2img + representative caption → quality OK but Stage 2 vs 4 mismatch
 4. text2img + representative caption → matches Stage 2 inference, best eval accuracy
 5. img2img from medoid + representative caption → more diverse but eval accuracy significantly worse
-6. **text2img + caption diversity selection** → current recommended approach
+6. text2img + caption diversity selection → improved diversity
+7. **text2img + caption diversity + mode guidance** → structured caption controls semantics, VAE centroid guidance controls visual diversity (novel combination)
 
 ---
 

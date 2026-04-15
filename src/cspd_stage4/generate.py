@@ -62,12 +62,19 @@ def _load_modes(modes_dir: str | Path) -> dict[str, Any]:
             encode_index = json.load(f)
         encode_samples = encode_index.get("samples", [])
 
+    # Try to load mode centroids (for mode guidance)
+    mode_centroids = None
+    centroids_path = modes_dir / "mode_centroids.pt"
+    if centroids_path.exists():
+        mode_centroids = torch.load(centroids_path, weights_only=True)
+
     return {
         "modes_list": modes_list,
         "ipc": modes_index.get("ipc", 0),
         "num_classes": modes_index.get("num_classes", 0),
         "total_modes": modes_index.get("total_modes", 0),
         "encode_samples": encode_samples,
+        "mode_centroids": mode_centroids,
     }
 
 
@@ -163,6 +170,8 @@ def generate_distilled_dataset(
     visual_mode: str = "none",
     refiner_model: str | None = None,
     refiner_strength: float = 0.3,
+    mode_guidance_scale: float = 0.0,
+    mode_guidance_stop_step: int = 5,
 ) -> GenerateResult:
     """Generate the distilled dataset using dual-anchor conditioning.
 
@@ -200,8 +209,16 @@ def generate_distilled_dataset(
     modes = _load_modes(modes_dir)
     modes_list = modes["modes_list"]
     total_modes = modes["total_modes"]
+    mode_centroids = modes.get("mode_centroids")
 
     encode_samples = modes["encode_samples"]
+
+    use_mode_guidance = mode_guidance_scale > 0 and mode_centroids is not None
+    if use_mode_guidance:
+        print(f"[Stage 4] Mode guidance enabled: scale={mode_guidance_scale}, stop_step={mode_guidance_stop_step}")
+        print(f"[Stage 4] Mode centroids shape: {list(mode_centroids.shape)}")
+    elif mode_guidance_scale > 0:
+        print("[Stage 4] WARNING: mode_guidance_scale > 0 but no mode_centroids.pt found. Running without guidance.")
 
     print(f"[Stage 4] Loaded {total_modes} modes ({modes['num_classes']} classes × IPC {modes['ipc']})")
     print(f"[Stage 4] Visual mode: {visual_mode}")
@@ -243,14 +260,87 @@ def generate_distilled_dataset(
         if visual_mode == "none":
             prompt = representative_caption if representative_caption else class_name
             generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
-            image = pipe(
-                prompt=prompt,
-                height=resolution,
-                width=resolution,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-            ).images[0]
+
+            if use_mode_guidance:
+                # Manual denoising loop with mode guidance injection
+                from cspd_stage4.mode_guidance import apply_mode_guidance
+
+                centroid = mode_centroids[mode_idx]
+
+                # Encode prompt
+                prompt_embeds, _, pooled_prompt_embeds, _ = pipe.encode_prompt(
+                    prompt=prompt, device=device,
+                    num_images_per_prompt=1, do_classifier_free_guidance=True,
+                    negative_prompt="",
+                )
+                # Add SDXL time ids
+                add_time_ids = pipe._get_add_time_ids(
+                    (resolution, resolution), (0, 0), (resolution, resolution),
+                    dtype=prompt_embeds.dtype,
+                )
+                add_time_ids = torch.cat([add_time_ids, add_time_ids], dim=0).to(device)
+
+                # Prepare latents
+                latent_h = resolution // pipe.vae_scale_factor
+                latent_w = resolution // pipe.vae_scale_factor
+                latents = torch.randn(1, 4, latent_h, latent_w, generator=generator, device=device, dtype=torch_dtype)
+                latents = latents * pipe.scheduler.init_noise_sigma
+
+                pipe.scheduler.set_timesteps(num_inference_steps, device=device)
+                timesteps = pipe.scheduler.timesteps
+
+                for i, t in enumerate(timesteps):
+                    latent_model_input = torch.cat([latents] * 2)
+                    latent_model_input = pipe.scheduler.scale_model_input(latent_model_input, t)
+
+                    added_cond_kwargs = {
+                        "text_embeds": pooled_prompt_embeds,
+                        "time_ids": add_time_ids,
+                    }
+                    noise_pred = pipe.unet(
+                        latent_model_input, t,
+                        encoder_hidden_states=prompt_embeds,
+                        added_cond_kwargs=added_cond_kwargs,
+                        return_dict=False,
+                    )[0]
+
+                    # CFG
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                    # Scheduler step
+                    step_output = pipe.scheduler.step(noise_pred, t, latents, return_dict=True)
+                    latents = step_output.prev_sample
+
+                    # Apply mode guidance
+                    pred_x0 = step_output.pred_original_sample
+                    if pred_x0 is not None:
+                        sigma = pipe.scheduler.sigmas[i] if hasattr(pipe.scheduler, 'sigmas') and i < len(pipe.scheduler.sigmas) else (1.0 - float(t) / 1000.0)
+                        step_from_end = len(timesteps) - 1 - i
+                        latents = apply_mode_guidance(
+                            latents=latents,
+                            pred_original_sample=pred_x0,
+                            mode_centroid=centroid,
+                            sigma=float(sigma),
+                            mode_guidance_scale=mode_guidance_scale,
+                            timestep=step_from_end,
+                            stop_timestep=mode_guidance_stop_step,
+                        )
+
+                # Decode latents
+                latents = latents / pipe.vae.config.scaling_factor
+                image = pipe.vae.decode(latents, return_dict=False)[0]
+                image = pipe.image_processor.postprocess(image, output_type="pil")[0]
+            else:
+                # Standard text2img without guidance
+                image = pipe(
+                    prompt=prompt,
+                    height=resolution,
+                    width=resolution,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                ).images[0]
 
             # Optional refiner pass
             if refiner is not None:
@@ -279,7 +369,7 @@ def generate_distilled_dataset(
                 "num_cluster_members": mode_meta.get("num_members", 0),
                 "image_path": str(image_path),
                 "relative_image_path": f"{class_name_raw}/{image_filename}",
-                "generation_mode": "text2img",
+                "generation_mode": "text2img" + ("+mode_guidance" if use_mode_guidance else ""),
             })
             continue
 

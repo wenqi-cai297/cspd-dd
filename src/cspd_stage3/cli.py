@@ -24,6 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     encode_parser.add_argument("--resolution", type=int, default=512, help="Image resolution for loading")
     encode_parser.add_argument("--batch-size", type=int, default=8, help="Encoding batch size")
     encode_parser.add_argument("--device", default="cuda", help="Torch device")
+    encode_parser.add_argument("--encode-vae", action="store_true", help="Also encode VAE latents (needed for mode guidance in Stage 4)")
+    encode_parser.add_argument("--vae-model-name", default="stabilityai/stable-diffusion-xl-base-1.0", help="SDXL model for VAE loading")
 
     # --- cluster ---
     cluster_parser = subparsers.add_parser(
@@ -56,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--min-cluster-size", type=int, default=15, help="HDBSCAN min_cluster_size (ignored for kmeans)")
     run_parser.add_argument("--min-samples", type=int, default=3, help="HDBSCAN min_samples: core point neighborhood density (ignored for kmeans)")
     run_parser.add_argument("--pca-dim", type=int, default=50, help="PCA dimensions for HDBSCAN pre-processing (ignored for kmeans)")
+    run_parser.add_argument("--encode-vae", action="store_true", help="Also encode VAE latents (needed for mode guidance in Stage 4)")
+    run_parser.add_argument("--vae-model-name", default="stabilityai/stable-diffusion-xl-base-1.0", help="SDXL model for VAE loading")
 
     return parser
 
@@ -74,9 +78,12 @@ def main() -> None:
             resolution=args.resolution,
             batch_size=args.batch_size,
             device=args.device,
+            encode_vae=args.encode_vae,
+            vae_model_name=args.vae_model_name,
         )
         print(json.dumps({
             "dino_embeds_path": result.dino_embeds_path,
+            "vae_latents_path": result.vae_latents_path,
             "num_samples": result.num_samples,
             "dino_embed_dim": result.dino_embed_dim,
         }, indent=2))
@@ -119,6 +126,8 @@ def main() -> None:
             resolution=args.resolution,
             batch_size=args.batch_size,
             device=args.device,
+            encode_vae=args.encode_vae,
+            vae_model_name=args.vae_model_name,
         )
 
         print()

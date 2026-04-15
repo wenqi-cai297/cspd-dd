@@ -64,6 +64,7 @@ class Stage3Result:
     total_modes: int
     class_results: list[ClassClusterResult]
     modes_index_path: str        # .json: per-mode metadata
+    mode_centroids_path: str | None = None  # .pt: (total_modes, 4, H, W) VAE latent centroids
 
 
 def _extract_modes_from_labels(
@@ -76,12 +77,15 @@ def _extract_modes_from_labels(
     class_name: str,
     class_name_raw: str,
     archetype: str,
-) -> list[ClusterMode]:
-    """Shared mode extraction: given cluster labels, find DINOv2 medoid per cluster.
+    vae_latents: torch.Tensor | None = None,
+) -> tuple[list[ClusterMode], list[torch.Tensor] | None]:
+    """Shared mode extraction: find DINOv2 medoid per cluster, optionally compute VAE centroids.
 
-    The medoid's canonical caption becomes the representative caption for Stage 4.
+    Returns:
+        (modes, vae_centroids) where vae_centroids is a list of centroid tensors if vae_latents is provided.
     """
     modes = []
+    vae_centroids = [] if vae_latents is not None else None
 
     unique_labels = sorted(set(int(l) for l in labels if l >= 0))  # skip noise label -1
 
@@ -100,6 +104,12 @@ def _extract_modes_from_labels(
         medoid_local = member_local_indices[int(np.argmin(distances_to_centroid))]
         medoid_global = class_indices[medoid_local]
 
+        # VAE centroid: mean of VAE latents in this cluster (for mode guidance)
+        if vae_latents is not None:
+            cluster_latents = vae_latents[member_global_indices]
+            vae_centroid = cluster_latents.mean(dim=0)
+            vae_centroids.append(vae_centroid)
+
         modes.append(ClusterMode(
             cluster_id=k_idx,
             class_name=class_name,
@@ -112,7 +122,7 @@ def _extract_modes_from_labels(
             member_indices=member_global_indices,
         ))
 
-    return modes
+    return modes, vae_centroids
 
 
 def _caption_token_distance(cap1: str, cap2: str) -> float:
@@ -244,7 +254,8 @@ def cluster_class_kmeans(
     samples: list[dict[str, Any]],
     ipc: int,
     seed: int = 42,
-) -> ClassClusterResult:
+    vae_latents: torch.Tensor | None = None,
+) -> tuple[ClassClusterResult, list[torch.Tensor] | None]:
     """Cluster one class using K-Means on DINOv2 features."""
     class_meta = samples[class_indices[0]]
     class_name = class_meta["class_name"]
@@ -258,18 +269,19 @@ def cluster_class_kmeans(
     kmeans = KMeans(n_clusters=n_clusters, random_state=seed, n_init=10)
     labels = kmeans.fit_predict(class_dino)
 
-    modes = _extract_modes_from_labels(
+    modes, vae_centroids = _extract_modes_from_labels(
         labels=labels, n_clusters=n_clusters,
         class_indices=class_indices, class_dino=class_dino,
         samples=samples,
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
+        vae_latents=vae_latents,
     )
     _diversify_captions(modes, samples)
 
     return ClassClusterResult(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
         num_samples=n_samples, ipc=ipc, num_clusters=len(modes), modes=modes,
-    )
+    ), vae_centroids
 
 
 def cluster_class_hdbscan(
@@ -282,7 +294,8 @@ def cluster_class_hdbscan(
     min_cluster_size: int = 15,
     min_samples: int = 3,
     pca_dim: int = 50,
-) -> ClassClusterResult:
+    vae_latents: torch.Tensor | None = None,
+) -> tuple[ClassClusterResult, list[torch.Tensor] | None]:
     """Cluster one class using HDBSCAN mode discovery + proportional IPC allocation.
 
     Steps:
@@ -338,7 +351,7 @@ def cluster_class_hdbscan(
     if n_discovered <= 1:
         return cluster_class_kmeans(
             class_indices=class_indices, dino_embeds=dino_embeds,
-            samples=samples, ipc=ipc, seed=seed,
+            samples=samples, ipc=ipc, seed=seed, vae_latents=vae_latents,
         )
 
     # Build per-mode member lists
@@ -395,18 +408,19 @@ def cluster_class_hdbscan(
         if final_labels[i] < 0:
             final_labels[i] = 0
 
-    modes = _extract_modes_from_labels(
+    modes, vae_centroids = _extract_modes_from_labels(
         labels=final_labels, n_clusters=final_cluster_id,
         class_indices=class_indices, class_dino=class_dino,
         samples=samples,
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
+        vae_latents=vae_latents,
     )
     _diversify_captions(modes, samples)
 
     return ClassClusterResult(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
         num_samples=n_samples, ipc=ipc, num_clusters=len(modes), modes=modes,
-    )
+    ), vae_centroids
 
 
 def cluster_class(
@@ -420,23 +434,27 @@ def cluster_class(
     min_cluster_size: int = 15,
     min_samples: int = 3,
     pca_dim: int = 50,
-) -> ClassClusterResult:
+    vae_latents: torch.Tensor | None = None,
+) -> tuple[ClassClusterResult, list[torch.Tensor] | None]:
     """Cluster one class using DINOv2 features and extract modes.
 
     Args:
         method: "kmeans" (baseline) or "hdbscan" (mode discovery).
         dino_embeds: DINOv2 features tensor (required).
+        vae_latents: Optional VAE latents for computing mode centroids (for mode guidance).
     """
     if method == "hdbscan":
         return cluster_class_hdbscan(
             class_indices=class_indices, dino_embeds=dino_embeds,
             samples=samples, ipc=ipc, seed=seed,
             min_cluster_size=min_cluster_size, min_samples=min_samples, pca_dim=pca_dim,
+            vae_latents=vae_latents,
         )
     else:
         return cluster_class_kmeans(
             class_indices=class_indices, dino_embeds=dino_embeds,
             samples=samples, ipc=ipc, seed=seed,
+            vae_latents=vae_latents,
         )
 
 
@@ -453,20 +471,21 @@ def run_stage3_clustering(
 ) -> Stage3Result:
     """Run full Stage 3 pipeline: load encoded tensors, cluster per class, extract modes.
 
-    Clustering uses DINOv2 features. VAE latents are not needed (Stage 4 uses text2img).
+    Clustering uses DINOv2 features. VAE latents are optionally loaded for
+    computing mode centroids (used by Stage 4 mode guidance).
 
     Args:
-        encode_dir: Directory containing Stage 3A encode outputs (text_embeds.pt, dino_embeds.pt, etc.).
+        encode_dir: Directory containing Stage 3A encode outputs.
         output_dir: Directory for Stage 3 mode outputs.
         ipc: Images per class — number of clusters per class.
         seed: Random seed.
         method: "kmeans" (baseline) or "hdbscan" (mode discovery).
         min_cluster_size: HDBSCAN min_cluster_size parameter.
-        min_samples: HDBSCAN min_samples parameter (core point neighborhood density).
-        pca_dim: PCA dimensions for HDBSCAN pre-processing (0 to skip PCA).
+        min_samples: HDBSCAN min_samples parameter.
+        pca_dim: PCA dimensions for HDBSCAN pre-processing.
 
     Returns:
-        Stage3Result with paths to mode tensors and metadata.
+        Stage3Result with paths to mode metadata and optional centroids.
     """
     encode_dir = Path(encode_dir)
     output_dir = Path(output_dir)
@@ -477,11 +496,18 @@ def run_stage3_clustering(
     dino_embeds = torch.load(encode_dir / "dino_embeds.pt", weights_only=True)
     print(f"[Stage 3] Loaded DINOv2 features: {list(dino_embeds.shape)}")
 
+    # Load VAE latents if available (for mode guidance centroids)
+    vae_latents = None
+    vae_latents_path = encode_dir / "vae_latents.pt"
+    if vae_latents_path.exists():
+        vae_latents = torch.load(vae_latents_path, weights_only=True)
+        print(f"[Stage 3] Loaded VAE latents: {list(vae_latents.shape)}")
+
     with open(encode_dir / "encode_index.json", encoding="utf-8") as f:
         encode_index = json.load(f)
     samples = encode_index["samples"]
 
-    print(f"[Stage 3] Loaded {len(samples)} samples, DINOv2 {list(dino_embeds.shape)}")
+    print(f"[Stage 3] Loaded {len(samples)} samples")
 
     # Group samples by class
     class_groups: dict[str, list[int]] = {}
@@ -495,12 +521,13 @@ def run_stage3_clustering(
 
     # Cluster each class
     all_class_results = []
+    all_vae_centroids = []
 
     for class_raw, indices in sorted(class_groups.items()):
         class_name = samples[indices[0]]["class_name"]
         print(f"[Stage 3] Clustering class '{class_name}' ({len(indices)} samples, method={method})...")
 
-        class_result = cluster_class(
+        class_result, vae_cents = cluster_class(
             class_indices=indices,
             dino_embeds=dino_embeds,
             samples=samples,
@@ -510,17 +537,28 @@ def run_stage3_clustering(
             min_cluster_size=min_cluster_size,
             min_samples=min_samples,
             pca_dim=pca_dim,
+            vae_latents=vae_latents,
         )
 
         all_class_results.append(class_result)
+        if vae_cents is not None:
+            all_vae_centroids.extend(vae_cents)
 
     total_modes = sum(cr.num_clusters for cr in all_class_results)
     print(f"[Stage 3] Total modes: {total_modes}")
 
+    # Save VAE mode centroids if available
+    mode_centroids_path = None
+    if all_vae_centroids:
+        centroids_tensor = torch.stack(all_vae_centroids)  # (total_modes, 4, H, W)
+        centroids_file = output_dir / "mode_centroids.pt"
+        torch.save(centroids_tensor, centroids_file)
+        mode_centroids_path = str(centroids_file)
+        print(f"[Stage 3] Saved {centroids_tensor.shape[0]} VAE mode centroids: {list(centroids_tensor.shape)}")
+
     # Save modes index
     modes_index_path = output_dir / "modes_index.json"
 
-    # Build modes index
     modes_index_data: list[dict[str, Any]] = []
     global_idx = 0
     for class_result in all_class_results:
@@ -544,6 +582,7 @@ def run_stage3_clustering(
         "cluster_space": "dino",
         "num_classes": len(all_class_results),
         "total_modes": total_modes,
+        "has_mode_centroids": mode_centroids_path is not None,
         "encode_dir": str(encode_dir.resolve()),
         "class_summary": [
             {
@@ -570,4 +609,5 @@ def run_stage3_clustering(
         total_modes=total_modes,
         class_results=all_class_results,
         modes_index_path=str(modes_index_path),
+        mode_centroids_path=mode_centroids_path,
     )

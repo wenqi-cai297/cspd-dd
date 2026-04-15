@@ -33,6 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
                             help="'none' for text2img (recommended), 'medoid' for img2img from real medoid image")
     gen_parser.add_argument("--strength", type=float, default=0.8,
                             help="Img2img denoising strength (0-1). Ignored when visual-mode=none.")
+    gen_parser.add_argument("--mode-guidance-scale", type=float, default=0.0,
+                            help="Mode guidance strength (0=disabled). Steers generation toward VAE latent centroids for visual diversity.")
+    gen_parser.add_argument("--mode-guidance-stop-step", type=int, default=5,
+                            help="Stop mode guidance below this step (from end) to avoid over-conditioning fine details.")
 
     return parser
 
@@ -59,6 +63,8 @@ def main() -> None:
             visual_mode=args.visual_mode,
             refiner_model=args.refiner_model,
             refiner_strength=args.refiner_strength,
+            mode_guidance_scale=args.mode_guidance_scale,
+            mode_guidance_stop_step=args.mode_guidance_stop_step,
         )
         print(json.dumps({
             "output_dir": result.output_dir,
