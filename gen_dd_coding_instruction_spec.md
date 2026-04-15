@@ -232,6 +232,12 @@ For implementation tracking in this repo, use the following stage view:
 2. **Stage 1B**: deterministic-first normalization with optional inline VLM review for ambiguous cases
 3. **Stage 1C**: canonical semantic rendering from normalized Stage 1 records
 
+### Stage 1D (optional)
+- VLM-based caption enrichment: expand template captions with image-specific visual details
+- VLM sees the image + template caption, adds details (lighting, texture, spatial layout) while keeping the template structure
+- Enriched captions used for Stage 2 training → LoRA learns on richer captions → Stage 4 text2img generates from them (in-distribution)
+- CLI: `cspd-stage1 enrich --input records.jsonl --dataset-root ... --output records_enriched.jsonl`
+
 ### Stage 2
 - generative-backbone adaptation / canonical-semantic-space familiarization
 - current working implementation: **SDXL base 1.0 UNet LoRA** via official diffusers trainer

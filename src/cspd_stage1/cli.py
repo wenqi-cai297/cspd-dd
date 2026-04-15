@@ -97,6 +97,16 @@ def build_parser() -> argparse.ArgumentParser:
     render_parser.add_argument("--fallback-to-raw", action="store_true", help="Use raw attributes when normalized_attributes is missing")
     render_parser.add_argument("--fail-on-missing-anchor", action="store_true", help="Fail rows whose anchor slot cannot be rendered")
     render_parser.add_argument("--no-resume", action="store_true", help="Disable resume and overwrite prior render outputs")
+
+    enrich_parser = subparsers.add_parser("enrich", help="Enrich template captions with VLM visual details (Stage 1D)")
+    enrich_parser.add_argument("--input", required=True, help="Path to Stage 1C records.jsonl")
+    enrich_parser.add_argument("--dataset-root", required=True, help="ImageFolder dataset root (for loading images)")
+    enrich_parser.add_argument("--output", required=True, help="Path for enriched output JSONL (e.g. records_enriched.jsonl)")
+    enrich_parser.add_argument("--model-name", default="Qwen/Qwen2.5-VL-7B-Instruct", help="VLM model name")
+    enrich_parser.add_argument("--device", default="cuda", help="Torch device")
+    enrich_parser.add_argument("--max-new-tokens", type=int, default=100, help="Max tokens for VLM generation")
+    enrich_parser.add_argument("--no-resume", action="store_true", help="Disable resume, overwrite existing output")
+
     return parser
 
 
@@ -145,6 +155,26 @@ def main() -> None:
     if args.command == "render":
         summary = run_stage1_render(render_config_from_args(args))
         print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "enrich":
+        from cspd_stage1.enrich import enrich_captions
+
+        result = enrich_captions(
+            render_input=args.input,
+            dataset_root=args.dataset_root,
+            output_path=args.output,
+            model_name=args.model_name,
+            device=args.device,
+            max_new_tokens=args.max_new_tokens,
+            resume=not args.no_resume,
+        )
+        print(json.dumps({
+            "output_path": result.output_path,
+            "num_enriched": result.num_enriched,
+            "num_skipped": result.num_skipped,
+            "num_failed": result.num_failed,
+        }, indent=2))
         return
 
     raise SystemExit(f"Unknown command: {args.command}")
