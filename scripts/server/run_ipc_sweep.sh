@@ -30,7 +30,7 @@ else
     --output-dir "$ENCODE_DIR"
 fi
 
-for IPC in 10 20 50; do
+for IPC in 10; do
   echo ""
   echo "############################################################"
   echo "# IPC=$IPC"
