@@ -43,8 +43,8 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - FID evaluation is not yet automated.
 
 ### Partially implemented / legacy exploratory
-- **Stage 2 FLUX family**: training loop is only a stub; backbone loading and inspection work but end-to-end training is not wired.
-- **Stage 2 PixArt family**: training loop is functional but has been deprioritized as an exploratory branch (text-to-image only, no img2img path).
+- **Stage 2 FLUX family**: backbone loading and inspection work; training code removed (was never production-ready).
+- **Stage 2 PixArt family**: backbone loading works; training code removed (was deprioritized exploratory branch).
 
 ### Important practical reading
 Right now, the repo is best understood as:
@@ -106,8 +106,7 @@ Right now, the repo is best understood as:
   - `__init__.py`
   - `encode.py` — DINOv2 feature encoding (Stage 3A)
   - `cluster.py` — per-class clustering (K-Means or HDBSCAN) + mode extraction with caption diversity (Stage 3B+3C)
-  - `recaption.py` — VLM re-captioning of medoid images (Stage 3D, experimental — worse than template captions with LoRA)
-  - `cli.py` — CLI with `encode`, `cluster`, `recaption`, and `run` subcommands
+  - `cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
 
 - `src/cspd_stage4/`
   - `__init__.py`
