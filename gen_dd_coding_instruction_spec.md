@@ -1173,15 +1173,23 @@ Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditionin
 
 Given current repo state (as of 2026-04-16):
 
-1. **Multi-candidate selection sweep (running)**
-   - IPC=10,20,50 with 10 candidates/mode, DINOv2 discriminative+diversity scoring
-   - Running via `scripts/server/run_candidate_sweep.sh`
-   - Compare vs single-candidate baseline (~62% on IPC=10)
+1. **Switch generative backbone from SDXL to SD v1.5 (PRIORITY)**
+   - SDXL generates at 512 (non-native 1024) → resize to 224 for eval. SD v1.5 generates at 512 (native) — no resolution mismatch.
+   - SD v1.5 validated by DD-VLCP (ICCV 2025, 64.8%) and D4M (CVPR 2024).
+   - Diffusers has official `train_text_to_image_lora.py` for SD v1.5 (direct replacement for `_sdxl.py`).
+   - SD v1.5 is lighter (980M vs 2.6B), faster training and inference.
+   - Our text caption pipeline (Stage 1) is fully compatible — SD v1.5 uses CLIP ViT-L/14 text encoder.
+   - Changes needed:
+     - Stage 2: add SD v1.5 training path (new `families/sd15/training.py` or adapt SDXL wrapper)
+     - Stage 4: swap `StableDiffusionXLPipeline` → `StableDiffusionPipeline`
+     - Inference script: update for SD v1.5 pipeline
+   - Why SDXL was bottleneck: non-native resolution, oversized model, LoRA insufficient for full distribution capture. See experiment log.
 
-2. **Tune candidate selection parameters**
-   - `candidate_beta`: tradeoff discriminative vs diversity (currently 0.5)
-   - `num_candidates`: 10 vs 20 vs more
-   - After sweep results, tune for best accuracy
+2. **Multi-candidate selection (results pending)**
+   - IPC=10 with beta=0.5 → 58.3% (worse than baseline 61.3%)
+   - IPC=10 with beta=0.0 → 60.8% (still worse)
+   - Conclusion: candidate selection with current SDXL backbone does not help
+   - Revisit after backbone switch to see if SD v1.5 + selection improves
 
 3. **ImageNet-1k full pipeline**
    - Stage 1 full run on ImageNet-1k in progress
@@ -1191,10 +1199,6 @@ Given current repo state (as of 2026-04-16):
    - Compare against baselines (random selection, SRe2L, RDED, MGD³, DD-VLCP)
    - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10)
    - Report mean ± std across 3 repeats
-
-5. **Stage 1D caption enrichment (paused)**
-   - Too expensive for iterative development (13K × VLM inference)
-   - Revisit after candidate selection results confirm the direction
 
 ---
 
@@ -1248,12 +1252,17 @@ Given current repo state (as of 2026-04-16):
 - **Scale sweep** (0.1 → 0.18): either no effect or image quality collapses, no sweet spot
 - **Conclusion**: mode guidance is fundamentally incompatible with detailed text conditioning. Strong CFG + detailed caption locks content; guidance can only affect low-level features (color/contrast) before breaking. MGD³ works because its text is weak ("tench"), ours is strong ("a brown speckled long and flat body tench being held in...").
 
-### Multi-candidate selection (2026-04-16, running)
+### Multi-candidate selection experiment (2026-04-16)
 - **Approach**: generate N candidates per mode with different seeds, score by DINOv2 linear probe (discriminative) + cosine distance to accepted set (diversity), select best
 - Inspired by IGDS (arXiv 2507.04619) and Label-Consistent DGR (arXiv 2507.13074)
-- Implemented as post-generation filtering — no gradient injection, fully compatible with text2img
-- Linear probe trained on-the-fly from real DINOv2 features (~99% accuracy on 10 classes)
-- Running IPC=10,20,50 sweep with 10 candidates/mode, beta=0.5
+- **Results**: 10 candidates, beta=0.5 → 58.3% (worse); beta=0.0 → 60.8% (still worse than baseline 61.3%)
+- **Conclusion**: candidate selection does not help with current SDXL backbone. DINOv2 probe's notion of "discriminative" doesn't align with eval classifier training needs.
+
+### Backbone analysis (2026-04-16)
+- **Problem identified**: SDXL is the wrong backbone for DD. Native 1024 but generating at 512 (resolution mismatch). LoRA rank=64 insufficient for full distribution capture. Model oversized (2.6B) for 224 eval.
+- **Comparison**: MGD³ (66.4%) uses DiT-XL/2 at native 256. DD-VLCP (64.8%) uses SD v1.5 at native 512. Both outperform our SDXL (61.3%).
+- **Decision**: switch to SD v1.5 (512 native, text-conditional, 980M params, diffusers official training script, DD-VLCP validated).
+- **PixArt-alpha considered**: 256 native + text-conditional, but no DD validation, no diffusers training script, community reports fine-tuning failures. Too risky.
 
 ### Current best configuration (as of 2026-04-16)
 - **Stage 2**: rank=64, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, **epoch 9 (checkpoint-7254)**
