@@ -1,6 +1,9 @@
-"""SD v1.5 Stage 2 orchestration around the official diffusers LoRA trainer.
+"""SD v1.5 Stage 2 orchestration around the official diffusers trainer.
 
-Uses `train_text_to_image_lora.py` from diffusers (the non-SDXL version).
+Uses `train_text_to_image.py` from diffusers for full fine-tuning (not LoRA).
+SD v1.5 UNet is only ~860M params, making full fine-tuning feasible and
+providing better distribution capture than LoRA.
+
 Shares dataset materialization with the SDXL wrapper since the metadata.jsonl
 format is identical.
 """
@@ -25,7 +28,7 @@ materialize_sd15_training_dataset = materialize_sdxl_training_dataset
 
 
 def _candidate_sd15_script_paths(config: Any) -> list[str]:
-    """Candidate paths for the official diffusers SD v1.5 LoRA training script."""
+    """Candidate paths for the official diffusers SD v1.5 full fine-tuning script."""
     candidates: list[str] = []
     explicit = str(getattr(config, 'sd15_official_script', '') or '').strip()
     env_value = str(os.environ.get('CSPD_STAGE2_SD15_SCRIPT', '')).strip()
@@ -40,14 +43,14 @@ def _candidate_sd15_script_paths(config: Any) -> list[str]:
 
     for root in diffusers_roots:
         if root:
-            candidates.append(str(Path(root).expanduser() / 'examples' / 'text_to_image' / 'train_text_to_image_lora.py'))
+            candidates.append(str(Path(root).expanduser() / 'examples' / 'text_to_image' / 'train_text_to_image.py'))
 
-    candidates.append('train_text_to_image_lora.py')
+    candidates.append('train_text_to_image.py')
     return candidates
 
 
 def _resolve_sd15_script(config: Any) -> str:
-    """Resolve the official diffusers SD v1.5 LoRA training script path."""
+    """Resolve the official diffusers SD v1.5 full fine-tuning script path."""
     for candidate in _candidate_sd15_script_paths(config):
         candidate_path = Path(candidate).expanduser()
         if candidate_path.exists():
@@ -94,8 +97,6 @@ def _build_sd15_command(*, config: Any, script_path: str, materialized: dict[str
         '--lr_scheduler', str(getattr(config, 'sdxl_lr_scheduler', 'cosine')),
         '--lr_warmup_steps', str(int(getattr(config, 'sdxl_lr_warmup_steps', 500))),
         '--checkpointing_steps', str(max(int(getattr(config, 'save_every', 500)), 1)),
-        '--validation_epochs', str(max(int(getattr(config, 'sdxl_validation_epochs', 1)), 1)),
-        '--rank', str(int(getattr(config, 'adapter_plan').rank)),
         '--seed', str(int(getattr(config, 'seed', 42))),
     ])
 

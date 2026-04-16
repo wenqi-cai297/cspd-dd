@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run SD v1.5 LoRA training via official diffusers trainer.
+# Run SD v1.5 full fine-tuning via official diffusers trainer.
 # Usage:
 #   bash scripts/server/stage2/run_sd15_stage2_official.sh <dataset_root> <stage1_render_records_jsonl> [batch_size] [epochs] [extra args...]
 #
@@ -53,7 +53,7 @@ CMD=(
   --render-input "$RENDER_INPUT"
   --output-dir "$OUTPUT_DIR"
   --backbone-name "$BACKBONE_NAME"
-  --training-parameterization lora
+  --training-parameterization full
   --batch-size "$BATCH_SIZE"
   --epochs "$EPOCHS"
   --resolution 512

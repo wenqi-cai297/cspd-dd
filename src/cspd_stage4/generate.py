@@ -90,9 +90,35 @@ def _load_text2img_pipeline(
     device: str,
     dtype: str,
 ) -> Any:
-    """Load text2img pipeline — auto-detects SD v1.5 vs SDXL."""
+    """Load text2img pipeline — auto-detects SD v1.5 vs SDXL.
+
+    For full fine-tuned models, pass the checkpoint dir as model_name (lora_weights=None).
+    For LoRA fine-tuned models, pass base model as model_name and LoRA as lora_weights.
+    """
     torch_dtype = torch.float16 if dtype == "float16" else torch.bfloat16
 
+    # If lora_weights points to a directory (full fine-tuned checkpoint), load from there directly
+    if lora_weights and Path(lora_weights).is_dir():
+        print(f"[Stage 4] Loading full fine-tuned model from {lora_weights}")
+        if _is_sd15_model(model_name):
+            from diffusers import StableDiffusionPipeline
+            pipe = StableDiffusionPipeline.from_pretrained(
+                lora_weights,
+                torch_dtype=torch_dtype,
+                safety_checker=None,
+            )
+        else:
+            from diffusers import StableDiffusionXLPipeline
+            pipe = StableDiffusionXLPipeline.from_pretrained(
+                lora_weights,
+                torch_dtype=torch_dtype,
+                use_safetensors=True,
+            )
+        pipe = pipe.to(device)
+        pipe.set_progress_bar_config(disable=False)
+        return pipe
+
+    # Load base model
     if _is_sd15_model(model_name):
         from diffusers import StableDiffusionPipeline
         pipe = StableDiffusionPipeline.from_pretrained(
@@ -108,6 +134,7 @@ def _load_text2img_pipeline(
             use_safetensors=True,
         )
 
+    # Load LoRA weights if provided (file path, not directory)
     if lora_weights:
         lora_path = Path(lora_weights)
         if not lora_path.exists():
