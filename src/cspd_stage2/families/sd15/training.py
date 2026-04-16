@@ -175,7 +175,7 @@ def run_stage2_sd15_official_training(*, config: Any, pairs: list[Any], run_dir:
         }
 
     # Run training
-    print(f"[Stage 2] Launching SD v1.5 LoRA training...")
+    print(f"[Stage 2] Launching SD v1.5 full fine-tuning...")
     print(f"[Stage 2] Command: {subprocess.list2cmdline(command)}")
 
     stdout_path = run_dir / 'sd15_official_stdout.txt'
