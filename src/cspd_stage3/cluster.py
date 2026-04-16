@@ -37,6 +37,11 @@ class ClusterMode:
     medoid_record_id: str
     representative_caption: str      # caption of the medoid
 
+    # Distribution info (for representativeness-aware generation)
+    weight: float = 0.0              # fraction of class samples in this mode
+    density: float = 0.0             # compactness: 1 / mean_dist_to_centroid
+    dino_centroid: np.ndarray | None = None  # DINOv2 centroid (768-dim)
+
     # Member indices (into the global samples list)
     member_indices: list[int] = field(default_factory=list)
 
@@ -104,6 +109,12 @@ def _extract_modes_from_labels(
         medoid_local = member_local_indices[int(np.argmin(distances_to_centroid))]
         medoid_global = class_indices[medoid_local]
 
+        # Mode distribution info
+        total_class_samples = len(class_dino)
+        weight = len(member_local_indices) / total_class_samples if total_class_samples > 0 else 0.0
+        mean_dist = float(distances_to_centroid.mean()) if len(distances_to_centroid) > 0 else 1.0
+        density = 1.0 / max(mean_dist, 1e-8)
+
         # VAE centroid: mean of VAE latents in this cluster (for mode guidance)
         if vae_latents is not None:
             cluster_latents = vae_latents[member_global_indices]
@@ -119,6 +130,9 @@ def _extract_modes_from_labels(
             medoid_index=medoid_global,
             medoid_record_id=samples[medoid_global]["record_id"],
             representative_caption=samples[medoid_global]["canonical_caption"],
+            weight=weight,
+            density=density,
+            dino_centroid=dino_centroid,
             member_indices=member_global_indices,
         ))
 
@@ -584,6 +598,8 @@ def run_stage3_clustering(
                 "class_name_raw": mode.class_name_raw,
                 "archetype": mode.archetype,
                 "num_members": mode.num_members,
+                "weight": round(mode.weight, 4),
+                "density": round(mode.density, 4),
                 "medoid_record_id": mode.medoid_record_id,
                 "representative_caption": mode.representative_caption,
             })

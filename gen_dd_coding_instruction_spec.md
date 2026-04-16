@@ -113,6 +113,7 @@ Right now, the repo is best understood as:
   - `__init__.py`
   - `generate.py` — text2img distilled generation with multi-candidate selection, optional mode guidance/refiner/img2img
   - `candidate_selection.py` — architecture-agnostic candidate scoring (prototype similarity + diversity, no proxy classifier)
+  - `representativeness.py` — set-level representativeness scoring (MMD + coverage) and gap detection
   - `mode_guidance.py` — EulerModeGuidanceScheduler for latent centroid guidance (experimental, see 16.10)
   - `cli.py` — CLI with `generate` subcommand
 
@@ -1114,6 +1115,7 @@ cspd-stage4 generate \
 - **--num-candidates**: Generate N candidates per mode, select the best by prototype similarity + diversity scoring. Default `1` (no selection). Recommended `10-20`.
 - **--candidate-beta**: Diversity weight relative to prototype score. Default `0.5`. 0=pure prototype faithfulness, higher=more diversity. IPC-dependent: 0.3 for IPC=10, 0.5 for IPC=20, 0.7 for IPC=50.
 - **--candidate-probe-dir**: Directory with DINOv2 features for building class prototypes (default: auto-detect).
+- **--eval-representativeness**: After generation, evaluate set-level representativeness (MMD + coverage) per class and save report.
 - **--semantic-mode** (hidden, default `"caption"`): `"caption"` uses representative caption text as prompt. `"embedding"` uses mean text embedding (legacy baseline, blurry).
 
 ### Output artifacts

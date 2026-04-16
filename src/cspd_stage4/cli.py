@@ -43,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
                             help="Diversity weight in candidate scoring. 0=pure discriminative, higher=more diversity.")
     gen_parser.add_argument("--candidate-probe-dir", default=None,
                             help="Directory with DINOv2 features for building class prototypes (default: auto-detect from modes_dir/../encoded)")
+    gen_parser.add_argument("--eval-representativeness", action="store_true",
+                            help="After generation, evaluate set-level representativeness (MMD + coverage) per class")
 
     return parser
 
@@ -74,6 +76,7 @@ def main() -> None:
             num_candidates=args.num_candidates,
             candidate_beta=args.candidate_beta,
             candidate_probe_dir=args.candidate_probe_dir,
+            eval_representativeness=args.eval_representativeness,
         )
         print(json.dumps({
             "output_dir": result.output_dir,

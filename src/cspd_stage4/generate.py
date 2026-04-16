@@ -222,6 +222,7 @@ def generate_distilled_dataset(
     num_candidates: int = 1,
     candidate_beta: float = 0.5,
     candidate_probe_dir: str | None = None,
+    eval_representativeness: bool = False,
 ) -> GenerateResult:
     """Generate the distilled dataset using dual-anchor conditioning.
 
@@ -523,6 +524,60 @@ def generate_distilled_dataset(
     write_json(summary_path, summary)
 
     print(f"[Stage 4] Generated {len(metadata_rows)} distilled images")
+
+    # Optional representativeness evaluation
+    if eval_representativeness:
+        modes_dir_path = Path(modes_dir)
+        encode_dir = candidate_probe_dir or str(modes_dir_path.parent / "encoded")
+        dino_path = Path(encode_dir) / "dino_embeds.pt"
+        index_path = Path(encode_dir) / "encode_index.json"
+
+        if dino_path.exists() and index_path.exists():
+            from cspd_stage4.representativeness import RepresentativenessScorer
+            import json as _json
+
+            print("[Stage 4] Evaluating set-level representativeness...")
+            scorer = RepresentativenessScorer(device=device)
+
+            real_features = torch.load(dino_path, weights_only=True)
+            with open(index_path, encoding="utf-8") as _f:
+                _encode_index = _json.load(_f)
+            _samples = _encode_index.get("samples", [])
+
+            # Score per class
+            repr_results = {}
+            all_class_names = sorted(set(m.get("class_name_raw", "") for m in modes_list))
+            for cls in all_class_names:
+                # Real features for this class
+                cls_indices = [i for i, s in enumerate(_samples) if s.get("class_name_raw") == cls]
+                cls_real = real_features[cls_indices]
+
+                # Synthetic features for this class
+                cls_image_paths = [
+                    row["image_path"] for row in metadata_rows
+                    if row.get("class_name_raw") == cls
+                ]
+                if not cls_image_paths:
+                    continue
+                cls_synth = torch.stack([
+                    scorer.encode_image(Image.open(p).convert("RGB"))
+                    for p in cls_image_paths
+                ])
+
+                result = scorer.score_set(cls_real, cls_synth)
+                repr_results[cls] = {
+                    "mmd": round(result["mmd"], 6),
+                    "coverage_ratio": round(result["coverage"]["coverage_ratio"], 4),
+                    "representativeness_score": round(result["representativeness_score"], 4),
+                }
+                print(f"  {cls}: MMD={result['mmd']:.4f}, coverage={result['coverage']['coverage_ratio']:.1%}, repr={result['representativeness_score']:.3f}")
+
+            # Save representativeness report
+            write_json(output_dir / "representativeness_report.json", repr_results)
+
+            del scorer
+            torch.cuda.empty_cache()
+
     print(f"[Stage 4] Output: {output_dir}")
 
     return GenerateResult(
