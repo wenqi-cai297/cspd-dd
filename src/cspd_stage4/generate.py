@@ -567,10 +567,11 @@ def generate_distilled_dataset(
                 result = scorer.score_set(cls_real, cls_synth)
                 repr_results[cls] = {
                     "mmd": round(result["mmd"], 6),
+                    "moments": result["moments"],
                     "coverage_ratio": round(result["coverage"]["coverage_ratio"], 4),
                     "representativeness_score": round(result["representativeness_score"], 4),
                 }
-                print(f"  {cls}: MMD={result['mmd']:.4f}, coverage={result['coverage']['coverage_ratio']:.1%}, repr={result['representativeness_score']:.3f}")
+                print(f"  {cls}: MMD={result['mmd']:.4f}, moments={result['moments']['moment_score']:.4f}, coverage={result['coverage']['coverage_ratio']:.1%}, repr={result['representativeness_score']:.3f}")
 
             # Save representativeness report
             write_json(output_dir / "representativeness_report.json", repr_results)

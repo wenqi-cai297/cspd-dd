@@ -4,16 +4,18 @@ Evaluates whether a generated set of IPC images adequately covers the real
 data distribution of each class. Identifies coverage gaps and suggests which
 modes should be regenerated.
 
-Two key metrics:
-  - Coverage: fraction of real DINOv2 clusters that have at least one
-    nearby synthetic image (within a distance threshold)
-  - MMD (Maximum Mean Discrepancy): distributional distance between
-    the synthetic set and real data in DINOv2 feature space
+Three scoring methods (all computed in DINOv2 feature space):
+  - MMD (linear kernel, preferred per DAP Table 8): distributional distance
+  - Moment matching (D³HR-style): mean + std + 0.1*skewness alignment
+  - Coverage: fraction of real samples near a synthetic sample (diagnostic)
 
-Inspired by:
-  - D³HR (ICML 2025): group sampling with distribution statistics matching
-  - CoDA (ICLR 2026): core distribution alignment
-  - DAP (ICLR 2026): representativeness guidance in feature space
+Paper references:
+  - D³HR (ICML 2025): score = mean_diff + std_diff + 0.1*skew_diff in latent space
+    (we adapt to DINOv2 space; their implementation uses DiT latent space)
+  - DAP (ICLR 2026): kernel distance D_K(x,y) with linear kernel K(x,y)=x^Ty
+    (linear > RBF per their Table 8; we use their linear kernel as default)
+  - CoDA (ICLR 2026): core distribution alignment concept
+  - DDOQ (ICLR 2026): dataset distillation as measure quantization
 """
 
 from __future__ import annotations
@@ -56,26 +58,29 @@ class RepresentativenessScorer:
         self,
         real_features: torch.Tensor,
         synthetic_features: torch.Tensor,
-        kernel: str = "rbf",
+        kernel: str = "linear",
         bandwidth: float = 1.0,
     ) -> float:
         """Compute Maximum Mean Discrepancy between real and synthetic feature sets.
 
         Lower MMD = better distributional match.
+        Linear kernel is preferred per DAP (ICLR 2026) Table 8:
+        linear 66.4% > RBF 65.7-66.0% on ImageNette.
 
         Args:
             real_features: (N, D) real data features (L2-normalized DINOv2).
             synthetic_features: (M, D) synthetic data features.
-            kernel: "rbf" (Gaussian) or "linear".
-            bandwidth: RBF kernel bandwidth.
+            kernel: "linear" (preferred, per DAP) or "rbf".
+            bandwidth: RBF kernel bandwidth (only used if kernel="rbf").
 
         Returns:
-            MMD² estimate (unbiased).
+            MMD² estimate.
         """
         real = real_features.to(self.device)
         synth = synthetic_features.to(self.device)
 
         if kernel == "linear":
+            # DAP-style linear kernel: K(x,y) = x^T y
             k_rr = (real @ real.T).mean()
             k_ss = (synth @ synth.T).mean()
             k_rs = (real @ synth.T).mean()
@@ -181,29 +186,88 @@ class RepresentativenessScorer:
         sorted_modes = sorted(mode_gap_counts.keys(), key=lambda m: -mode_gap_counts[m])
         return sorted_modes
 
+    @torch.no_grad()
+    def compute_moment_distance(
+        self,
+        real_features: torch.Tensor,
+        synthetic_features: torch.Tensor,
+        skewness_weight: float = 0.1,
+    ) -> dict[str, float]:
+        """Compute D³HR-style moment matching distance (mean + std + skewness).
+
+        D³HR (ICML 2025) matches these statistics between real and synthetic
+        samples in feature space. Skewness target is 0 (Gaussian assumption).
+
+        The scoring formula from D³HR:
+            score = mean_diff + std_diff + 0.1 * skew_diff
+
+        Args:
+            real_features: (N, D) real data features.
+            synthetic_features: (M, D) synthetic data features.
+            skewness_weight: Weight for skewness term (D³HR uses 0.1).
+
+        Returns:
+            Dict with mean_diff, std_diff, skew_diff, and total score.
+        """
+        real = real_features.to(self.device).float()
+        synth = synthetic_features.to(self.device).float()
+
+        # Mean difference
+        real_mean = real.mean(dim=0)
+        synth_mean = synth.mean(dim=0)
+        mean_diff = float(torch.norm(synth_mean - real_mean))
+
+        # Std difference
+        real_std = real.std(dim=0)
+        synth_std = synth.std(dim=0) if synth.shape[0] > 1 else torch.zeros_like(real_std)
+        std_diff = float(torch.norm(synth_std - real_std))
+
+        # Skewness (target = 0 per D³HR's Gaussian assumption)
+        if synth.shape[0] > 2:
+            synth_centered = synth - synth_mean
+            synth_skew = (synth_centered ** 3).mean(dim=0) / (synth_std ** 3 + 1e-8)
+            skew_diff = float(torch.norm(synth_skew))
+        else:
+            skew_diff = 0.0
+
+        total = mean_diff + std_diff + skewness_weight * skew_diff
+
+        return {
+            "mean_diff": round(mean_diff, 6),
+            "std_diff": round(std_diff, 6),
+            "skew_diff": round(skew_diff, 6),
+            "moment_score": round(total, 6),
+        }
+
     def score_set(
         self,
         real_features: torch.Tensor,
         synthetic_features: torch.Tensor,
-        bandwidth: float = 1.0,
         coverage_threshold: float = 0.5,
     ) -> dict[str, Any]:
         """Comprehensive set-level scoring.
 
+        Combines:
+        - MMD (DAP-style, linear kernel): distributional distance
+        - Moment matching (D³HR-style): mean + std + skewness alignment
+        - Coverage: diagnostic metric for gap detection
+
         Returns:
-            Dict with MMD, coverage, and overall representativeness score.
+            Dict with all metrics and composite representativeness score.
         """
-        mmd = self.compute_mmd(real_features, synthetic_features, bandwidth=bandwidth)
+        mmd = self.compute_mmd(real_features, synthetic_features, kernel="linear")
+        moments = self.compute_moment_distance(real_features, synthetic_features)
         coverage = self.compute_coverage(real_features, synthetic_features, threshold=coverage_threshold)
 
         # Composite representativeness score (higher = better)
-        # Normalize MMD to [0, 1] range approximately (empirical)
         mmd_score = max(0.0, 1.0 - mmd)
-        repr_score = 0.5 * mmd_score + 0.5 * coverage["coverage_ratio"]
+        # Normalize moment_score: lower is better, cap at reasonable range
+        moment_score_norm = max(0.0, 1.0 - moments["moment_score"] / 10.0)
+        repr_score = 0.4 * mmd_score + 0.4 * moment_score_norm + 0.2 * coverage["coverage_ratio"]
 
         return {
             "mmd": mmd,
-            "mmd_score": mmd_score,
+            "moments": moments,
             "coverage": coverage,
             "representativeness_score": repr_score,
         }
