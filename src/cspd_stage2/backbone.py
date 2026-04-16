@@ -273,6 +273,8 @@ def infer_backbone_family(backbone_name: str) -> str:
         return infer_flux_family(backbone_name)
     if "sdxl" in lowered or "stable-diffusion-xl" in lowered:
         return infer_sdxl_family(backbone_name)
+    if "stable-diffusion" in lowered and "xl" not in lowered:
+        return "sd15"
     return "generic_diffusion_backbone"
 
 

@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 import torch
-from diffusers import StableDiffusionXLPipeline, AutoencoderKL
+from diffusers import StableDiffusionXLPipeline, StableDiffusionPipeline, AutoencoderKL
 
 
 # Representative canonical captions from Stage 3 K-Means mode 0 per class.
@@ -63,8 +63,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-lora", action="store_true", help="Run baseline SDXL without LoRA for comparison")
     parser.add_argument(
         "--model-name",
-        default="stabilityai/stable-diffusion-xl-base-1.0",
-        help="Base SDXL model identifier",
+        default="stable-diffusion-v1-5/stable-diffusion-v1-5",
+        help="Base model identifier (SD v1.5 or SDXL)",
     )
     parser.add_argument("--output-dir", required=True, help="Directory to save generated images and metadata")
     parser.add_argument("--prompt", action="append", dest="prompts", default=None, help="Custom prompt; may be repeated")
@@ -97,11 +97,19 @@ def main() -> None:
     torch_dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
 
     print(f"[INFO] Loading base model: {args.model_name}")
-    pipe = StableDiffusionXLPipeline.from_pretrained(
-        args.model_name,
-        torch_dtype=torch_dtype,
-        use_safetensors=True,
-    )
+    is_sd15 = "stable-diffusion" in args.model_name.lower() and "xl" not in args.model_name.lower()
+    if is_sd15:
+        pipe = StableDiffusionPipeline.from_pretrained(
+            args.model_name,
+            torch_dtype=torch_dtype,
+            safety_checker=None,
+        )
+    else:
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            args.model_name,
+            torch_dtype=torch_dtype,
+            use_safetensors=True,
+        )
 
     lora_loaded = False
     if args.lora_weights and not args.no_lora:

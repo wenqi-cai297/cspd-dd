@@ -78,22 +78,35 @@ def _load_modes(modes_dir: str | Path) -> dict[str, Any]:
     }
 
 
+def _is_sd15_model(model_name: str) -> bool:
+    """Check if model_name refers to SD v1.5 (not SDXL)."""
+    lowered = model_name.lower()
+    return "stable-diffusion" in lowered and "xl" not in lowered
+
+
 def _load_text2img_pipeline(
     model_name: str,
     lora_weights: str | None,
     device: str,
     dtype: str,
 ) -> Any:
-    """Load SDXL text2img pipeline — identical to scripts/inference/sample_sdxl_lora.py."""
-    from diffusers import StableDiffusionXLPipeline
-
+    """Load text2img pipeline — auto-detects SD v1.5 vs SDXL."""
     torch_dtype = torch.float16 if dtype == "float16" else torch.bfloat16
 
-    pipe = StableDiffusionXLPipeline.from_pretrained(
-        model_name,
-        torch_dtype=torch_dtype,
-        use_safetensors=True,
-    )
+    if _is_sd15_model(model_name):
+        from diffusers import StableDiffusionPipeline
+        pipe = StableDiffusionPipeline.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            safety_checker=None,
+        )
+    else:
+        from diffusers import StableDiffusionXLPipeline
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            use_safetensors=True,
+        )
 
     if lora_weights:
         lora_path = Path(lora_weights)
@@ -132,16 +145,23 @@ def _load_img2img_pipeline(
     device: str,
     dtype: str,
 ) -> Any:
-    """Load SDXL img2img pipeline for visual-anchor modes."""
-    from diffusers import StableDiffusionXLImg2ImgPipeline
-
+    """Load img2img pipeline — auto-detects SD v1.5 vs SDXL."""
     torch_dtype = torch.float16 if dtype == "float16" else torch.bfloat16
 
-    pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
-        model_name,
-        torch_dtype=torch_dtype,
-        use_safetensors=True,
-    )
+    if _is_sd15_model(model_name):
+        from diffusers import StableDiffusionImg2ImgPipeline
+        pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            safety_checker=None,
+        )
+    else:
+        from diffusers import StableDiffusionXLImg2ImgPipeline
+        pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            use_safetensors=True,
+        )
 
     if lora_weights:
         lora_path = Path(lora_weights)
@@ -159,7 +179,7 @@ def generate_distilled_dataset(
     modes_dir: str | Path,
     output_dir: str | Path,
     lora_weights: str | None = None,
-    model_name: str = "stabilityai/stable-diffusion-xl-base-1.0",
+    model_name: str = "stable-diffusion-v1-5/stable-diffusion-v1-5",
     strength: float = 0.8,
     num_inference_steps: int = 50,
     guidance_scale: float = 7.5,
