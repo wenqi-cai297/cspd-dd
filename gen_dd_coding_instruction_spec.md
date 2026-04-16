@@ -32,7 +32,7 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - **Stage 1 normalization** is implemented as a deterministic-first canonicalization step with inline constrained VLM review enabled by default.
 - **Stage 1 render** is implemented as a deterministic archetype-template renderer.
 - **Stage 1 enrich** (optional) is implemented: VLM expands template captions with image-specific visual details.
-- **Stage 2 SDXL LoRA training** is implemented and has completed successful end-to-end runs on ImageNette.
+- **Stage 2 LoRA training** is implemented for both SD v1.5 (new primary) and SDXL (legacy). SD v1.5 is the recommended backbone.
 - **Stage 2 inference / sampling** script is implemented for LoRA vs baseline A/B comparison.
 - **Stage 3 mode discovery** is implemented: DINOv2 encoding + per-class clustering (K-Means or HDBSCAN) + mode extraction with caption diversity selection.
 - **Stage 4 distilled dataset generation** is implemented: text-to-image generation using Stage 3 caption selection + Stage 2 LoRA backbone. Optional img2img (medoid) and SDXL refiner support.
@@ -50,7 +50,7 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 Right now, the repo is best understood as:
 - a working **Prep** pipeline for class metadata,
 - a working **Stage 1** pipeline consisting of extraction → normalization → render → optional VLM enrichment,
-- a working **Stage 2 SDXL LoRA** training pipeline that delegates to the official diffusers trainer,
+- a working **Stage 2 SD v1.5 / SDXL LoRA** training pipeline that delegates to official diffusers trainers,
 - a working **Stage 2 inference** script for sampling from trained LoRA weights,
 - a working **Stage 3** pipeline for DINOv2 encoding, per-class clustering (K-Means or HDBSCAN), and mode extraction with caption diversity,
 - a working **Stage 4** pipeline for text-to-image distilled dataset generation with caption selection by DINOv2 clustering,
@@ -97,9 +97,10 @@ Right now, the repo is best understood as:
   - `training_common.py` — shared training utilities (optimizer, scheduler, freeze logic)
   - `data.py` — pairing, manifest, dataloader
   - `backbone.py` — backbone loading, module inspection, LoRA injection
+  - `families/sd15/training.py` — SD v1.5 LoRA training wrapper (**recommended**)
+  - `families/sdxl/backbone.py`, `families/sdxl/training.py` — SDXL family (legacy)
   - `families/flux/backbone.py` — FLUX backbone loading (training removed)
   - `families/pixart/backbone.py` — PixArt backbone loading (training removed)
-  - `families/sdxl/backbone.py`, `families/sdxl/training.py` — SDXL family (**working end-to-end**)
   - implements Stage 2 pairing / planning / backbone inspection / SDXL LoRA training via official diffusers delegation
 
 - `src/cspd_stage3/`
@@ -165,6 +166,7 @@ Right now, the repo is best understood as:
 - `scripts/server/README.md` documents the recommended Prep + Stage 1 + Stage 2 helper flow
 - `scripts/server/stage1/run_stage1_pipeline.sh` — full Stage 1: extract → normalize → render
 - `scripts/server/stage2/run_stage2_pipeline.sh` — Stage 2 training + checkpoint sampling
+- `scripts/server/stage2/run_sd15_stage2_official.sh` — SD v1.5 LoRA training launcher
 - `scripts/server/stage3/run_stage3_pipeline.sh` — Stage 3 encode + cluster
 - `scripts/server/stage4/run_stage4_pipeline.sh` — Stage 4 generate distilled dataset
 - `scripts/server/eval/run_eval_pipeline.sh` — train classifier + evaluate
@@ -817,32 +819,37 @@ If interrupted, re-running skips already-enriched records. Use `--no-resume` to 
 
 ---
 
-## 12. Stage 2 — SDXL LoRA training (current mainline)
+## 12. Stage 2 — Diffusion model LoRA training
 
 ### Implementation status
-**Implemented and successfully run on ImageNette.**
+**Implemented for SD v1.5 (new primary) and SDXL (legacy). SD v1.5 recommended.**
 
 ### Core purpose
-Train the SDXL UNet via LoRA so the model's semantic space learns to recognize our Stage 1 canonical captions. The training pairs are `(real image, canonical_caption)` from Stage 1 render (or enriched) outputs.
+Train the diffusion model's UNet via LoRA so it learns to recognize our Stage 1 canonical captions. The training pairs are `(real image, canonical_caption)` from Stage 1 render outputs.
+
+### Backbone choice
+- **SD v1.5** (`stable-diffusion-v1-5/stable-diffusion-v1-5`): **recommended**. Native 512×512, text-conditional (CLIP ViT-L/14), 980M params. Validated by DD-VLCP (ICCV 2025, 64.8%) and D4M (CVPR 2024). Uses `train_text_to_image_lora.py`.
+- **SDXL** (`stabilityai/stable-diffusion-xl-base-1.0`): legacy. Native 1024 but trained at 512 (mismatch). 2.6B params. Uses `train_text_to_image_lora_sdxl.py`. Best result ~61.3% on ImageNette IPC=10.
 
 ### Architecture
-Stage 2 SDXL delegates training to the **official diffusers `train_text_to_image_lora_sdxl.py`** script. The repo owns:
+Stage 2 delegates training to official diffusers LoRA training scripts. The repo owns:
 - **pairing**: matching ImageFolder images to Stage 1C render `records.jsonl` by `record_id`
 - **dataset materialization**: copying images + generating `metadata.jsonl` in diffusers imagefolder format
 - **launch orchestration**: building the `accelerate launch` command with config translation
 - **preflight checks**: validating environment, script resolution, dataset integrity
 
 ### Main code
-- `src/cspd_stage2/families/sdxl/training.py` — materialization, command building, launch
-- `src/cspd_stage2/training.py` — dispatch (detects `sdxl` family, routes to official wrapper)
+- `src/cspd_stage2/families/sd15/training.py` — SD v1.5 materialization, command building, launch
+- `src/cspd_stage2/families/sdxl/training.py` — SDXL materialization, command building, launch (legacy)
+- `src/cspd_stage2/training.py` — dispatch (detects `sd15`/`sdxl` family, routes to official wrapper)
 - `src/cspd_stage2/cli.py` — CLI with all SDXL-specific flags (`--sdxl-*`)
 - `scripts/server/stage2/run_sdxl_stage2_official.sh` — server helper
 - `scripts/server/check_stage2_sdxl_env.sh` — environment check
 
 ### Training configuration (current defaults)
-- backbone: `stabilityai/stable-diffusion-xl-base-1.0`
+- backbone: **`stable-diffusion-v1-5/stable-diffusion-v1-5`** (SD v1.5, native 512)
 - parameterization: LoRA (UNet attention layers: `to_k`, `to_q`, `to_v`, `to_out.0`)
-- resolution: **512** (lowered from SDXL native 1024 for memory)
+- resolution: **512** (native for SD v1.5)
 - GPUs: **2** (default `--sdxl-num-processes 2`)
 - mixed precision: fp16
 - gradient checkpointing: enabled
@@ -854,18 +861,24 @@ Stage 2 SDXL delegates training to the **official diffusers `train_text_to_image
 
 ### CLI usage
 ```bash
+# SD v1.5 (recommended)
 cspd-stage2 train \
   --dataset-root /path/to/ImageNette/train \
   --render-input /path/to/records.jsonl \
-  --backbone-name stabilityai/stable-diffusion-xl-base-1.0 \
+  --backbone-name stable-diffusion-v1-5/stable-diffusion-v1-5 \
   --training-parameterization lora \
   --adapter-rank 64 \
-  --batch-size 8 --epochs 5 \
+  --batch-size 8 --epochs 9 \
   --resolution 512
 ```
 
 ### Server helper usage
 ```bash
+# SD v1.5 (recommended)
+bash scripts/server/stage2/run_sd15_stage2_official.sh \
+  <dataset_root> <render_records_jsonl> [batch_size] [epochs] [extra args...]
+
+# SDXL (legacy)
 bash scripts/server/stage2/run_sdxl_stage2_official.sh \
   <dataset_root> <render_records_jsonl> [batch_size] [epochs] [extra args...]
 ```
