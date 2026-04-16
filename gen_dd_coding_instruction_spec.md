@@ -1179,36 +1179,37 @@ Latest accelerate rejects `"none"` as an unsupported tracker. The repo already h
 ### 16.7 Stage 2 best known config is rank=64, epoch=9
 From checkpoint comparison on ImageNette with cosine LR. The checkpoint at step 7254 (epoch 9 of 15) gives the best quality. Cosine LR peaks earlier than constant LR.
 
-### 16.10 Mode guidance (MGD³-style) is incompatible with detailed captions
+### 16.10 SD v1.5 full fine-tuning underperforms SDXL LoRA
+Tested 2026-04-17: SD v1.5 full fine-tuning eval accuracy is worse than SDXL LoRA (61.3%). Despite native 512 resolution and DD-VLCP validation, our pipeline works better with SDXL. Likely because SDXL's dual CLIP encoder better handles our detailed structured captions.
+
+### 16.11 Mode guidance (MGD³-style) is incompatible with detailed captions
 Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditioning is weak (class name only) but fails with our detailed structured captions. With strong text conditioning (CFG=7.5 + detailed caption), the UNet locks onto the caption's content. Mode guidance either has no effect (scale ≤ 0.1) or destroys image quality (scale ≥ 0.2). There is no sweet spot. The fundamental issue: text conditioning and latent guidance compete for control over the same features. MGD³ works because its text is weak ("tench"), leaving room for guidance. Our text is strong ("a brown speckled long and flat body tench being held in riverbank..."), leaving no room.
 
 ---
 
 ## 17. Immediate next implementation work
 
-Given current repo state (as of 2026-04-16):
+Given current repo state (as of 2026-04-17):
 
-1. **SD v1.5 baseline (training running)**
-   - Full fine-tuning of SD v1.5 on ImageNette, 8 epochs
-   - After training: run Stage 4 text2img baseline (no candidate selection) → eval all 3 architectures
-   - Decision rule: if SD v1.5 > SDXL baseline (61.3%), SD v1.5 becomes permanent mainline
+1. **Phase 2 + Phase 3 evaluation on SDXL (running)**
+   - Backbone: SDXL LoRA checkpoint-7254 (epoch 9, cosine LR) — confirmed as mainline
+   - Three experiments running:
+     - Phase 2 only: prototype candidate selection v2, beta=0.3, 10 candidates/mode
+     - Phase 3 only: representativeness evaluation (MMD + moments + coverage report)
+     - Phase 2 + 3 combined: candidate selection + representativeness evaluation
+   - Compare all against baseline (61.3%)
+   - Decision rule: adopt Phase 2/3 only if they improve over no-selection baseline
 
-2. **Prototype-aware candidate selection + representativeness evaluation on SD v1.5**
-   - After SD v1.5 baseline, test candidate selection v2 (prototype + diversity)
-   - Use `--eval-representativeness` to get MMD/moments/coverage diagnostics
-   - Use `find_gap_modes()` to identify and regenerate underrepresented modes
-   - Decision rule: only adopt if it improves over SD v1.5 no-selection baseline
-
-3. **IPC sweep on SD v1.5**
-   - Run IPC=10,20,50 with best configuration from steps 1-2
+2. **IPC sweep with best configuration**
+   - After Phase 2/3 results, run IPC=10,20,50 with the winning config
    - Use IPC-dependent beta: 0.3/0.5/0.7
-   - Compare against SDXL results and published baselines
+   - Compare against published baselines
 
-4. **Evaluation benchmarking**
+3. **Evaluation benchmarking**
    - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10), 3 repeats
    - Compare against: random selection, SRe2L, RDED, MGD³, DD-VLCP
 
-5. **ImageNet-1k full pipeline**
+4. **ImageNet-1k full pipeline**
    - Stage 1 full run on ImageNet-1k in progress
    - After ImageNette results stabilize, run full pipeline on 1K classes
 
@@ -1271,11 +1272,13 @@ Given current repo state (as of 2026-04-16):
 - **Approach v2** (implemented, not yet tested): architecture-agnostic scoring with prototype similarity (cosine to class mean DINOv2) + diversity (cosine distance to accepted set). No proxy classifier. IPC-dependent beta (0.3/0.5/0.7 for IPC=10/20/50).
 - Inspired by D³HR (representativeness), IGDS (IPC-dependent balance), DAP (feature-space alignment)
 
-### Backbone analysis (2026-04-16)
-- **Problem identified**: SDXL is the wrong backbone for DD. Native 1024 but generating at 512 (resolution mismatch). LoRA rank=64 insufficient for full distribution capture. Model oversized (2.6B) for 224 eval.
-- **Comparison**: MGD³ (66.4%) uses DiT-XL/2 at native 256. DD-VLCP (64.8%) uses SD v1.5 at native 512. Both outperform our SDXL (61.3%).
-- **Decision**: switch to SD v1.5 (512 native, text-conditional, 980M params, diffusers official training script, DD-VLCP validated).
-- **PixArt-alpha considered**: 256 native + text-conditional, but no DD validation, no diffusers training script, community reports fine-tuning failures. Too risky.
+### Backbone analysis (2026-04-16 → 2026-04-17)
+- **Hypothesis**: SDXL at non-native 512 is bottleneck. SD v1.5 (native 512) should be better.
+- **SD v1.5 tested**: full fine-tuning (8 epochs, batch=8). Sample quality looks good visually.
+- **SD v1.5 eval result**: worse than SDXL baseline (61.3%). Hypothesis falsified.
+- **Conclusion**: SDXL LoRA remains the mainline backbone. The resolution mismatch hypothesis was wrong — SDXL's stronger text understanding (dual CLIP encoder) and larger capacity apparently compensate for the non-native resolution.
+- **PixArt-alpha considered**: 256 native + text-conditional, but no DD validation, poor fine-tuning ecosystem. Not tested.
+- **SDXL confirmed**: checkpoint-7254 (epoch 9, cosine LR, rank=64 LoRA)
 
 ### SD v1.5 backbone switch (2026-04-16)
 - **Implemented**: full fine-tuning (not LoRA) of SD v1.5 UNet (~860M params) via `train_text_to_image.py`
@@ -1301,7 +1304,7 @@ Given current repo state (as of 2026-04-16):
 - **Stage 3**: DINO K-Means, caption diversity selection, IPC=10
 - **Stage 4**: text2img (visual_mode=none), resolution=512, guidance=7.5, steps=50
 - **Accuracy (SDXL baseline)**: 61.33% on ImageNette IPC=10 (ResNetAP-10, 3 repeats)
-- **Accuracy (SD v1.5)**: pending
+- **Accuracy (SD v1.5)**: worse than SDXL (tested 2026-04-17, exact number TBD). SDXL confirmed as mainline.
 - **Key insights**:
   - text2img with detailed captions produces prototypical class representations
   - Mode guidance incompatible with detailed text conditioning (see 16.10)
