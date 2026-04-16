@@ -1103,8 +1103,8 @@ cspd-stage4 generate \
 ```
 
 ### Key parameters
-- **--visual-mode**: `"medoid"` (recommended) uses real medoid image as img2img init. `"centroid"` uses decoded VAE centroid. `"none"` for pure text2img.
-- **--strength**: Img2img denoising strength. Default `0.8`. Higher = more regeneration from LoRA, lower = closer to original image. Ignored when visual-mode=none.
+- **--visual-mode**: `"none"` (recommended) for pure text2img. `"medoid"` for img2img from real medoid image.
+- **--strength**: Img2img denoising strength. Default `0.8`. Ignored when visual-mode=none.
 - **--resolution**: Output image resolution. Default `512` (matches Stage 2 LoRA training resolution).
 - **--guidance-scale**: CFG strength. Default `7.5`.
 - **--num-inference-steps**: Diffusion sampling steps. Default `50`.
@@ -1115,7 +1115,7 @@ cspd-stage4 generate \
 - **--num-candidates**: Generate N candidates per mode, select the best by prototype similarity + diversity scoring. Default `1` (no selection). Recommended `10-20`.
 - **--candidate-beta**: Diversity weight relative to prototype score. Default `0.5`. 0=pure prototype faithfulness, higher=more diversity. IPC-dependent: 0.3 for IPC=10, 0.5 for IPC=20, 0.7 for IPC=50.
 - **--candidate-probe-dir**: Directory with DINOv2 features for building class prototypes (default: auto-detect).
-- **--eval-representativeness**: After generation, evaluate set-level representativeness (MMD + coverage) per class and save report.
+- **--eval-representativeness**: After generation, evaluate set-level representativeness per class: MMD (linear kernel, per DAP), moment matching (mean+std+skewness, per D³HR), and coverage. Saves `representativeness_report.json`.
 - **--semantic-mode** (hidden, default `"caption"`): `"caption"` uses representative caption text as prompt. `"embedding"` uses mean text embedding (legacy baseline, blurry).
 
 ### Output artifacts
@@ -1124,9 +1124,9 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 ├── images/
 │   ├── <class_raw>/
 │   │   ├── <class_raw>_mode000.png
-│   │   ├── <class_raw>_mode001.png
 │   │   └── ...
 │   └── ...
+├── representativeness_report.json  # (if --eval-representativeness)
 ├── distilled_metadata.json    # per-image metadata with mode info
 └── stage4_summary.json        # generation summary
 ```
@@ -1193,13 +1193,15 @@ Given current repo state (as of 2026-04-16):
    - After training: run Stage 4 text2img baseline (no candidate selection) → eval all 3 architectures
    - Decision rule: if SD v1.5 > SDXL baseline (61.3%), SD v1.5 becomes permanent mainline
 
-2. **Prototype-aware candidate selection on SD v1.5**
-   - After SD v1.5 baseline is established, test candidate selection v2 (prototype similarity + diversity)
-   - Test with IPC-dependent beta: 0.3 for IPC=10, 0.5 for IPC=20, 0.7 for IPC=50
+2. **Prototype-aware candidate selection + representativeness evaluation on SD v1.5**
+   - After SD v1.5 baseline, test candidate selection v2 (prototype + diversity)
+   - Use `--eval-representativeness` to get MMD/moments/coverage diagnostics
+   - Use `find_gap_modes()` to identify and regenerate underrepresented modes
    - Decision rule: only adopt if it improves over SD v1.5 no-selection baseline
 
 3. **IPC sweep on SD v1.5**
    - Run IPC=10,20,50 with best configuration from steps 1-2
+   - Use IPC-dependent beta: 0.3/0.5/0.7
    - Compare against SDXL results and published baselines
 
 4. **Evaluation benchmarking**
@@ -1281,11 +1283,16 @@ Given current repo state (as of 2026-04-16):
 - **Training running**: 8 epochs, batch=8, 2 GPUs, cosine LR, noise_offset=0.05, snr_gamma=5.0
 - **Stage 4**: auto-detects SD v1.5 vs SDXL, loads full fine-tuned checkpoint via from_pretrained
 
-### Candidate selection v2 (2026-04-16)
-- Rewritten to architecture-agnostic scoring: prototype similarity + diversity
-- Removed DINOv2 linear probe (caused architecture-specific bias)
-- Class prototypes built from real DINOv2 features (L2-normalized mean)
-- Beta should be IPC-dependent: 0.3 for IPC=10, 0.5 for IPC=20, 0.7 for IPC=50
+### Candidate selection v2 + representativeness scoring (2026-04-16)
+- **Phase 2 (candidate selection v2)**: architecture-agnostic scoring — prototype similarity (cosine to class mean DINOv2) + diversity (cosine distance to accepted set). No proxy classifier. IPC-dependent beta.
+- **Phase 3 (representativeness scoring)**: set-level evaluation after generation
+  - MMD with linear kernel (DAP ICLR 2026, Table 8: linear > RBF)
+  - Moment matching: mean + std + 0.1×skewness (D³HR ICML 2025, exact formula from `evaluate_distribution_batch`)
+  - Coverage: diagnostic metric (not from a specific paper)
+  - Composite: 0.4×MMD + 0.4×moments + 0.2×coverage
+  - Gap detection: `find_gap_modes()` identifies which modes need regeneration
+- **Enriched mode metadata**: Stage 3 now outputs per-mode weight, density, DINOv2 centroid
+- **Paper alignment verified**: D³HR source code (GitHub), DAP paper (arXiv), RDED source code (GitHub)
 - Not yet tested — waiting for SD v1.5 baseline first
 
 ### Current best configuration (as of 2026-04-16)
