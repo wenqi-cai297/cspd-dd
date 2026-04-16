@@ -1186,32 +1186,27 @@ Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditionin
 
 Given current repo state (as of 2026-04-16):
 
-1. **Switch generative backbone from SDXL to SD v1.5 (PRIORITY)**
-   - SDXL generates at 512 (non-native 1024) → resize to 224 for eval. SD v1.5 generates at 512 (native) — no resolution mismatch.
-   - SD v1.5 validated by DD-VLCP (ICCV 2025, 64.8%) and D4M (CVPR 2024).
-   - Diffusers has official `train_text_to_image_lora.py` for SD v1.5 (direct replacement for `_sdxl.py`).
-   - SD v1.5 is lighter (980M vs 2.6B), faster training and inference.
-   - Our text caption pipeline (Stage 1) is fully compatible — SD v1.5 uses CLIP ViT-L/14 text encoder.
-   - Changes needed:
-     - Stage 2: add SD v1.5 training path (new `families/sd15/training.py` or adapt SDXL wrapper)
-     - Stage 4: swap `StableDiffusionXLPipeline` → `StableDiffusionPipeline`
-     - Inference script: update for SD v1.5 pipeline
-   - Why SDXL was bottleneck: non-native resolution, oversized model, LoRA insufficient for full distribution capture. See experiment log.
+1. **SD v1.5 baseline (training running)**
+   - Full fine-tuning of SD v1.5 on ImageNette, 8 epochs
+   - After training: run Stage 4 text2img baseline (no candidate selection) → eval all 3 architectures
+   - Decision rule: if SD v1.5 > SDXL baseline (61.3%), SD v1.5 becomes permanent mainline
 
-2. **Multi-candidate selection (results pending)**
-   - IPC=10 with beta=0.5 → 58.3% (worse than baseline 61.3%)
-   - IPC=10 with beta=0.0 → 60.8% (still worse)
-   - Conclusion: candidate selection with current SDXL backbone does not help
-   - Revisit after backbone switch to see if SD v1.5 + selection improves
+2. **Prototype-aware candidate selection on SD v1.5**
+   - After SD v1.5 baseline is established, test candidate selection v2 (prototype similarity + diversity)
+   - Test with IPC-dependent beta: 0.3 for IPC=10, 0.5 for IPC=20, 0.7 for IPC=50
+   - Decision rule: only adopt if it improves over SD v1.5 no-selection baseline
 
-3. **ImageNet-1k full pipeline**
-   - Stage 1 full run on ImageNet-1k in progress
-   - Use `scripts/server/run_full_pipeline.sh` for end-to-end execution with resume
+3. **IPC sweep on SD v1.5**
+   - Run IPC=10,20,50 with best configuration from steps 1-2
+   - Compare against SDXL results and published baselines
 
 4. **Evaluation benchmarking**
-   - Compare against baselines (random selection, SRe2L, RDED, MGD³, DD-VLCP)
-   - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10)
-   - Report mean ± std across 3 repeats
+   - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10), 3 repeats
+   - Compare against: random selection, SRe2L, RDED, MGD³, DD-VLCP
+
+5. **ImageNet-1k full pipeline**
+   - Stage 1 full run on ImageNet-1k in progress
+   - After ImageNette results stabilize, run full pipeline on 1K classes
 
 ---
 
@@ -1265,11 +1260,12 @@ Given current repo state (as of 2026-04-16):
 - **Scale sweep** (0.1 → 0.18): either no effect or image quality collapses, no sweet spot
 - **Conclusion**: mode guidance is fundamentally incompatible with detailed text conditioning. Strong CFG + detailed caption locks content; guidance can only affect low-level features (color/contrast) before breaking. MGD³ works because its text is weak ("tench"), ours is strong ("a brown speckled long and flat body tench being held in...").
 
-### Multi-candidate selection experiment (2026-04-16)
-- **Approach**: generate N candidates per mode with different seeds, score by DINOv2 linear probe (discriminative) + cosine distance to accepted set (diversity), select best
-- Inspired by IGDS (arXiv 2507.04619) and Label-Consistent DGR (arXiv 2507.13074)
-- **Results**: 10 candidates, beta=0.5 → 58.3% (worse); beta=0.0 → 60.8% (still worse than baseline 61.3%)
-- **Conclusion**: candidate selection does not help with current SDXL backbone. DINOv2 probe's notion of "discriminative" doesn't align with eval classifier training needs.
+### Multi-candidate selection experiment v1 (2026-04-16, SDXL)
+- **Approach v1**: DINOv2 linear probe (discriminative) + cosine diversity
+- **Results**: 10 candidates, beta=0.5 → 58.3%; beta=0.0 → 60.8% (both worse than baseline 61.3%)
+- **Root cause**: proxy classifier (DINOv2 probe) doesn't match eval classifiers; architecture-specific bias
+- **Approach v2** (implemented, not yet tested): architecture-agnostic scoring with prototype similarity (cosine to class mean DINOv2) + diversity (cosine distance to accepted set). No proxy classifier. IPC-dependent beta (0.3/0.5/0.7 for IPC=10/20/50).
+- Inspired by D³HR (representativeness), IGDS (IPC-dependent balance), DAP (feature-space alignment)
 
 ### Backbone analysis (2026-04-16)
 - **Problem identified**: SDXL is the wrong backbone for DD. Native 1024 but generating at 512 (resolution mismatch). LoRA rank=64 insufficient for full distribution capture. Model oversized (2.6B) for 224 eval.
@@ -1277,13 +1273,32 @@ Given current repo state (as of 2026-04-16):
 - **Decision**: switch to SD v1.5 (512 native, text-conditional, 980M params, diffusers official training script, DD-VLCP validated).
 - **PixArt-alpha considered**: 256 native + text-conditional, but no DD validation, no diffusers training script, community reports fine-tuning failures. Too risky.
 
+### SD v1.5 backbone switch (2026-04-16)
+- **Implemented**: full fine-tuning (not LoRA) of SD v1.5 UNet (~860M params) via `train_text_to_image.py`
+- **Motivation**: SDXL at non-native 512 is bottleneck; SD v1.5 is native 512, lighter, DD-VLCP validated
+- **Training running**: 8 epochs, batch=8, 2 GPUs, cosine LR, noise_offset=0.05, snr_gamma=5.0
+- **Stage 4**: auto-detects SD v1.5 vs SDXL, loads full fine-tuned checkpoint via from_pretrained
+
+### Candidate selection v2 (2026-04-16)
+- Rewritten to architecture-agnostic scoring: prototype similarity + diversity
+- Removed DINOv2 linear probe (caused architecture-specific bias)
+- Class prototypes built from real DINOv2 features (L2-normalized mean)
+- Beta should be IPC-dependent: 0.3 for IPC=10, 0.5 for IPC=20, 0.7 for IPC=50
+- Not yet tested — waiting for SD v1.5 baseline first
+
 ### Current best configuration (as of 2026-04-16)
-- **Stage 2**: rank=64, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, **epoch 9 (checkpoint-7254)**
+- **Stage 2 (SDXL, legacy)**: rank=64 LoRA, cosine LR (2e-5), epoch 9, checkpoint-7254
+- **Stage 2 (SD v1.5, new)**: full fine-tuning, cosine LR (2e-5), 8 epochs (running)
 - **Stage 3**: DINO K-Means, caption diversity selection, IPC=10
-- **Stage 4**: text2img (visual_mode=none), resolution=512, guidance=7.5, steps=50, **no mode guidance**
-- **Accuracy**: ~62% on ImageNette IPC=10 (ResNetAP-10, 3 repeats)
-- **Key insight**: text2img with detailed captions produces prototypical class representations. Diversity must come from caption diversity (Stage 3 selection / Stage 1D enrichment), not from generation-time latent guidance.
-- **Eval**: aligned with mode_guidance protocol exactly (RRC → ToTensor → HFlip → custom ColorJitter → Lighting → Normalize)
+- **Stage 4**: text2img (visual_mode=none), resolution=512, guidance=7.5, steps=50
+- **Accuracy (SDXL baseline)**: 61.33% on ImageNette IPC=10 (ResNetAP-10, 3 repeats)
+- **Accuracy (SD v1.5)**: pending
+- **Key insights**:
+  - text2img with detailed captions produces prototypical class representations
+  - Mode guidance incompatible with detailed text conditioning (see 16.10)
+  - Proxy classifier selection doesn't help — prototype similarity is more principled
+  - Diversity must come from caption diversity + prototype-aware selection, not latent guidance
+- **Eval**: aligned with mode_guidance protocol (RRC → ToTensor → HFlip → custom ColorJitter → Lighting → Normalize)
 
 ### Server environment
 - Path: `/media/4T_HDD/cai/cspd-dd/cspd-dd`
