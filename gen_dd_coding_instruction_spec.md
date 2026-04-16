@@ -112,7 +112,7 @@ Right now, the repo is best understood as:
 - `src/cspd_stage4/`
   - `__init__.py`
   - `generate.py` — text2img distilled generation with multi-candidate selection, optional mode guidance/refiner/img2img
-  - `candidate_selection.py` — DINOv2 linear probe scorer for multi-candidate selection (discriminative + diversity)
+  - `candidate_selection.py` — architecture-agnostic candidate scoring (prototype similarity + diversity, no proxy classifier)
   - `mode_guidance.py` — EulerModeGuidanceScheduler for latent centroid guidance (experimental, see 16.10)
   - `cli.py` — CLI with `generate` subcommand
 
@@ -1111,9 +1111,9 @@ cspd-stage4 generate \
 - **--refiner-strength**: Denoising strength for refiner pass (0-1). Default `0.3`.
 - **--mode-guidance-scale**: Mode guidance strength. Default `0.0` (disabled). Experimental — incompatible with detailed captions (see 16.10).
 - **--mode-guidance-stop-step**: Stop guidance after N steps. Default `25`.
-- **--num-candidates**: Generate N candidates per mode, select the best by discriminative+diversity scoring. Default `1` (no selection). Recommended `10-20`.
-- **--candidate-beta**: Diversity weight in scoring. Default `0.5`. 0=pure discriminative, higher=more diversity.
-- **--candidate-probe-dir**: Directory with DINOv2 features for training the linear probe (default: auto-detect).
+- **--num-candidates**: Generate N candidates per mode, select the best by prototype similarity + diversity scoring. Default `1` (no selection). Recommended `10-20`.
+- **--candidate-beta**: Diversity weight relative to prototype score. Default `0.5`. 0=pure prototype faithfulness, higher=more diversity. IPC-dependent: 0.3 for IPC=10, 0.5 for IPC=20, 0.7 for IPC=50.
+- **--candidate-probe-dir**: Directory with DINOv2 features for building class prototypes (default: auto-detect).
 - **--semantic-mode** (hidden, default `"caption"`): `"caption"` uses representative caption text as prompt. `"embedding"` uses mean text embedding (legacy baseline, blurry).
 
 ### Output artifacts

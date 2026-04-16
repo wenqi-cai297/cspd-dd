@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     gen_parser.add_argument("--candidate-beta", type=float, default=0.5,
                             help="Diversity weight in candidate scoring. 0=pure discriminative, higher=more diversity.")
     gen_parser.add_argument("--candidate-probe-dir", default=None,
-                            help="Directory with DINOv2 features for training the linear probe (default: encode_dir sibling of modes_dir)")
+                            help="Directory with DINOv2 features for building class prototypes (default: auto-detect from modes_dir/../encoded)")
 
     return parser
 

@@ -294,15 +294,9 @@ def generate_distilled_dataset(
     if num_candidates > 1:
         from cspd_stage4.candidate_selection import CandidateSelector
 
-        # Collect all class names from modes
-        all_class_names_raw = sorted(set(m.get("class_name_raw", "") for m in modes_list))
-        selector = CandidateSelector(
-            class_names_raw=all_class_names_raw,
-            device=device,
-            beta=candidate_beta,
-        )
+        selector = CandidateSelector(device=device, beta=candidate_beta)
 
-        # Train linear probe on real data DINOv2 features if encode_dir has them
+        # Build class prototypes from real data DINOv2 features
         modes_dir_path = Path(modes_dir)
         encode_dir = candidate_probe_dir or str(modes_dir_path.parent / "encoded")
         dino_path = Path(encode_dir) / "dino_embeds.pt"
@@ -313,14 +307,10 @@ def generate_distilled_dataset(
             with open(index_path, encoding="utf-8") as _f:
                 _encode_index = _json.load(_f)
             _samples = _encode_index.get("samples", [])
-            _labels = torch.tensor([
-                selector.class_to_id.get(s.get("class_name_raw", ""), 0)
-                for s in _samples
-            ])
-            print(f"[Stage 4] Training linear probe on {len(_samples)} real DINOv2 features...")
-            selector.train_probe(dino_features, _labels)
+            print(f"[Stage 4] Building class prototypes from {len(_samples)} real DINOv2 features...")
+            selector.build_prototypes(dino_features, _samples)
         else:
-            print(f"[Stage 4] WARNING: No DINOv2 features at {dino_path}, running without discriminative scoring")
+            print(f"[Stage 4] WARNING: No DINOv2 features at {dino_path}, running without prototype scoring")
 
         print(f"[Stage 4] Multi-candidate mode: {num_candidates} candidates/mode, beta={candidate_beta}")
 
