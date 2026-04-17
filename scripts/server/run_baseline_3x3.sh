@@ -1,23 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# HDBSCAN + medoid baseline, 3x3 protocol:
-#   - Stage 4 runs 3 times with master seeds {42, 123, 456}
-#   - Each run: all IPC*num_classes images share the run's master seed
-#     (per-round shared-seed generation; no +mode_idx offset)
-#   - Each resulting dataset is eval'd with 3 independent seeds (EVAL_REPEAT=3)
-#   - Aggregation: for each gen_seed take max(3 eval repeats) = best-of-3,
+# HDBSCAN + medoid baseline, full 3x3 protocol (Stage 3 + Stage 4 paired seeds):
+#   - For each seed in {42, 123, 456}:
+#       * Stage 3 cluster with --seed: produces its own modes_hdbscan_s<seed>
+#         (HDBSCAN itself is deterministic, but the PCA preprocessing and the
+#         K-Means fallback / sub-clustering used when HDBSCAN finds <IPC modes
+#         are seeded, so different seeds yield different medoid selections
+#         for the same real images).
+#       * Stage 4 generate with --seed: all IPC*num_classes images in this
+#         round share the master seed (per-round shared-seed convention,
+#         no +mode_idx offset).
+#       * Eval with 3 independent eval seeds (EVAL_REPEAT=3).
+#   - Aggregation: for each seed take max(3 eval repeats) = best-of-3,
 #     then report mean / std / min / max across the 3 per-seed bests.
-#     (Not mean over all 9 numbers.)
 #
 # Usage:
 #   bash scripts/server/run_baseline_3x3.sh
 #
 # Environment:
-#   BASELINE_SEEDS="42 123 456"   (override to change master seeds)
+#   BASELINE_SEEDS="42 123 456"   (override to change seeds; paired across stages)
 #   EVAL_REPEAT=3
 
-MODES_DIR="runs/stage3/ImageNette_train/ipc10/hdbscan_medoid"
+ENCODE_DIR="runs/stage3/ImageNette_train/encoded_with_vae"
 LORA="runs/stage2/train/ImageNette_train/stabilityai_stable-diffusion-xl-base-1.0/2026-04-14_181645/official_output/checkpoint-7254/pytorch_lora_weights.safetensors"
 VAL_DIR="/media/4T_HDD/cai/datasets/ImageNette/val"
 MODEL_NAME="stabilityai/stable-diffusion-xl-base-1.0"
@@ -32,8 +37,8 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
-if [[ ! -f "${MODES_DIR}/modes_index.json" ]]; then
-  echo "[ERROR] HDBSCAN modes not found at ${MODES_DIR}"
+if [[ ! -d "$ENCODE_DIR" ]]; then
+  echo "[ERROR] Stage 3 encode dir not found: $ENCODE_DIR"
   exit 1
 fi
 if [[ ! -f "$LORA" ]]; then
@@ -47,29 +52,43 @@ SUMMARY_FILE="${RUN_ROOT}/summary.txt"
 mkdir -p "$RUN_ROOT"
 
 echo "============================================================"
-echo "[baseline 3x3] HDBSCAN + medoid, per-round shared-seed protocol"
-echo "  modes:      $MODES_DIR"
+echo "[baseline 3x3] HDBSCAN + medoid, full 3x3 (Stage 3 + Stage 4 paired)"
+echo "  encode:     $ENCODE_DIR"
 echo "  lora:       $LORA"
-echo "  seeds:      $SEEDS"
-echo "  eval rep:   $EVAL_REPEAT per generation seed"
+echo "  seeds:      $SEEDS  (shared across Stage 3 and Stage 4)"
+echo "  eval rep:   $EVAL_REPEAT per seed"
 echo "  run root:   $RUN_ROOT"
 echo "============================================================"
 
-echo "# baseline 3x3 protocol" > "$SUMMARY_FILE"
-echo "# modes=$MODES_DIR" >> "$SUMMARY_FILE"
+echo "# baseline 3x3 protocol (Stage 3 + Stage 4 + Eval, paired seeds)" > "$SUMMARY_FILE"
+echo "# encode=$ENCODE_DIR" >> "$SUMMARY_FILE"
 echo "# lora=$LORA" >> "$SUMMARY_FILE"
-echo "# per-round shared master seed; eval_repeat=$EVAL_REPEAT" >> "$SUMMARY_FILE"
+echo "# per-round shared master seed for Stage 4; Stage 3 re-clustered per seed; eval_repeat=$EVAL_REPEAT" >> "$SUMMARY_FILE"
 echo "" >> "$SUMMARY_FILE"
 
 for SEED in $SEEDS; do
   echo ""
   echo "############################################################"
-  echo "# Generation seed=$SEED"
+  echo "# Seed=$SEED   (Stage 3 cluster -> Stage 4 generate -> Eval)"
   echo "############################################################"
+
+  MODES_DIR="runs/stage3/ImageNette_train/ipc${IPC}/hdbscan_medoid_s${SEED}"
+  if [[ -f "${MODES_DIR}/modes_index.json" ]]; then
+    echo "[seed=$SEED] Stage 3: modes already exist at $MODES_DIR, skipping cluster"
+  else
+    echo "[seed=$SEED] Stage 3: clustering with --seed $SEED"
+    cspd-stage3 cluster \
+      --encode-dir "$ENCODE_DIR" \
+      --output-dir "$MODES_DIR" \
+      --ipc "$IPC" \
+      --cluster-method hdbscan \
+      --seed "$SEED"
+  fi
 
   STAGE4_OUT="${RUN_ROOT}/gen_seed${SEED}"
   mkdir -p "$STAGE4_OUT"
 
+  echo "[seed=$SEED] Stage 4: generating into $STAGE4_OUT"
   cspd-stage4 generate \
     --modes-dir "$MODES_DIR" \
     --output-dir "$STAGE4_OUT" \
@@ -81,8 +100,7 @@ for SEED in $SEEDS; do
     --num-inference-steps 50 \
     --seed "$SEED"
 
-  echo ""
-  echo "# Eval for gen_seed=$SEED (repeat=$EVAL_REPEAT)"
+  echo "[seed=$SEED] Eval (repeat=$EVAL_REPEAT)"
   EVAL_REPEAT="$EVAL_REPEAT" bash scripts/server/eval/run_eval_pipeline.sh \
     "${STAGE4_OUT}/images" \
     "$VAL_DIR" \

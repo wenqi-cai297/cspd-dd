@@ -1186,12 +1186,13 @@ Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditionin
 
 Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed at IPC=10):
 
-1. **Rebaseline HDBSCAN + medoid under 3×3 protocol (2026-04-18)**
-   - New eval protocol: 3 Stage 4 runs with master seeds {42, 123, 456}, each uses the run-shared-seed convention (no +mode_idx), each dataset eval'd with 3 repeats
-   - **Aggregation rule**: for each gen_seed take `max(3 eval repeats)` = best-of-3 (to de-noise the eval-repeat axis); then report mean / std / min / max across the 3 per-seed bests. This separates the quantities we care about (generation variance) from eval-training variance.
-   - Measures generation variance (previous 62.33% ± 1.47 only measured eval variance on a single generation)
+1. **Rebaseline HDBSCAN + medoid under full 3×3 protocol (2026-04-18)**
+   - For each seed in {42, 123, 456}: re-run Stage 3 clustering with that seed (produces its own `modes_hdbscan_s<seed>` — HDBSCAN is deterministic but PCA pre-processing and the K-Means fallback/sub-clustering are seeded, so medoid selection changes between seeds); then Stage 4 generate with per-round shared master seed; then eval with 3 repeats.
+   - The seed is **shared across Stage 3 and Stage 4** for each round (paired), so each round is a single coherent "random trajectory".
+   - **Aggregation rule**: for each seed take `max(3 eval repeats)` = best-of-3 (de-noising the eval-training axis); then report mean / std / min / max across the 3 per-seed bests.
+   - Measures **combined Stage 3 + Stage 4 generation variance**. Previous 62.33% ± 1.47 used a fixed Stage 3 modes + fixed per-image `+mode_idx` seeding at Stage 4, so it underestimated generation variance.
    - Run: `bash scripts/server/run_baseline_3x3.sh`
-   - This replaces 62.33% ± 1.47 as the comparison baseline going forward
+   - This replaces 62.33% ± 1.47 as the comparison baseline going forward.
 
 2. **IPC sweep on baseline**
    - Run IPC=10, 20, 50 with HDBSCAN + medoid caption, no candidate selection
