@@ -35,7 +35,7 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - **Stage 2 training** is implemented for both SDXL LoRA (**primary, validated**) and SD v1.5 full fine-tuning (tested but worse). SDXL is the mainline backbone.
 - **Stage 2 inference / sampling** script is implemented for LoRA vs baseline A/B comparison.
 - **Stage 3 mode discovery** is implemented: DINOv2 encoding + per-class clustering (K-Means or HDBSCAN) + medoid caption extraction (default) or diversity selection (opt-in via `--diversify-captions`).
-- **Stage 4 distilled dataset generation** is implemented: text-to-image generation with optional multi-candidate selection (prototype+diversity), set-level representativeness evaluation, and legacy img2img/mode guidance paths.
+- **Stage 4 distilled dataset generation** is implemented: text-to-image generation with optional multi-candidate selection — per-mode prototype+diversity (Phase 2) or set-level greedy matching in VAE or DINOv2 feature space (Phase 3) — plus set-level representativeness evaluation and legacy img2img/mode guidance paths.
 - **Evaluation** is implemented: train classifier (ConvNet-6/ResNet-18/ResNetAP-10) on distilled dataset, evaluate on real val set.
 - Supporting server scripts, metadata prep, mock/regression runs, and full workflow wiring exist.
 
@@ -1140,7 +1140,8 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 7. text2img + mode guidance (MGD³-style) → failed: detailed captions dominate, no usable sweet spot (see 16.11)
 8. text2img + multi-candidate selection, per-mode (DINOv2 prototype + diversity) → tested, did not beat single-medoid baseline at IPC=10
 9. **text2img + HDBSCAN + medoid caption** → current baseline (62.33% on ImageNette IPC=10)
-10. text2img + multi-candidate selection, **set-level** (D³HR moments, 1-per-mode, N=10, IPC=10) → **59.53% ± 0.38, −2.80% vs baseline**; regression consistent across 3 repeats
+10. text2img + multi-candidate selection, **set-level moments, DINOv2 space, L2-norm, 1-per-mode, N=10, IPC=10** → **59.53% ± 0.38, −2.80% vs baseline**; regression consistent across 3 repeats
+11. text2img + multi-candidate selection, **set-level moments, VAE latent space (SDXL-native, 16384-dim, no L2-norm), 1-per-mode, N=10, IPC=10** → code complete, eval pending (2026-04-17)
 
 ---
 
@@ -1185,20 +1186,26 @@ Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditionin
 
 Given current repo state (as of 2026-04-17):
 
-1. **IPC sweep on baseline**
+1. **Phase 3 set-level — VAE-space eval (pending on server)**
+   - Code complete (commit `8db5573`): `--set-feature-space vae` is the default for `--set-level-selection`
+   - Addresses the two likely causes of the DINOv2-space regression (proxy space + L2-normalization)
+   - Run: `bash scripts/server/run_setlevel_phase3.sh` (same HDBSCAN modes / checkpoint-7254 / seed=42 as baseline)
+   - **Decision rule**: if result ≥ 62% → keep exploring (try weight-desc greedy order, MMD objective); if still regresses → abandon the set-level line and go to IPC sweep
+
+2. **IPC sweep on baseline**
    - Run IPC=10,20,50 with HDBSCAN + medoid caption, no selection
    - Compare against published baselines (MGD³, DD-VLCP, RDED, SRe2L)
 
-2. **Multi-architecture benchmarking**
+3. **Multi-architecture benchmarking**
    - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10), 3 repeats
    - Report mean ± std — not just ResNetAP-10
 
-3. **ImageNet-1k full pipeline**
+4. **ImageNet-1k full pipeline**
    - Stage 1 full run on ImageNet-1k in progress
    - After ImageNette benchmarking stabilizes, run full pipeline on 1K classes
    - Use `scripts/server/run_full_pipeline.sh` for resume support
 
-4. **Novel method exploration** (Phase 4 from plan.md)
+5. **Novel method exploration** (Phase 4 from plan.md)
    - Early vision-language fusion (EVLF-style) — lightweight visual-semantic adapter
    - The biggest research-value direction remaining after Phase 2/3 exhausted
 
