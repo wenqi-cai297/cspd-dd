@@ -1141,7 +1141,7 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 8. text2img + multi-candidate selection, per-mode (DINOv2 prototype + diversity) → tested, did not beat single-medoid baseline at IPC=10
 9. **text2img + HDBSCAN + medoid caption** → current baseline (62.33% on ImageNette IPC=10)
 10. text2img + multi-candidate selection, **set-level moments, DINOv2 space, L2-norm, 1-per-mode, N=10, IPC=10** → **59.53% ± 0.38, −2.80% vs baseline**; regression consistent across 3 repeats
-11. text2img + multi-candidate selection, **set-level moments, VAE latent space (SDXL-native, 16384-dim, no L2-norm), 1-per-mode, N=10, IPC=10** → code complete, eval pending (2026-04-17)
+11. text2img + multi-candidate selection, **set-level moments, VAE latent space (SDXL-native, 16384-dim, no L2-norm), 1-per-mode, N=10, IPC=10** → **59.07% ± 0.25, −3.26% vs baseline**. Feature-space swap did not rescue the regression → objective itself is the bottleneck at IPC=10
 
 ---
 
@@ -1184,30 +1184,28 @@ Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditionin
 
 ## 17. Immediate next implementation work
 
-Given current repo state (as of 2026-04-17):
+Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed at IPC=10):
 
-1. **Phase 3 set-level — VAE-space eval (pending on server)**
-   - Code complete (commit `8db5573`): `--set-feature-space vae` is the default for `--set-level-selection`
-   - Addresses the two likely causes of the DINOv2-space regression (proxy space + L2-normalization)
-   - Run: `bash scripts/server/run_setlevel_phase3.sh` (same HDBSCAN modes / checkpoint-7254 / seed=42 as baseline)
-   - **Decision rule**: if result ≥ 62% → keep exploring (try weight-desc greedy order, MMD objective); if still regresses → abandon the set-level line and go to IPC sweep
-
-2. **IPC sweep on baseline**
-   - Run IPC=10,20,50 with HDBSCAN + medoid caption, no selection
+1. **IPC sweep on baseline (new #1)**
+   - Run IPC=10, 20, 50 with HDBSCAN + medoid caption, no candidate selection
    - Compare against published baselines (MGD³, DD-VLCP, RDED, SRe2L)
+   - At IPC=20/50, re-test set-level selection — more images per class may change the trade-off that hurt us at IPC=10
 
-3. **Multi-architecture benchmarking**
+2. **Multi-architecture benchmarking**
    - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10), 3 repeats
    - Report mean ± std — not just ResNetAP-10
 
-4. **ImageNet-1k full pipeline**
+3. **ImageNet-1k full pipeline**
    - Stage 1 full run on ImageNet-1k in progress
    - After ImageNette benchmarking stabilizes, run full pipeline on 1K classes
    - Use `scripts/server/run_full_pipeline.sh` for resume support
 
-5. **Novel method exploration** (Phase 4 from plan.md)
+4. **Novel method exploration** (Phase 4 from plan.md)
    - Early vision-language fusion (EVLF-style) — lightweight visual-semantic adapter
-   - The biggest research-value direction remaining after Phase 2/3 exhausted
+   - The biggest research-value direction remaining after Phase 2/3 exhausted at IPC=10
+
+### Closed (for now)
+- **Phase 3 set-level candidate selection at IPC=10** — both DINOv2 and VAE feature spaces regressed (−2.80% and −3.26%). Code remains in tree (`--set-level-selection`, `--set-feature-space {vae,dinov2}`, `--set-objective {moments,mmd}`) for possible re-test at higher IPC.
 
 ---
 
@@ -1299,13 +1297,12 @@ Given current repo state (as of 2026-04-17):
   - 1-per-mode constraint (not free-pool) so IPC stays balanced across modes.
   - Greedy in original mode listing order, which for HDBSCAN is cluster-id order (i.e. discovery order from the HDBSCAN label assignment), **not** weight-desc. Processing large modes first is likely better in theory (more slack to compensate downstream); this is a candidate follow-up.
   - Requires `--num-candidates > 1` and `--visual-mode none`; raises on misuse.
-- **First A/B eval (2026-04-17, IPC=10, `moments` objective, N=10, HDBSCAN modes, ResNetAP-10 × 3 repeats)**: **59.53% ± 0.38** (runs: 59.0, 59.8, 59.8) — **−2.80% vs 62.33% baseline, consistent regression** (tight std confirms it is not noise). `distilled_dir` = `runs/stage4/ImageNette_train/ipc10/lora/setlevel_moments_n10_2026-04-17_195030`. **Feature space: DINOv2 CLS, L2-normalized.**
-- **Likely causes (not yet disentangled)**:
-  1. DINOv2 moment matching ≠ classifier-useful. D³HR operates in DiT latent space (model-native, magnitudes meaningful); we operated in DINOv2 CLS space with L2-normalized features, so "match class mean/std" collapses toward the *average-looking* image, which is more homogeneous than what downstream classifiers benefit from.
-  2. L2 normalization drops magnitude. Added to fix the `dino_embeds.pt` (raw) vs `scorer.encode_image` (normalized) mismatch, but magnitude may carry saliency cues. Should re-test without normalization.
-  3. Greedy in cluster-id order. First mode gets "closest to class mean" — similar to a global medoid — which biases the whole set toward the class centroid before later modes can compensate.
-- **Follow-up (2026-04-17): VAE-space set-level selection**. Added `--set-feature-space vae` (default) which addresses causes 1+2 simultaneously: uses SDXL VAE latents (the model's native space, exactly analogous to D³HR's DiT latent approach) with magnitude preserved (no L2-normalize). Real features loaded from Stage 3's `vae_latents.pt`; candidates re-encoded at Stage 4 time via `pipe.vae.encode()` mirroring the Stage 3 preprocessing. Feature dim jumps from 768 (DINOv2) to 16384 (flattened 4×64×64). DINOv2 path kept as ablation.
-- **Status**: DINOv2-space set-level matching regresses. VAE-space variant code-complete, eval pending.
+- **A/B #1 (2026-04-17, DINOv2 CLS space, L2-normalized, `moments`, N=10, HDBSCAN modes, ResNetAP-10 × 3)**: **59.53% ± 0.38** (59.0, 59.8, 59.8) — **−2.80% vs 62.33% baseline**. `distilled_dir` = `runs/stage4/ImageNette_train/ipc10/lora/setlevel_moments_n10_2026-04-17_195030`.
+- **A/B #2 (2026-04-17, SDXL VAE latent space, unnormalized, 16384-dim, `moments`, N=10, same modes/seed)**: **59.07% ± 0.25** (59.4, 59.0, 58.8) — **−3.26% vs baseline**. `distilled_dir` = `runs/stage4/ImageNette_train/ipc10/lora/setlevel_vae_moments_n10_2026-04-17_222847`. Changing to the model-native feature space and dropping L2-norm did **not** help; if anything it regressed slightly further (both differences are well beyond each other's std, but practically similar).
+- **Interpretation**: both regressions are consistent (std ≤ 0.38 across 3 repeats). Since the feature space swap addressed the two a-priori most-likely causes (proxy-space mismatch + L2-normalization wiping magnitude) and the result did **not** move toward the baseline, the bottleneck is **not** the feature space. The most likely remaining explanation is the objective itself:
+  - Medoid baseline: each mode contributes the real image closest to its own cluster centroid → diversity comes from the mode structure (inter-mode variation).
+  - Set-level moment matching: greedy pulls the whole set toward the *class* mean/std. The first pick anchors near the class centroid, later picks compensate but the inter-mode spread gets smoothed out, producing a more homogeneous set than medoid → worse classifier training signal.
+- **Status — set-level line closed at IPC=10**. Per §17 decision rule ("still regresses → abandon"), stop iterating on this approach at IPC=10. Code stays in tree (`--set-level-selection`, both `--set-feature-space` variants) for future IPC=20/50 experiments where more images per class may change the trade-off. Next mainline: IPC sweep on the HDBSCAN + medoid baseline.
 
 ### Current best configuration (as of 2026-04-17)
 - **Stage 2**: SDXL rank=64 LoRA, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, epoch 9 (checkpoint-7254)
@@ -1318,7 +1315,7 @@ Given current repo state (as of 2026-04-17):
   - HDBSCAN ≈ K-Means for medoid caption selection at IPC=10
   - Mode guidance (MGD³-style) incompatible with detailed text conditioning (see 16.11)
   - Multi-candidate selection with DINOv2 probe/prototype doesn't beat baseline (Phase 2)
-  - Multi-candidate **set-level** selection with D³HR moments in DINOv2 space **regresses** to 59.53% ± 0.38 (−2.80%); distribution matching in DINOv2 space is not classifier-useful as implemented (Phase 3, 2026-04-17)
+  - Multi-candidate **set-level** selection with D³HR moments **regresses** in both DINOv2 space (59.53% ± 0.38, −2.80%) and VAE latent space (59.07% ± 0.25, −3.26%) at IPC=10. Feature-space swap did not change the direction → the objective itself (greedy class-mean matching) over-smooths inter-mode diversity at low IPC (Phase 3, 2026-04-17)
   - SD v1.5 full fine-tuning underperforms SDXL LoRA (see 16.10)
 - **Eval**: mode_guidance protocol — RRC → ToTensor → HFlip → custom ColorJitter → Lighting → Normalize
 
