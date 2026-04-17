@@ -223,6 +223,8 @@ def generate_distilled_dataset(
     candidate_beta: float = 0.5,
     candidate_probe_dir: str | None = None,
     eval_representativeness: bool = False,
+    set_level_selection: bool = False,
+    set_objective: str = "moments",
 ) -> GenerateResult:
     """Generate the distilled dataset using dual-anchor conditioning.
 
@@ -290,9 +292,18 @@ def generate_distilled_dataset(
         print(f"[Stage 4] Loading SDXL refiner: {refiner_model}")
         refiner = _load_refiner_pipeline(refiner_model, device, dtype)
 
-    # Initialize candidate selector if multi-candidate mode
+    # Validate set-level selection prerequisites
+    if set_level_selection:
+        if num_candidates <= 1:
+            raise ValueError("set_level_selection requires num_candidates > 1")
+        if visual_mode != "none":
+            raise ValueError("set_level_selection currently only supports visual_mode='none' (text2img)")
+        if set_objective not in ("moments", "mmd"):
+            raise ValueError(f"set_objective must be 'moments' or 'mmd', got {set_objective!r}")
+
+    # Initialize candidate selector if per-mode multi-candidate mode
     selector = None
-    if num_candidates > 1:
+    if num_candidates > 1 and not set_level_selection:
         from cspd_stage4.candidate_selection import CandidateSelector
 
         selector = CandidateSelector(device=device, beta=candidate_beta)
@@ -319,76 +330,175 @@ def generate_distilled_dataset(
     metadata_rows = []
     print(f"[Stage 4] Generating {total_modes} distilled images (strength={strength}, steps={num_inference_steps})...")
 
-    for mode_idx in tqdm(range(total_modes), desc="Generating"):
-        mode_meta = modes_list[mode_idx] if mode_idx < len(modes_list) else {}
-        class_name = mode_meta.get("class_name", "unknown")
-        class_name_raw = mode_meta.get("class_name_raw", "unknown")
-        archetype = mode_meta.get("archetype", "unknown")
-        cluster_id = mode_meta.get("cluster_id", mode_idx)
-        representative_caption = mode_meta.get("representative_caption", "")
+    # --- Set-level selection path ---
+    # Group modes by class, generate all N candidates per mode, then greedy-pick
+    # one per mode to minimize set-level distance to the real class distribution
+    # (D³HR-style moment matching or DAP-style linear-kernel MMD).
+    if set_level_selection:
+        from cspd_stage4.representativeness import RepresentativenessScorer
 
-        # --- Text-to-image path (visual_mode="none") ---
-        # Mirrors scripts/inference/sample_sdxl_lora.py exactly:
-        #   generator = torch.Generator(device=device).manual_seed(seed + idx)
-        #   image = pipe(prompt=prompt, height=res, width=res,
-        #                num_inference_steps=steps, guidance_scale=gs,
-        #                generator=generator).images[0]
-        if visual_mode == "none":
-            prompt = representative_caption if representative_caption else class_name
-            generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
+        modes_dir_path = Path(modes_dir)
+        encode_dir = candidate_probe_dir or str(modes_dir_path.parent / "encoded")
+        dino_path = Path(encode_dir) / "dino_embeds.pt"
+        index_path = Path(encode_dir) / "encode_index.json"
+        if not (dino_path.exists() and index_path.exists()):
+            raise FileNotFoundError(
+                f"set_level_selection requires encoded real DINOv2 features at "
+                f"{dino_path} and {index_path}"
+            )
 
-            if use_mode_guidance:
-                # Swap scheduler to mode-guided version for this image,
-                # then set the target centroid. The custom scheduler injects
-                # guidance inside step() with access to pred_x0.
-                from cspd_stage4.mode_guidance import EulerModeGuidanceScheduler
+        print(f"[Stage 4] Set-level selection: objective={set_objective}, "
+              f"num_candidates={num_candidates}")
+        scorer = RepresentativenessScorer(device=device)
 
-                centroid = mode_centroids[mode_idx]
+        real_features = torch.load(dino_path, weights_only=True)
+        with open(index_path, encoding="utf-8") as _f:
+            _encode_index = json.load(_f)
+        _samples_full = _encode_index.get("samples", [])
 
-                # Replace scheduler (only once, reuse across images)
-                if not isinstance(pipe.scheduler, EulerModeGuidanceScheduler):
-                    pipe.scheduler = EulerModeGuidanceScheduler.from_config(pipe.scheduler.config)
+        # Group modes by class, preserving original order within each class
+        from collections import OrderedDict
+        modes_by_class: "OrderedDict[str, list[tuple[int, dict]]]" = OrderedDict()
+        for m_idx, m_meta in enumerate(modes_list):
+            cls_key = m_meta.get("class_name_raw", "unknown")
+            modes_by_class.setdefault(cls_key, []).append((m_idx, m_meta))
 
-                pipe.scheduler.set_mode_guidance(
-                    centroid=centroid,
-                    scale=mode_guidance_scale,
-                    stop_step=mode_guidance_stop_step,
-                )
+        set_level_stats: dict[str, Any] = {}
 
-                image = pipe(
-                    prompt=prompt,
-                    height=resolution,
-                    width=resolution,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    generator=generator,
-                ).images[0]
-            else:
-                if selector is not None and num_candidates > 1:
-                    # Multi-candidate: generate N, score, select best
-                    best_image = None
-                    best_score = -float("inf")
-                    best_embedding = None
-                    for cand_idx in range(num_candidates):
-                        cand_seed = seed + mode_idx * num_candidates + cand_idx
-                        cand_gen = torch.Generator(device=device).manual_seed(cand_seed)
-                        cand_image = pipe(
-                            prompt=prompt,
-                            height=resolution,
-                            width=resolution,
-                            num_inference_steps=num_inference_steps,
-                            guidance_scale=guidance_scale,
-                            generator=cand_gen,
-                        ).images[0]
-                        total, disc, div, emb = selector.score_candidate(cand_image, class_name_raw)
-                        if total > best_score:
-                            best_score = total
-                            best_image = cand_image
-                            best_embedding = emb
-                    image = best_image
-                    selector.accept_candidate(class_name_raw, best_embedding)
-                else:
-                    # Standard: single candidate
+        for cls_key, cls_modes in tqdm(list(modes_by_class.items()), desc="Set-level (per class)"):
+            cls_real_indices = [
+                i for i, s in enumerate(_samples_full)
+                if s.get("class_name_raw") == cls_key
+            ]
+            if not cls_real_indices:
+                print(f"  [WARN] No real features found for class {cls_key!r}, skipping")
+                continue
+            cls_real_feats = real_features[cls_real_indices]
+
+            # Generate N candidates per mode in this class
+            per_mode_images: list[list[Image.Image]] = []
+            per_mode_features: list[torch.Tensor] = []
+
+            for m_idx, m_meta in cls_modes:
+                prompt = m_meta.get("representative_caption", "") or m_meta.get("class_name", cls_key)
+                cand_images = []
+                cand_feats = []
+                for cand_idx in range(num_candidates):
+                    cand_seed = seed + m_idx * num_candidates + cand_idx
+                    cand_gen = torch.Generator(device=device).manual_seed(cand_seed)
+                    cand_image = pipe(
+                        prompt=prompt,
+                        height=resolution,
+                        width=resolution,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        generator=cand_gen,
+                    ).images[0]
+                    feat = scorer.encode_image(cand_image)
+                    cand_images.append(cand_image)
+                    cand_feats.append(feat)
+                per_mode_images.append(cand_images)
+                per_mode_features.append(torch.stack(cand_feats))
+
+            # Greedy select one candidate per mode
+            selected_indices, running_scores = scorer.select_set_greedy(
+                cls_real_feats,
+                per_mode_features,
+                objective=set_objective,
+            )
+            set_level_stats[cls_key] = {
+                "num_modes": len(cls_modes),
+                "num_candidates_per_mode": num_candidates,
+                "selected_indices": selected_indices,
+                "final_score": running_scores[-1] if running_scores else None,
+                "objective": set_objective,
+            }
+
+            # Save selected images and build metadata
+            for m_list_idx, ((m_idx, m_meta), sel_cand_idx) in enumerate(zip(cls_modes, selected_indices)):
+                image = per_mode_images[m_list_idx][sel_cand_idx]
+
+                prompt = m_meta.get("representative_caption", "") or m_meta.get("class_name", cls_key)
+                if refiner is not None:
+                    refiner_gen = torch.Generator(device=device).manual_seed(seed + m_idx)
+                    image = refiner(
+                        prompt=prompt,
+                        image=image,
+                        strength=refiner_strength,
+                        generator=refiner_gen,
+                    ).images[0]
+
+                cluster_id = m_meta.get("cluster_id", m_idx)
+                class_dir = images_dir / cls_key
+                class_dir.mkdir(parents=True, exist_ok=True)
+                image_filename = f"{cls_key}_mode{cluster_id:03d}.png"
+                image_path = class_dir / image_filename
+                image.save(image_path)
+
+                metadata_rows.append({
+                    "mode_index": m_idx,
+                    "class_name": m_meta.get("class_name", "unknown"),
+                    "class_name_raw": cls_key,
+                    "archetype": m_meta.get("archetype", "unknown"),
+                    "cluster_id": cluster_id,
+                    "representative_caption": m_meta.get("representative_caption", ""),
+                    "num_cluster_members": m_meta.get("num_members", 0),
+                    "image_path": str(image_path),
+                    "relative_image_path": f"{cls_key}/{image_filename}",
+                    "generation_mode": "text2img+set_level",
+                    "set_level_selection": {
+                        "objective": set_objective,
+                        "num_candidates": num_candidates,
+                        "selected_candidate_idx": sel_cand_idx,
+                    },
+                })
+
+        # Save set-level selection stats alongside metadata
+        write_json(output_dir / "set_level_selection_report.json", set_level_stats)
+
+        del scorer
+        torch.cuda.empty_cache()
+
+        print(f"[Stage 4] Set-level selection done: {len(metadata_rows)} images across "
+              f"{len(modes_by_class)} classes")
+
+    else:
+        for mode_idx in tqdm(range(total_modes), desc="Generating"):
+            mode_meta = modes_list[mode_idx] if mode_idx < len(modes_list) else {}
+            class_name = mode_meta.get("class_name", "unknown")
+            class_name_raw = mode_meta.get("class_name_raw", "unknown")
+            archetype = mode_meta.get("archetype", "unknown")
+            cluster_id = mode_meta.get("cluster_id", mode_idx)
+            representative_caption = mode_meta.get("representative_caption", "")
+
+            # --- Text-to-image path (visual_mode="none") ---
+            # Mirrors scripts/inference/sample_sdxl_lora.py exactly:
+            #   generator = torch.Generator(device=device).manual_seed(seed + idx)
+            #   image = pipe(prompt=prompt, height=res, width=res,
+            #                num_inference_steps=steps, guidance_scale=gs,
+            #                generator=generator).images[0]
+            if visual_mode == "none":
+                prompt = representative_caption if representative_caption else class_name
+                generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
+
+                if use_mode_guidance:
+                    # Swap scheduler to mode-guided version for this image,
+                    # then set the target centroid. The custom scheduler injects
+                    # guidance inside step() with access to pred_x0.
+                    from cspd_stage4.mode_guidance import EulerModeGuidanceScheduler
+
+                    centroid = mode_centroids[mode_idx]
+
+                    # Replace scheduler (only once, reuse across images)
+                    if not isinstance(pipe.scheduler, EulerModeGuidanceScheduler):
+                        pipe.scheduler = EulerModeGuidanceScheduler.from_config(pipe.scheduler.config)
+
+                    pipe.scheduler.set_mode_guidance(
+                        centroid=centroid,
+                        scale=mode_guidance_scale,
+                        stop_step=mode_guidance_stop_step,
+                    )
+
                     image = pipe(
                         prompt=prompt,
                         height=resolution,
@@ -397,6 +507,100 @@ def generate_distilled_dataset(
                         guidance_scale=guidance_scale,
                         generator=generator,
                     ).images[0]
+                else:
+                    if selector is not None and num_candidates > 1:
+                        # Multi-candidate: generate N, score, select best
+                        best_image = None
+                        best_score = -float("inf")
+                        best_embedding = None
+                        for cand_idx in range(num_candidates):
+                            cand_seed = seed + mode_idx * num_candidates + cand_idx
+                            cand_gen = torch.Generator(device=device).manual_seed(cand_seed)
+                            cand_image = pipe(
+                                prompt=prompt,
+                                height=resolution,
+                                width=resolution,
+                                num_inference_steps=num_inference_steps,
+                                guidance_scale=guidance_scale,
+                                generator=cand_gen,
+                            ).images[0]
+                            total, disc, div, emb = selector.score_candidate(cand_image, class_name_raw)
+                            if total > best_score:
+                                best_score = total
+                                best_image = cand_image
+                                best_embedding = emb
+                        image = best_image
+                        selector.accept_candidate(class_name_raw, best_embedding)
+                    else:
+                        # Standard: single candidate
+                        image = pipe(
+                            prompt=prompt,
+                            height=resolution,
+                            width=resolution,
+                            num_inference_steps=num_inference_steps,
+                            guidance_scale=guidance_scale,
+                            generator=generator,
+                        ).images[0]
+
+                # Optional refiner pass
+                if refiner is not None:
+                    refiner_gen = torch.Generator(device=device).manual_seed(seed + mode_idx)
+                    image = refiner(
+                        prompt=prompt,
+                        image=image,
+                        strength=refiner_strength,
+                        generator=refiner_gen,
+                    ).images[0]
+
+                # Save image
+                class_dir = images_dir / class_name_raw
+                class_dir.mkdir(parents=True, exist_ok=True)
+                image_filename = f"{class_name_raw}_mode{cluster_id:03d}.png"
+                image_path = class_dir / image_filename
+                image.save(image_path)
+
+                metadata_rows.append({
+                    "mode_index": mode_idx,
+                    "class_name": class_name,
+                    "class_name_raw": class_name_raw,
+                    "archetype": archetype,
+                    "cluster_id": cluster_id,
+                    "representative_caption": representative_caption,
+                    "num_cluster_members": mode_meta.get("num_members", 0),
+                    "image_path": str(image_path),
+                    "relative_image_path": f"{class_name_raw}/{image_filename}",
+                    "generation_mode": "text2img" + ("+mode_guidance" if use_mode_guidance else ""),
+                })
+                continue
+
+            # --- Img2img path (visual_mode="medoid") ---
+            # Load medoid real image as img2img init
+            medoid_record_id = mode_meta.get("medoid_record_id", mode_meta.get("visual_medoid_record_id", ""))
+            medoid_image_path = ""
+            for s in encode_samples:
+                if s.get("record_id") == medoid_record_id:
+                    medoid_image_path = s.get("image_path", "")
+                    break
+            if not medoid_image_path or not Path(medoid_image_path).exists():
+                print(f"  [WARN] Medoid image not found for mode {mode_idx}, skipping")
+                continue
+
+            init_image = Image.open(medoid_image_path).convert("RGB")
+            init_image = init_image.resize((resolution, resolution), Image.LANCZOS)
+
+            prompt = representative_caption if representative_caption else class_name
+            generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
+            output = pipe(
+                image=init_image,
+                prompt=prompt,
+                negative_prompt="",
+                strength=strength,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                output_type="pil",
+            )
+            image = output.images[0]
 
             # Optional refiner pass
             if refiner is not None:
@@ -408,7 +612,7 @@ def generate_distilled_dataset(
                     generator=refiner_gen,
                 ).images[0]
 
-            # Save image
+            # Save image: organize by class
             class_dir = images_dir / class_name_raw
             class_dir.mkdir(parents=True, exist_ok=True)
             image_filename = f"{class_name_raw}_mode{cluster_id:03d}.png"
@@ -425,67 +629,7 @@ def generate_distilled_dataset(
                 "num_cluster_members": mode_meta.get("num_members", 0),
                 "image_path": str(image_path),
                 "relative_image_path": f"{class_name_raw}/{image_filename}",
-                "generation_mode": "text2img" + ("+mode_guidance" if use_mode_guidance else ""),
             })
-            continue
-
-        # --- Img2img path (visual_mode="medoid") ---
-        # Load medoid real image as img2img init
-        medoid_record_id = mode_meta.get("medoid_record_id", mode_meta.get("visual_medoid_record_id", ""))
-        medoid_image_path = ""
-        for s in encode_samples:
-            if s.get("record_id") == medoid_record_id:
-                medoid_image_path = s.get("image_path", "")
-                break
-        if not medoid_image_path or not Path(medoid_image_path).exists():
-            print(f"  [WARN] Medoid image not found for mode {mode_idx}, skipping")
-            continue
-
-        init_image = Image.open(medoid_image_path).convert("RGB")
-        init_image = init_image.resize((resolution, resolution), Image.LANCZOS)
-
-        prompt = representative_caption if representative_caption else class_name
-        generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
-        output = pipe(
-            image=init_image,
-            prompt=prompt,
-            negative_prompt="",
-            strength=strength,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            output_type="pil",
-        )
-        image = output.images[0]
-
-        # Optional refiner pass
-        if refiner is not None:
-            refiner_gen = torch.Generator(device=device).manual_seed(seed + mode_idx)
-            image = refiner(
-                prompt=prompt,
-                image=image,
-                strength=refiner_strength,
-                generator=refiner_gen,
-            ).images[0]
-
-        # Save image: organize by class
-        class_dir = images_dir / class_name_raw
-        class_dir.mkdir(parents=True, exist_ok=True)
-        image_filename = f"{class_name_raw}_mode{cluster_id:03d}.png"
-        image_path = class_dir / image_filename
-        image.save(image_path)
-
-        metadata_rows.append({
-            "mode_index": mode_idx,
-            "class_name": class_name,
-            "class_name_raw": class_name_raw,
-            "archetype": archetype,
-            "cluster_id": cluster_id,
-            "representative_caption": representative_caption,
-            "num_cluster_members": mode_meta.get("num_members", 0),
-            "image_path": str(image_path),
-            "relative_image_path": f"{class_name_raw}/{image_filename}",
-        })
 
     # Save metadata
     metadata_path = output_dir / "distilled_metadata.json"

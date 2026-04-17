@@ -45,6 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
                             help="Directory with DINOv2 features for building class prototypes (default: auto-detect from modes_dir/../encoded)")
     gen_parser.add_argument("--eval-representativeness", action="store_true",
                             help="After generation, evaluate set-level representativeness (MMD + coverage) per class")
+    gen_parser.add_argument("--set-level-selection", action="store_true",
+                            help="Phase 3 refinement: after generating N candidates per mode, greedy-pick "
+                                 "one per mode to minimize set-level distance to the real class distribution. "
+                                 "Requires --num-candidates > 1 and --visual-mode none.")
+    gen_parser.add_argument("--set-objective", default="moments", choices=["moments", "mmd"],
+                            help="Objective for set-level selection: 'moments' (D3HR-style mean+std+0.1*skew) "
+                                 "or 'mmd' (DAP linear kernel). Default: moments.")
 
     return parser
 
@@ -77,6 +84,8 @@ def main() -> None:
             candidate_beta=args.candidate_beta,
             candidate_probe_dir=args.candidate_probe_dir,
             eval_representativeness=args.eval_representativeness,
+            set_level_selection=args.set_level_selection,
+            set_objective=args.set_objective,
         )
         print(json.dumps({
             "output_dir": result.output_dir,

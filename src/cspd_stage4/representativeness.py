@@ -239,6 +239,82 @@ class RepresentativenessScorer:
             "moment_score": round(total, 6),
         }
 
+    @torch.no_grad()
+    def select_set_greedy(
+        self,
+        real_features: torch.Tensor,
+        candidates_per_mode: list[torch.Tensor],
+        objective: str = "moments",
+        skewness_weight: float = 0.1,
+    ) -> tuple[list[int], list[float]]:
+        """Greedy set-level selection: pick one candidate per mode to minimize
+        set-level distance to the real class distribution.
+
+        D³HR-style greedy matching adapted with a 1-per-mode constraint so
+        Stage 3 mode structure is preserved (each mode still contributes
+        exactly one image).
+
+        Args:
+            real_features: (N_real, D) real data features for one class.
+            candidates_per_mode: list of length K (num modes), each entry is
+                (N_cand, D) candidate features for that mode.
+            objective: "moments" (D³HR mean+std+skew) or "mmd" (DAP linear kernel).
+            skewness_weight: skew term weight for moments objective (D³HR uses 0.1).
+
+        Returns:
+            (selected_indices, scores) where selected_indices[i] is the chosen
+            candidate index for mode i, and scores[i] is the running set score
+            after adding that mode's pick.
+        """
+        real = F.normalize(real_features.to(self.device).float(), dim=1)
+        real_mean = real.mean(dim=0)
+        real_std = real.std(dim=0)
+
+        selected_features: list[torch.Tensor] = []
+        selected_indices: list[int] = []
+        running_scores: list[float] = []
+
+        for mode_idx, cand_feats in enumerate(candidates_per_mode):
+            cand = F.normalize(cand_feats.to(self.device).float(), dim=1)
+            if cand.shape[0] == 0:
+                raise ValueError(f"Mode {mode_idx} has no candidates")
+
+            best_score = float("inf")
+            best_idx = 0
+
+            for cand_idx in range(cand.shape[0]):
+                tentative = torch.stack(selected_features + [cand[cand_idx]])
+                if objective == "mmd":
+                    k_rr = (real @ real.T).mean()
+                    k_ss = (tentative @ tentative.T).mean()
+                    k_rs = (real @ tentative.T).mean()
+                    score = max(float(k_rr + k_ss - 2 * k_rs), 0.0)
+                else:  # moments
+                    synth_mean = tentative.mean(dim=0)
+                    mean_diff = float(torch.norm(synth_mean - real_mean))
+                    if tentative.shape[0] > 1:
+                        synth_std = tentative.std(dim=0)
+                        std_diff = float(torch.norm(synth_std - real_std))
+                    else:
+                        std_diff = float(torch.norm(real_std))
+                    if tentative.shape[0] > 2:
+                        synth_centered = tentative - synth_mean
+                        synth_skew = (synth_centered ** 3).mean(dim=0) / (synth_std ** 3 + 1e-8)
+                        skew_diff = float(torch.norm(synth_skew))
+                    else:
+                        skew_diff = 0.0
+                    score = mean_diff + std_diff + skewness_weight * skew_diff
+
+                if score < best_score:
+                    best_score = score
+                    best_idx = cand_idx
+
+            selected_features.append(cand[best_idx])
+            selected_indices.append(best_idx)
+            running_scores.append(best_score)
+
+        return selected_indices, running_scores
+
     def score_set(
         self,
         real_features: torch.Tensor,

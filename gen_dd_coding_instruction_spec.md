@@ -1104,7 +1104,9 @@ cspd-stage4 generate \
 - **--num-candidates**: Generate N candidates per mode, select the best by prototype similarity + diversity scoring. Default `1` (no selection). Recommended `10-20`.
 - **--candidate-beta**: Diversity weight relative to prototype score. Default `0.5`. 0=pure prototype faithfulness, higher=more diversity. IPC-dependent: 0.3 for IPC=10, 0.5 for IPC=20, 0.7 for IPC=50.
 - **--candidate-probe-dir**: Directory with DINOv2 features for building class prototypes (default: auto-detect).
-- **--eval-representativeness**: After generation, evaluate set-level representativeness per class: MMD (linear kernel, per DAP), moment matching (mean+std+skewness, per D³HR), and coverage. Saves `representativeness_report.json`.
+- **--eval-representativeness**: After generation, evaluate set-level representativeness per class: MMD (linear kernel, per DAP), moment matching (mean+std+skewness, per D³HR), and coverage. Diagnostic only. Saves `representativeness_report.json`.
+- **--set-level-selection**: Phase 3 refinement. After generating N candidates per mode (`--num-candidates > 1`), greedy-pick one per mode to minimize set-level distance to the real class distribution. Replaces the per-mode prototype+diversity scoring (Phase 2) with D³HR-style set optimization, while preserving Stage 3's 1-per-mode structure. Requires `--visual-mode none`. Saves `set_level_selection_report.json`.
+- **--set-objective**: `"moments"` (default, D³HR mean+std+0.1·skew) or `"mmd"` (DAP linear kernel). Only used when `--set-level-selection` is set.
 - **--semantic-mode** (hidden, default `"caption"`): `"caption"` uses representative caption text as prompt. `"embedding"` uses mean text embedding (legacy baseline, blurry).
 
 ### Output artifacts
@@ -1135,8 +1137,9 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 5. img2img from medoid + representative caption → more diverse but eval accuracy significantly worse
 6. text2img + caption diversity selection (Jaccard greedy) → tested, hurt accuracy; kept as opt-in only
 7. text2img + mode guidance (MGD³-style) → failed: detailed captions dominate, no usable sweet spot (see 16.11)
-8. text2img + multi-candidate selection (DINOv2 probe / prototype + diversity) → tested, did not beat single-medoid baseline at IPC=10
+8. text2img + multi-candidate selection, per-mode (DINOv2 prototype + diversity) → tested, did not beat single-medoid baseline at IPC=10
 9. **text2img + HDBSCAN + medoid caption** → current baseline (62.33% on ImageNette IPC=10)
+10. text2img + multi-candidate selection, **set-level** (D³HR moments or DAP MMD, 1-per-mode constraint) → implemented, evaluation pending
 
 ---
 
@@ -1275,7 +1278,20 @@ Given current repo state (as of 2026-04-17):
   - Gap detection: `find_gap_modes()` identifies which modes need regeneration
 - **Enriched mode metadata**: Stage 3 now outputs per-mode weight, density, DINOv2 centroid
 - **Paper alignment verified**: D³HR source code (GitHub), DAP paper (arXiv), RDED source code (GitHub)
-- **Status**: code implemented and tested; Phase 2 alone did not improve on the single-medoid baseline at IPC=10. Phase 3 currently unused in the mainline flow (kept for future IPC sweeps and gap-driven regeneration).
+- **Status**: Phase 2 alone did not improve on the single-medoid baseline at IPC=10. Phase 3 scoring path is diagnostic-only (`--eval-representativeness`).
+
+### Phase 3 refinement — set-level candidate selection (2026-04-17)
+- **Motivation**: Phase 3 scoring alone was unused in the mainline. Upgraded to a *refinement* loop that couples Phase 2 and Phase 3: generate N candidates per mode, then pick the set that best matches the real class distribution.
+- **Implementation**: `RepresentativenessScorer.select_set_greedy()` — greedy per-class selection with a 1-per-mode constraint (preserves Stage 3 mode structure). Two objectives:
+  - `moments`: D³HR-style `‖μ_synth − μ_real‖ + ‖σ_synth − σ_real‖ + 0.1·‖skew_synth‖`
+  - `mmd`: DAP-style linear-kernel MMD² between real and synthetic feature sets
+  - Both operate on L2-normalized DINOv2 features (fixes the earlier normalization mismatch between `dino_embeds.pt` and `scorer.encode_image`).
+- **Wiring**: new CLI flags `--set-level-selection` and `--set-objective {moments,mmd}` in `cspd-stage4 generate`; writes `set_level_selection_report.json` alongside `distilled_metadata.json`.
+- **Design decisions**:
+  - 1-per-mode constraint (not free-pool) so IPC stays balanced across modes.
+  - Greedy in original mode order (HDBSCAN already orders by cluster weight desc in practice).
+  - Requires `--num-candidates > 1` and `--visual-mode none`; raises on misuse.
+- **Status**: code implemented, eval pending. Expected to be most useful at higher IPC where Phase 2's per-mode heuristic leaves more slack.
 
 ### Current best configuration (as of 2026-04-17)
 - **Stage 2**: SDXL rank=64 LoRA, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, epoch 9 (checkpoint-7254)
