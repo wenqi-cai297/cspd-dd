@@ -32,10 +32,10 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - **Stage 1 normalization** is implemented as a deterministic-first canonicalization step with inline constrained VLM review enabled by default.
 - **Stage 1 render** is implemented as a deterministic archetype-template renderer.
 - **Stage 1 enrich** (optional) is implemented: VLM expands template captions with image-specific visual details.
-- **Stage 2 LoRA training** is implemented for both SD v1.5 (new primary) and SDXL (legacy). SD v1.5 is the recommended backbone.
+- **Stage 2 training** is implemented for both SDXL LoRA (**primary, validated**) and SD v1.5 full fine-tuning (tested but worse). SDXL is the mainline backbone.
 - **Stage 2 inference / sampling** script is implemented for LoRA vs baseline A/B comparison.
-- **Stage 3 mode discovery** is implemented: DINOv2 encoding + per-class clustering (K-Means or HDBSCAN) + mode extraction with caption diversity selection.
-- **Stage 4 distilled dataset generation** is implemented: text-to-image generation using Stage 3 caption selection + Stage 2 LoRA backbone. Optional img2img (medoid) and SDXL refiner support.
+- **Stage 3 mode discovery** is implemented: DINOv2 encoding + per-class clustering (K-Means or HDBSCAN) + medoid caption extraction (default) or diversity selection (opt-in via `--diversify-captions`).
+- **Stage 4 distilled dataset generation** is implemented: text-to-image generation with optional multi-candidate selection (prototype+diversity), set-level representativeness evaluation, and legacy img2img/mode guidance paths.
 - **Evaluation** is implemented: train classifier (ConvNet-6/ResNet-18/ResNetAP-10) on distilled dataset, evaluate on real val set.
 - Supporting server scripts, metadata prep, mock/regression runs, and full workflow wiring exist.
 
@@ -50,10 +50,10 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 Right now, the repo is best understood as:
 - a working **Prep** pipeline for class metadata,
 - a working **Stage 1** pipeline consisting of extraction → normalization → render → optional VLM enrichment,
-- a working **Stage 2 SD v1.5 / SDXL LoRA** training pipeline that delegates to official diffusers trainers,
+- a working **Stage 2 SDXL LoRA** training pipeline (primary) that delegates to the official diffusers trainer; SD v1.5 full fine-tuning also available but underperforms,
 - a working **Stage 2 inference** script for sampling from trained LoRA weights,
-- a working **Stage 3** pipeline for DINOv2 encoding, per-class clustering (K-Means or HDBSCAN), and mode extraction with caption diversity,
-- a working **Stage 4** pipeline for text-to-image distilled dataset generation with caption selection by DINOv2 clustering,
+- a working **Stage 3** pipeline for DINOv2 encoding, per-class clustering (K-Means or HDBSCAN), and medoid caption extraction,
+- a working **Stage 4** pipeline for text-to-image distilled dataset generation with optional candidate selection and representativeness evaluation,
 - a working **Evaluation** pipeline for training classifiers on distilled datasets and evaluating on real validation sets,
 - where Stage 1 normalization is deterministic-first but can invoke constrained VLM review on ambiguous slots.
 
@@ -63,7 +63,8 @@ Right now, the repo is best understood as:
   - **`cspd-stage1`** with Stage 1 subcommands such as `run`, `normalize`, and `render`
   - **`cspd-stage2`** for Stage 2 scaffold / inspection / planning commands
   - **`cspd-stage3`** for Stage 3 encoding / clustering / mode extraction
-  - **`cspd-stage4`** for Stage 4 dual-anchor distilled dataset generation
+  - **`cspd-stage4`** for Stage 4 distilled dataset generation (text2img + optional multi-candidate selection + representativeness evaluation)
+  - **`cspd-eval`** for classifier training and evaluation on distilled datasets
 - The repo now also bundles `environment.yml` for the shared conda environment name **`cspd-dd`** used by the server shell helpers.
 - Core dependencies: `torch`, `torchvision`, `numpy`, `tqdm`, `pillow`, `diffusers`, `transformers`, `accelerate`, `peft`, `sentencepiece`, `protobuf`, `tiktoken`, `safetensors`, `scikit-learn`, `hdbscan`, `qwen-vl-utils`.
 - Optional dependencies (declared in `pyproject.toml`): `wandb` (W&B logging), `xformers` (memory-efficient attention), `bitsandbytes` (8-bit Adam).
@@ -97,8 +98,8 @@ Right now, the repo is best understood as:
   - `training_common.py` — shared training utilities (optimizer, scheduler, freeze logic)
   - `data.py` — pairing, manifest, dataloader
   - `backbone.py` — backbone loading, module inspection, LoRA injection
-  - `families/sd15/training.py` — SD v1.5 LoRA training wrapper (**recommended**)
-  - `families/sdxl/backbone.py`, `families/sdxl/training.py` — SDXL family (legacy)
+  - `families/sdxl/backbone.py`, `families/sdxl/training.py` — SDXL LoRA family (**primary / mainline**)
+  - `families/sd15/training.py` — SD v1.5 full fine-tuning wrapper (tested but underperforms SDXL LoRA; kept for reference)
   - `families/flux/backbone.py` — FLUX backbone loading (training removed)
   - `families/pixart/backbone.py` — PixArt backbone loading (training removed)
   - implements Stage 2 pairing / planning / backbone inspection / SDXL LoRA training via official diffusers delegation
@@ -167,7 +168,7 @@ Right now, the repo is best understood as:
 - `scripts/server/README.md` documents the recommended Prep + Stage 1 + Stage 2 helper flow
 - `scripts/server/stage1/run_stage1_pipeline.sh` — full Stage 1: extract → normalize → render
 - `scripts/server/stage2/run_stage2_pipeline.sh` — Stage 2 training + checkpoint sampling
-- `scripts/server/stage2/run_sd15_stage2_official.sh` — SD v1.5 LoRA training launcher
+- `scripts/server/stage2/run_sd15_stage2_official.sh` — SD v1.5 full fine-tuning launcher (tested but worse than SDXL)
 - `scripts/server/stage3/run_stage3_pipeline.sh` — Stage 3 encode + cluster
 - `scripts/server/stage4/run_stage4_pipeline.sh` — Stage 4 generate distilled dataset
 - `scripts/server/eval/run_eval_pipeline.sh` — train classifier + evaluate
@@ -823,34 +824,35 @@ If interrupted, re-running skips already-enriched records. Use `--no-resume` to 
 ## 12. Stage 2 — Diffusion model LoRA training
 
 ### Implementation status
-**Implemented for SD v1.5 (new primary) and SDXL (legacy). SD v1.5 recommended.**
+**Implemented for SDXL LoRA (primary / mainline) and SD v1.5 full fine-tuning (tested but worse; kept in-tree for reference).**
 
 ### Core purpose
-Train the diffusion model's UNet via LoRA so it learns to recognize our Stage 1 canonical captions. The training pairs are `(real image, canonical_caption)` from Stage 1 render outputs.
+Train the diffusion model's UNet so it learns to recognize our Stage 1 canonical captions. Training pairs are `(real image, canonical_caption)` from Stage 1 render outputs.
 
 ### Backbone choice
-- **SD v1.5** (`stable-diffusion-v1-5/stable-diffusion-v1-5`): **recommended**. Native 512×512, text-conditional (CLIP ViT-L/14), 980M params. Validated by DD-VLCP (ICCV 2025, 64.8%) and D4M (CVPR 2024). Uses `train_text_to_image_lora.py`.
-- **SDXL** (`stabilityai/stable-diffusion-xl-base-1.0`): legacy. Native 1024 but trained at 512 (mismatch). 2.6B params. Uses `train_text_to_image_lora_sdxl.py`. Best result ~61.3% on ImageNette IPC=10.
+- **SDXL** (`stabilityai/stable-diffusion-xl-base-1.0`): **primary**. Native 1024 but trained at 512 (resolution mismatch); 2.6B params; dual CLIP text encoders. LoRA fine-tuning via `train_text_to_image_lora_sdxl.py`. Current best: **62.33% ± 1.47** on ImageNette IPC=10 (checkpoint-7254, rank=64, epoch 9 with cosine LR).
+- **SD v1.5** (`stable-diffusion-v1-5/stable-diffusion-v1-5`): tested, underperforms SDXL. Native 512, CLIP ViT-L/14, ~860M params. Full fine-tuning via `train_text_to_image.py`. Despite the native-resolution advantage cited by DD-VLCP (ICCV 2025), visual quality was slightly better but eval accuracy was lower than SDXL LoRA.
 
 ### Architecture
-Stage 2 delegates training to official diffusers LoRA training scripts. The repo owns:
+Stage 2 delegates training to official diffusers training scripts. The repo owns:
 - **pairing**: matching ImageFolder images to Stage 1C render `records.jsonl` by `record_id`
 - **dataset materialization**: copying images + generating `metadata.jsonl` in diffusers imagefolder format
 - **launch orchestration**: building the `accelerate launch` command with config translation
 - **preflight checks**: validating environment, script resolution, dataset integrity
 
 ### Main code
-- `src/cspd_stage2/families/sd15/training.py` — SD v1.5 materialization, command building, launch
-- `src/cspd_stage2/families/sdxl/training.py` — SDXL materialization, command building, launch (legacy)
-- `src/cspd_stage2/training.py` — dispatch (detects `sd15`/`sdxl` family, routes to official wrapper)
+- `src/cspd_stage2/families/sdxl/training.py` — SDXL LoRA materialization, command building, launch (**primary**)
+- `src/cspd_stage2/families/sd15/training.py` — SD v1.5 full fine-tuning wrapper (tested but worse)
+- `src/cspd_stage2/training.py` — dispatch (detects `sdxl`/`sd15` family, routes to official wrapper)
 - `src/cspd_stage2/cli.py` — CLI with all SDXL-specific flags (`--sdxl-*`)
-- `scripts/server/stage2/run_sdxl_stage2_official.sh` — server helper
+- `scripts/server/stage2/run_sdxl_stage2_official.sh` — server helper (SDXL)
+- `scripts/server/stage2/run_sd15_stage2_official.sh` — server helper (SD v1.5)
 - `scripts/server/check_stage2_sdxl_env.sh` — environment check
 
-### Training configuration (current defaults)
-- backbone: **`stable-diffusion-v1-5/stable-diffusion-v1-5`** (SD v1.5, native 512)
-- parameterization: LoRA (UNet attention layers: `to_k`, `to_q`, `to_v`, `to_out.0`)
-- resolution: **512** (native for SD v1.5)
+### Training configuration (current defaults, SDXL mainline)
+- backbone: **`stabilityai/stable-diffusion-xl-base-1.0`**
+- parameterization: LoRA, **rank=64** (UNet attention: `to_k`, `to_q`, `to_v`, `to_out.0`)
+- resolution: **512** (non-native for SDXL, but empirically fine)
 - GPUs: **2** (default `--sdxl-num-processes 2`)
 - mixed precision: fp16
 - gradient checkpointing: enabled
@@ -859,14 +861,15 @@ Stage 2 delegates training to official diffusers LoRA training scripts. The repo
 - Min-SNR gamma: **5.0** (balances loss weighting across timesteps)
 - VAE + text encoders: frozen
 - `--report_to` is omitted (not `"none"`) to avoid accelerate tracker init errors
+- **best checkpoint**: epoch 9 → `checkpoint-7254`
 
 ### CLI usage
 ```bash
-# SD v1.5 (recommended)
+# SDXL LoRA (mainline)
 cspd-stage2 train \
   --dataset-root /path/to/ImageNette/train \
   --render-input /path/to/records.jsonl \
-  --backbone-name stable-diffusion-v1-5/stable-diffusion-v1-5 \
+  --backbone-name stabilityai/stable-diffusion-xl-base-1.0 \
   --training-parameterization lora \
   --adapter-rank 64 \
   --batch-size 8 --epochs 9 \
@@ -875,12 +878,12 @@ cspd-stage2 train \
 
 ### Server helper usage
 ```bash
-# SD v1.5 (recommended)
-bash scripts/server/stage2/run_sd15_stage2_official.sh \
+# SDXL LoRA (mainline)
+bash scripts/server/stage2/run_sdxl_stage2_official.sh \
   <dataset_root> <render_records_jsonl> [batch_size] [epochs] [extra args...]
 
-# SDXL (legacy)
-bash scripts/server/stage2/run_sdxl_stage2_official.sh \
+# SD v1.5 full fine-tuning (kept for reference, not recommended)
+bash scripts/server/stage2/run_sd15_stage2_official.sh \
   <dataset_root> <render_records_jsonl> [batch_size] [epochs] [extra args...]
 ```
 
@@ -960,71 +963,73 @@ The repo currently uses VLMs where semantic proposal or ambiguity resolution is 
 
 ---
 
-## 14. Stage 3 — Visual/semantic mode discovery via latent clustering
+## 14. Stage 3 — Mode discovery via DINOv2 clustering
 
 ### Implementation status
-**Implemented in repo. Running experiments on ImageNette with DINOv2 + K-Means/HDBSCAN.**
+**Implemented in repo. Current baseline: HDBSCAN + medoid caption, 62.33% on ImageNette IPC=10.**
 
 ### Core purpose
-Discover representative visual and semantic modes per class via clustering. Visual clustering determines WHICH captions to use for Stage 4 generation (one representative caption per mode). Semantic modes provide the text embeddings and representative captions.
+Discover representative modes per class via DINOv2 clustering. Each mode's medoid sample contributes its canonical caption to Stage 4 (one caption per mode generates one image).
 
 ### Architecture
 
 ```
 Stage 3A: Encode
-  images → DINOv2 (dinov2_vitb14) → CLS features (N, 768) [for clustering + medoid selection]
-  (no VAE, no text encoding — Stage 4 uses captions as plain text strings)
+  images → DINOv2 (dinov2_vitb14) → CLS features (N, 768)
+  (optional: --encode-vae also saves VAE latents for mode guidance experiments)
 
-Stage 3B+3C: Cluster + Extract
+Stage 3B: Cluster + Extract
   per class:
-    K-Means (baseline): cluster on selected feature space, K = IPC
-    HDBSCAN (mode discovery): discover natural density modes, allocate IPC proportionally
+    K-Means: cluster on DINOv2 features, K = IPC
+    HDBSCAN: discover natural density modes, allocate IPC proportionally
   per cluster:
-    visual mode  = VAE latent centroid (+ medoid record_id)
-    semantic mode = mean text embedding (+ representative caption from semantic medoid)
+    medoid = sample closest to DINOv2 cluster centroid
+    representative_caption = medoid's canonical caption (default)
+    optional --diversify-captions: replace with most distinctive caption in cluster
 ```
 
 ### Main code
-- `src/cspd_stage3/__init__.py`
-- `src/cspd_stage3/encode.py` — VAE latent + text embedding + DINOv2 feature encoding
-- `src/cspd_stage3/cluster.py` — per-class clustering (K-Means or HDBSCAN), visual/semantic mode extraction
+- `src/cspd_stage3/encode.py` — DINOv2 feature encoding (optional VAE encoding)
+- `src/cspd_stage3/cluster.py` — per-class K-Means/HDBSCAN + medoid caption extraction
 - `src/cspd_stage3/cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
 
 ### CLI usage
 ```bash
-# Full pipeline (encode + cluster)
-cspd-stage3 run \
+# Recommended: encode once, cluster multiple times
+cspd-stage3 encode \
   --dataset-root /path/to/ImageNette/train \
   --render-input /path/to/records.jsonl \
-  --output-dir runs/stage3/imagenette \
-  --ipc 10 \
-  --cluster-space dino \
-  --cluster-method hdbscan \
-  --min-cluster-size 15 \
-  --min-samples 3 \
-  --pca-dim 0
+  --output-dir runs/stage3/.../encoded
 
-# Or step by step:
-cspd-stage3 encode --dataset-root ... --render-input ... --output-dir runs/stage3/encoded
-cspd-stage3 cluster --encode-dir runs/stage3/encoded --output-dir runs/stage3/modes --ipc 10 \
-  --cluster-space dino --cluster-method kmeans
+# HDBSCAN (current baseline)
+cspd-stage3 cluster \
+  --encode-dir runs/stage3/.../encoded \
+  --output-dir runs/stage3/.../modes_hdbscan \
+  --ipc 10 --cluster-method hdbscan
+
+# K-Means (also competitive)
+cspd-stage3 cluster \
+  --encode-dir runs/stage3/.../encoded \
+  --output-dir runs/stage3/.../modes_kmeans \
+  --ipc 10 --cluster-method kmeans
 ```
 
 ### Clustering parameters
-- **--cluster-method**: `"kmeans"` (baseline, K=IPC) or `"hdbscan"` (density-based mode discovery)
-- Clustering always uses DINOv2 features (VAE latents no longer computed)
-- **--min-cluster-size**: HDBSCAN parameter — minimum points for a subtree to count as a real cluster split in the condensed tree. Controls minimum legitimate cluster size. (ignored for kmeans)
-- **--min-samples**: HDBSCAN parameter — k in k-NN for core distance computation. Controls density estimation smoothness. Lower = finer density landscape, more clusters. Higher = smoother, fewer clusters. (ignored for kmeans)
-- **--pca-dim**: PCA dimensions for HDBSCAN pre-processing. `0` skips PCA. DINOv2 features (768-dim) usually don't need PCA.
+- **--cluster-method**: `"kmeans"` (K=IPC) or `"hdbscan"` (density-based, proportional allocation)
+- **--min-cluster-size** (HDBSCAN): minimum points for a real cluster split. Default 15.
+- **--min-samples** (HDBSCAN): k-NN for core distance. Default 3.
+- **--pca-dim** (HDBSCAN): PCA dims, 0 to skip. Default 50 but 0 works well for DINOv2.
+- **--diversify-captions** (opt-in): greedy Jaccard-distance selection instead of medoid caption. Experimental — may hurt accuracy. Default OFF.
+- **--encode-vae** (Stage 3A): also compute VAE latents for mode guidance experiments. Default OFF.
 
 ### HDBSCAN mode discovery flow
-1. Optional PCA dimensionality reduction on selected feature space
+1. Optional PCA dimensionality reduction
 2. HDBSCAN discovers natural density modes (no preset K)
 3. Noise points assigned to nearest discovered mode
 4. If 0-1 modes found → fallback to K-Means
 5. If modes > IPC → farthest-point sampling to select IPC most diverse modes
-6. If modes <= IPC → proportional IPC allocation, sub-cluster large modes with K-Means
-7. Mode extraction always uses VAE latents (visual) and text embeddings (semantic)
+6. If modes ≤ IPC → proportional IPC allocation, sub-cluster large modes with K-Means
+7. Medoid caption from each final cluster is the representative caption
 
 ### DINOv2 encoding
 - Model: `torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")`
@@ -1036,70 +1041,54 @@ cspd-stage3 cluster --encode-dir runs/stage3/encoded --output-dir runs/stage3/mo
 ```text
 runs/stage3/<output_dir>/
 ├── encoded/
-│   ├── dino_embeds.pt          # (N, 768) DINOv2 CLS features
-│   └── encode_index.json       # per-sample metadata (with canonical captions)
-├── modes_<method>/             # e.g. modes_kmeans, modes_hdbscan
-│   ├── pooled_modes.pt         # (total_modes, 1280) mean pooled embeddings
-│   ├── modes_index.json        # per-mode metadata (class, archetype, captions, cluster sizes)
-│   └── stage3_summary.json     # clustering summary
+│   ├── dino_embeds.pt              # (N, 768) DINOv2 CLS features
+│   ├── vae_latents.pt              # (optional, if --encode-vae)
+│   └── encode_index.json           # per-sample metadata with provenance (feature extractor, resolution, etc.)
+└── modes_<method>/                 # e.g. modes_kmeans, modes_hdbscan
+    ├── mode_centroids.pt           # (optional, if VAE latents available) VAE centroids for mode guidance
+    ├── modes_index.json            # per-mode metadata (captions, cluster_sizes, weight, density)
+    └── stage3_summary.json         # clustering method + hyperparameters + provenance
 ```
 
 ### Key design decisions
-- **Clustering space vs mode extraction space**: clustering can use DINOv2 or VAE features, but mode extraction always uses VAE latents (visual) and text embeddings (semantic) for Stage 4 compatibility
-- **DINOv2 for clustering**: 768-dim CLS features have natural cluster structure; VAE latents (16384-dim) are smooth and cause HDBSCAN to fail (6-8/10 classes fall back to K-Means in VAE space vs 1/10 in DINOv2 space)
-- **Visual mode**: cluster centroid in VAE latent space; medoid record_id recorded for reference
-- **Semantic mode**: mean of text embeddings within cluster; **representative caption** from semantic medoid is the primary output used by Stage 4
-- **IPC as K**: for K-Means, number of clusters per class = IPC. For HDBSCAN, IPC is the target budget allocated proportionally across discovered modes
-- Uses the same SDXL VAE + text encoders as Stage 2 for space consistency
-
-### Experiment observations (ImageNette, IPC=10)
-- **VAE K-Means**: baseline, uniform cluster sizes
-- **DINO K-Means**: more uneven cluster sizes (max/min ratio 2.4x-9.0x), reflecting real density variation
-- **DINO HDBSCAN** (min_cluster_size=15, min_samples=3, pca_dim=50): 9/10 classes discovered modes independently, only chain saw fell back to K-Means. gas pump had a 2-member micro-cluster (noise artifact from low min_cluster_size/min_samples)
+- **DINOv2 for clustering** (architecture-agnostic 768-dim features)
+- **Medoid caption as default**: the real sample closest to cluster centroid contributes its canonical caption. Caption diversity selection was tested and found to underperform — kept as opt-in flag.
+- **IPC as K**: K-Means uses K=IPC; HDBSCAN proportionally allocates IPC across discovered modes with sub-clustering
 
 ---
 
-## 15. Stage 4 — Img2img distilled dataset generation
+## 15. Stage 4 — Distilled dataset generation
 
 ### Implementation status
-**Implemented in repo. Running experiments on ImageNette.**
+**Implemented in repo. Current baseline: SDXL LoRA + text2img, 62.33% on ImageNette IPC=10.**
 
 ### Core purpose
-Generate the final distilled dataset using img2img generation from real medoid images. Stage 3 visual clustering selects the most representative real image (medoid) per mode as the img2img starting point, with the representative caption as text conditioning. This preserves the diversity of real images while applying the Stage 2 LoRA-tuned generation quality.
+Generate the final distilled dataset. Default is text-to-image: use Stage 3 representative caption as prompt, generate one image per mode via Stage 2 LoRA-tuned SDXL.
 
-### Generation flow per mode (recommended: visual_mode="medoid")
+### Generation flow (default: text2img)
 ```
-Stage 3 mode → visual medoid (real image) + representative_caption (text string)
-  → SDXL img2img pipeline (+ Stage 2 LoRA), strength=0.8
-  → optional SDXL refiner pass
+Stage 3 mode → representative_caption (from medoid)
+  → SDXL text2img pipeline + Stage 2 LoRA
   → distilled image (PNG)
 ```
 
 ### Main code
-- `src/cspd_stage4/__init__.py`
-- `src/cspd_stage4/generate.py` — text2img generation with optional refiner and legacy img2img paths
+- `src/cspd_stage4/generate.py` — generation orchestration (text2img default, optional img2img/mode guidance)
+- `src/cspd_stage4/candidate_selection.py` — multi-candidate scoring (prototype + diversity)
+- `src/cspd_stage4/representativeness.py` — set-level MMD/moments/coverage evaluation
+- `src/cspd_stage4/mode_guidance.py` — EulerModeGuidanceScheduler (experimental, see 16.11)
 - `src/cspd_stage4/cli.py` — CLI with `generate` subcommand
 - `scripts/server/stage4/run_stage4_pipeline.sh` — server pipeline script
 
 ### CLI usage
 ```bash
-# Recommended: text2img with LoRA (visual clustering selects captions)
+# Default baseline: SDXL LoRA text2img
 cspd-stage4 generate \
-  --modes-dir runs/stage3/.../modes_dino_kmeans \
-  --lora-weights runs/stage2/.../checkpoint-12090/pytorch_lora_weights.safetensors \
-  --output-dir runs/stage4/imagenette/ipc10
-
-# With SDXL refiner for added detail/sharpness
-cspd-stage4 generate \
-  --modes-dir runs/stage3/.../modes_dino_kmeans \
-  --lora-weights runs/stage2/.../pytorch_lora_weights.safetensors \
-  --output-dir runs/stage4/imagenette/ipc10 \
-  --refiner-model stabilityai/stable-diffusion-xl-refiner-1.0
-
-# Without LoRA (baseline SDXL)
-cspd-stage4 generate \
-  --modes-dir runs/stage3/.../modes_dino_kmeans \
-  --output-dir runs/stage4/imagenette/ipc10/baseline
+  --modes-dir runs/stage3/.../modes_hdbscan \
+  --lora-weights runs/stage2/.../checkpoint-7254/pytorch_lora_weights.safetensors \
+  --model-name stabilityai/stable-diffusion-xl-base-1.0 \
+  --output-dir runs/stage4/.../output \
+  --visual-mode none
 ```
 
 ### Key parameters
@@ -1110,7 +1099,7 @@ cspd-stage4 generate \
 - **--num-inference-steps**: Diffusion sampling steps. Default `50`.
 - **--refiner-model**: Optional SDXL refiner model ID. When set, runs refiner pass after base generation for added detail/sharpness.
 - **--refiner-strength**: Denoising strength for refiner pass (0-1). Default `0.3`.
-- **--mode-guidance-scale**: Mode guidance strength. Default `0.0` (disabled). Experimental — incompatible with detailed captions (see 16.10).
+- **--mode-guidance-scale**: Mode guidance strength. Default `0.0` (disabled). Experimental — incompatible with detailed captions (see 16.11).
 - **--mode-guidance-stop-step**: Stop guidance after N steps. Default `25`.
 - **--num-candidates**: Generate N candidates per mode, select the best by prototype similarity + diversity scoring. Default `1` (no selection). Recommended `10-20`.
 - **--candidate-beta**: Diversity weight relative to prototype score. Default `0.5`. 0=pure prototype faithfulness, higher=more diversity. IPC-dependent: 0.3 for IPC=10, 0.5 for IPC=20, 0.7 for IPC=50.
@@ -1144,9 +1133,10 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 3. img2img + representative caption → quality OK but Stage 2 vs 4 mismatch
 4. text2img + representative caption → matches Stage 2 inference, best eval accuracy
 5. img2img from medoid + representative caption → more diverse but eval accuracy significantly worse
-6. **text2img + caption diversity selection** → current best approach
-7. text2img + mode guidance (MGD³-style) → failed: detailed captions dominate, no usable sweet spot (see 16.10)
-8. **text2img + multi-candidate selection** → generate N candidates per mode, score by DINOv2 discriminative + diversity, select best (under evaluation)
+6. text2img + caption diversity selection (Jaccard greedy) → tested, hurt accuracy; kept as opt-in only
+7. text2img + mode guidance (MGD³-style) → failed: detailed captions dominate, no usable sweet spot (see 16.11)
+8. text2img + multi-candidate selection (DINOv2 probe / prototype + diversity) → tested, did not beat single-medoid baseline at IPC=10
+9. **text2img + HDBSCAN + medoid caption** → current baseline (62.33% on ImageNette IPC=10)
 
 ---
 
@@ -1156,7 +1146,7 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 This is a hard methodological boundary. Do not write normalization rules, render drop rules, or prompt guidance that references specific class names or class-level statistics. The only place class identity is used is in Prep (class-to-archetype mapping). Everything downstream operates on archetype + slot name only.
 
 ### 16.2 All stages + evaluation are implemented
-The repo covers Prep, Stage 1 (1A+1B+1C+optional 1D enrichment), Stage 2 (SDXL LoRA + inference), Stage 3 (DINOv2 encoding + clustering + caption diversity selection), Stage 4 (text2img distilled generation), and Evaluation (classifier training + accuracy measurement). FID evaluation is not yet automated.
+The repo covers Prep, Stage 1 (1A+1B+1C+optional 1D enrichment), Stage 2 (SDXL LoRA + inference), Stage 3 (DINOv2 encoding + clustering + medoid caption, with optional diversity selection), Stage 4 (text2img distilled generation), and Evaluation (classifier training + accuracy measurement). FID evaluation is not yet automated.
 
 ### 16.8 Do not enrich captions at Stage 3 level
 Stage 3 VLM recaption (enriching only medoid captions) was tested and degraded accuracy by ~5% because enriched captions are OOD for the LoRA trained on template captions. If captions need enrichment, do it at Stage 1D so the LoRA trains on them.
@@ -1191,27 +1181,22 @@ Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditionin
 
 Given current repo state (as of 2026-04-17):
 
-1. **Phase 2 + Phase 3 evaluation on SDXL (running)**
-   - Backbone: SDXL LoRA checkpoint-7254 (epoch 9, cosine LR) — confirmed as mainline
-   - Three experiments running:
-     - Phase 2 only: prototype candidate selection v2, beta=0.3, 10 candidates/mode
-     - Phase 3 only: representativeness evaluation (MMD + moments + coverage report)
-     - Phase 2 + 3 combined: candidate selection + representativeness evaluation
-   - Compare all against baseline (61.3%)
-   - Decision rule: adopt Phase 2/3 only if they improve over no-selection baseline
+1. **IPC sweep on baseline**
+   - Run IPC=10,20,50 with HDBSCAN + medoid caption, no selection
+   - Compare against published baselines (MGD³, DD-VLCP, RDED, SRe2L)
 
-2. **IPC sweep with best configuration**
-   - After Phase 2/3 results, run IPC=10,20,50 with the winning config
-   - Use IPC-dependent beta: 0.3/0.5/0.7
-   - Compare against published baselines
-
-3. **Evaluation benchmarking**
+2. **Multi-architecture benchmarking**
    - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10), 3 repeats
-   - Compare against: random selection, SRe2L, RDED, MGD³, DD-VLCP
+   - Report mean ± std — not just ResNetAP-10
 
-4. **ImageNet-1k full pipeline**
+3. **ImageNet-1k full pipeline**
    - Stage 1 full run on ImageNet-1k in progress
-   - After ImageNette results stabilize, run full pipeline on 1K classes
+   - After ImageNette benchmarking stabilizes, run full pipeline on 1K classes
+   - Use `scripts/server/run_full_pipeline.sh` for resume support
+
+4. **Novel method exploration** (Phase 4 from plan.md)
+   - Early vision-language fusion (EVLF-style) — lightweight visual-semantic adapter
+   - The biggest research-value direction remaining after Phase 2/3 exhausted
 
 ---
 
@@ -1272,19 +1257,13 @@ Given current repo state (as of 2026-04-17):
 - **Approach v2** (implemented, not yet tested): architecture-agnostic scoring with prototype similarity (cosine to class mean DINOv2) + diversity (cosine distance to accepted set). No proxy classifier. IPC-dependent beta (0.3/0.5/0.7 for IPC=10/20/50).
 - Inspired by D³HR (representativeness), IGDS (IPC-dependent balance), DAP (feature-space alignment)
 
-### Backbone analysis (2026-04-16 → 2026-04-17)
-- **Hypothesis**: SDXL at non-native 512 is bottleneck. SD v1.5 (native 512) should be better.
-- **SD v1.5 tested**: full fine-tuning (8 epochs, batch=8). Sample quality looks good visually.
-- **SD v1.5 eval result**: worse than SDXL baseline (61.3%). Hypothesis falsified.
-- **Conclusion**: SDXL LoRA remains the mainline backbone. The resolution mismatch hypothesis was wrong — SDXL's stronger text understanding (dual CLIP encoder) and larger capacity apparently compensate for the non-native resolution.
-- **PixArt-alpha considered**: 256 native + text-conditional, but no DD validation, poor fine-tuning ecosystem. Not tested.
-- **SDXL confirmed**: checkpoint-7254 (epoch 9, cosine LR, rank=64 LoRA)
-
-### SD v1.5 backbone switch (2026-04-16)
-- **Implemented**: full fine-tuning (not LoRA) of SD v1.5 UNet (~860M params) via `train_text_to_image.py`
-- **Motivation**: SDXL at non-native 512 is bottleneck; SD v1.5 is native 512, lighter, DD-VLCP validated
-- **Training running**: 8 epochs, batch=8, 2 GPUs, cosine LR, noise_offset=0.05, snr_gamma=5.0
-- **Stage 4**: auto-detects SD v1.5 vs SDXL, loads full fine-tuned checkpoint via from_pretrained
+### SD v1.5 backbone experiment (2026-04-16 → 2026-04-17, resolved)
+- **Hypothesis**: SDXL at non-native 512 is the bottleneck; SD v1.5 (native 512, ~860M params, DD-VLCP validated) should beat it.
+- **Implemented**: full fine-tuning of SD v1.5 UNet via `train_text_to_image.py` (not LoRA). Stage 4 auto-detects SD v1.5 vs SDXL and loads via `from_pretrained`.
+- **Training**: 8 epochs, batch=8, 2 GPUs, cosine LR, noise_offset=0.05, snr_gamma=5.0.
+- **Result**: sample quality looks good visually but eval accuracy was **worse** than SDXL baseline (61.3%). Hypothesis falsified.
+- **Conclusion**: SDXL LoRA remains mainline. SDXL's dual CLIP text encoders + larger capacity compensate for non-native resolution. SD v1.5 code path is kept in repo but not used.
+- **PixArt-alpha considered**: 256 native + text-conditional, but no DD validation and poor fine-tuning ecosystem. Not tested.
 
 ### Candidate selection v2 + representativeness scoring (2026-04-16)
 - **Phase 2 (candidate selection v2)**: architecture-agnostic scoring — prototype similarity (cosine to class mean DINOv2) + diversity (cosine distance to accepted set). No proxy classifier. IPC-dependent beta.
@@ -1296,21 +1275,21 @@ Given current repo state (as of 2026-04-17):
   - Gap detection: `find_gap_modes()` identifies which modes need regeneration
 - **Enriched mode metadata**: Stage 3 now outputs per-mode weight, density, DINOv2 centroid
 - **Paper alignment verified**: D³HR source code (GitHub), DAP paper (arXiv), RDED source code (GitHub)
-- Not yet tested — waiting for SD v1.5 baseline first
+- **Status**: code implemented and tested; Phase 2 alone did not improve on the single-medoid baseline at IPC=10. Phase 3 currently unused in the mainline flow (kept for future IPC sweeps and gap-driven regeneration).
 
-### Current best configuration (as of 2026-04-16)
-- **Stage 2 (SDXL, legacy)**: rank=64 LoRA, cosine LR (2e-5), epoch 9, checkpoint-7254
-- **Stage 2 (SD v1.5, new)**: full fine-tuning, cosine LR (2e-5), 8 epochs (running)
-- **Stage 3**: DINO K-Means, caption diversity selection, IPC=10
+### Current best configuration (as of 2026-04-17)
+- **Stage 2**: SDXL rank=64 LoRA, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, epoch 9 (checkpoint-7254)
+- **Stage 3**: DINOv2 HDBSCAN + medoid caption (no diversity selection), IPC=10
 - **Stage 4**: text2img (visual_mode=none), resolution=512, guidance=7.5, steps=50
-- **Accuracy (SDXL baseline)**: 61.33% on ImageNette IPC=10 (ResNetAP-10, 3 repeats)
-- **Accuracy (SD v1.5)**: worse than SDXL (tested 2026-04-17, exact number TBD). SDXL confirmed as mainline.
-- **Key insights**:
-  - text2img with detailed captions produces prototypical class representations
-  - Mode guidance incompatible with detailed text conditioning (see 16.10)
-  - Proxy classifier selection doesn't help — prototype similarity is more principled
-  - Diversity must come from caption diversity + prototype-aware selection, not latent guidance
-- **Eval**: aligned with mode_guidance protocol (RRC → ToTensor → HFlip → custom ColorJitter → Lighting → Normalize)
+- **Baseline accuracy**: 62.33% ± 1.47 on ImageNette IPC=10 (ResNetAP-10, 3 repeats)
+  - K-Means + medoid: 62.13% ± 0.68 (close alternative)
+- **Key insights (empirical)**:
+  - Medoid caption (default) > diversity selection — kept medoid as default, diversity opt-in
+  - HDBSCAN ≈ K-Means for medoid caption selection at IPC=10
+  - Mode guidance (MGD³-style) incompatible with detailed text conditioning (see 16.11)
+  - Multi-candidate selection with DINOv2 probe/prototype doesn't beat baseline
+  - SD v1.5 full fine-tuning underperforms SDXL LoRA (see 16.10)
+- **Eval**: mode_guidance protocol — RRC → ToTensor → HFlip → custom ColorJitter → Lighting → Normalize
 
 ### Server environment
 - Path: `/media/4T_HDD/cai/cspd-dd/cspd-dd`
