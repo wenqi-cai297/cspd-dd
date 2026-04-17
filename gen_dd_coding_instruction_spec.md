@@ -1289,7 +1289,7 @@ Given current repo state (as of 2026-04-17):
 - **Wiring**: new CLI flags `--set-level-selection` and `--set-objective {moments,mmd}` in `cspd-stage4 generate`; writes `set_level_selection_report.json` alongside `distilled_metadata.json`.
 - **Design decisions**:
   - 1-per-mode constraint (not free-pool) so IPC stays balanced across modes.
-  - Greedy in original mode order (HDBSCAN already orders by cluster weight desc in practice).
+  - Greedy in original mode listing order, which for HDBSCAN is cluster-id order (i.e. discovery order from the HDBSCAN label assignment), **not** weight-desc. Processing large modes first is likely better in theory (more slack to compensate downstream); this is a candidate follow-up.
   - Requires `--num-candidates > 1` and `--visual-mode none`; raises on misuse.
 - **Status**: code implemented, eval pending. Expected to be most useful at higher IPC where Phase 2's per-mode heuristic leaves more slack.
 
