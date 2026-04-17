@@ -616,13 +616,26 @@ def run_stage3_clustering(
 
     summary = {
         "ipc": ipc,
-        "seed": seed,
-        "cluster_method": method,
-        "cluster_space": "dino",
         "num_classes": len(all_class_results),
         "total_modes": total_modes,
-        "has_mode_centroids": mode_centroids_path is not None,
-        "encode_dir": str(encode_dir.resolve()),
+        "clustering": {
+            "method": method,
+            "feature_space": "DINOv2 (dinov2_vitb14, 768-dim CLS token)",
+            "caption_selection": "diversify_captions (greedy Jaccard distance)" if diversify_captions else "medoid (closest sample to DINOv2 cluster centroid)",
+            "seed": seed,
+            "kmeans_n_init": 10 if method == "kmeans" else None,
+            "hdbscan_min_cluster_size": min_cluster_size if method == "hdbscan" else None,
+            "hdbscan_min_samples": min_samples if method == "hdbscan" else None,
+            "hdbscan_pca_dim": pca_dim if method == "hdbscan" else None,
+        },
+        "mode_centroids": {
+            "available": mode_centroids_path is not None,
+            "space": "VAE latent (K-Means in VAE space, separate from DINOv2 clustering)" if mode_centroids_path else None,
+            "path": mode_centroids_path,
+        },
+        "source": {
+            "encode_dir": str(encode_dir.resolve()),
+        },
         "class_summary": [
             {
                 "class_name": cr.class_name,

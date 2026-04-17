@@ -205,12 +205,24 @@ def encode_dataset(
 
     torch.save(all_dino_embeds, dino_embeds_path)
 
-    # Save index
+    # Save index with full provenance metadata
     index_data = {
         "num_samples": len(pairs),
-        "resolution": resolution,
-        "dino_embed_shape": list(all_dino_embeds.shape),
-        "vae_encoded": encode_vae,
+        "encoding": {
+            "feature_extractor": "DINOv2 (dinov2_vitb14)",
+            "dino_model": "facebookresearch/dinov2:dinov2_vitb14",
+            "dino_input_resolution": 224,
+            "dino_normalization": "ImageNet (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])",
+            "dino_output_dim": int(all_dino_embeds.shape[1]),
+            "dino_embed_shape": list(all_dino_embeds.shape),
+            "vae_encoded": encode_vae,
+            "vae_model": vae_model_name if encode_vae else None,
+            "image_load_resolution": resolution,
+        },
+        "source": {
+            "dataset_root": str(Path(dataset_root).resolve()),
+            "render_input": str(Path(render_input).resolve()),
+        },
         "samples": [{k: v for k, v in p.items()} for p in pairs],
     }
     write_json(index_path, index_data)
