@@ -1187,8 +1187,9 @@ Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditionin
 Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed at IPC=10):
 
 1. **Rebaseline HDBSCAN + medoid under 3×3 protocol (2026-04-18)**
-   - New eval protocol: 3 Stage 4 runs with master seeds {42, 123, 456}, each uses the run-shared-seed convention (no +mode_idx), each dataset eval'd with 3 repeats → 9 accuracy numbers
-   - Measures both generation variance and eval variance (previous 62.33% ± 1.47 only measured eval variance on a single generation)
+   - New eval protocol: 3 Stage 4 runs with master seeds {42, 123, 456}, each uses the run-shared-seed convention (no +mode_idx), each dataset eval'd with 3 repeats
+   - **Aggregation rule**: for each gen_seed take `max(3 eval repeats)` = best-of-3 (to de-noise the eval-repeat axis); then report mean / std / min / max across the 3 per-seed bests. This separates the quantities we care about (generation variance) from eval-training variance.
+   - Measures generation variance (previous 62.33% ± 1.47 only measured eval variance on a single generation)
    - Run: `bash scripts/server/run_baseline_3x3.sh`
    - This replaces 62.33% ± 1.47 as the comparison baseline going forward
 

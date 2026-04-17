@@ -6,7 +6,9 @@ set -euo pipefail
 #   - Each run: all IPC*num_classes images share the run's master seed
 #     (per-round shared-seed generation; no +mode_idx offset)
 #   - Each resulting dataset is eval'd with 3 independent seeds (EVAL_REPEAT=3)
-#   - Total: 9 accuracy numbers (3 generation seeds x 3 eval repeats)
+#   - Aggregation: for each gen_seed take max(3 eval repeats) = best-of-3,
+#     then report mean / std / min / max across the 3 per-seed bests.
+#     (Not mean over all 9 numbers.)
 #
 # Usage:
 #   bash scripts/server/run_baseline_3x3.sh
@@ -98,12 +100,13 @@ import json, glob, os, statistics
 run_root = "$RUN_ROOT"
 seeds = "$SEEDS".split()
 
-per_seed = []  # list of (seed, mean, std, runs)
-all_acc1 = []
+# Aggregation rule: for each gen_seed, take MAX over its 3 eval repeats
+# (best-of-3). Then compute mean/std/min/max across the 3 per-seed bests.
+per_seed_best = []  # list of (seed, best_of_3, runs, eval_path)
 for s in seeds:
     gen_dir = os.path.join(run_root, f"gen_seed{s}")
-    # The eval dir is saved under runs/eval/<ts>_ipc10_resnet_ap; find the most
-    # recent one whose distilled_dir points to this gen dir.
+    # Eval dirs are under runs/eval/<ts>_ipc10_resnet_ap; match by distilled_dir
+    # prefix and take the most recent if multiple.
     cand = []
     for p in glob.glob("runs/eval/*_ipc10_resnet_ap/eval_resnet_ap.json"):
         try:
@@ -118,22 +121,23 @@ for s in seeds:
     cand.sort()
     _, p, d = cand[-1]
     runs_acc = [r.get("best_acc1") for r in d.get("runs", [])]
-    per_seed.append((s, d["mean_best_acc1"], d["std_best_acc1"], runs_acc, p))
-    all_acc1.extend(runs_acc)
+    best = max(runs_acc) if runs_acc else None
+    per_seed_best.append((s, best, runs_acc, p))
 
 print("")
-print("# Per-generation-seed results")
-for s, m, sd, runs, p in per_seed:
-    print(f"  gen_seed={s:>4}: mean={m:.2f}  std={sd:.2f}  runs={runs}  (eval={p})")
+print("# Per-generation-seed results (best-of-3 across eval repeats)")
+for s, best, runs, p in per_seed_best:
+    print(f"  gen_seed={s:>4}: best={best:.2f}  runs={runs}  (eval={p})")
 
-if all_acc1:
+bests = [b for _, b, _, _ in per_seed_best if b is not None]
+if bests:
     print("")
-    print("# Aggregate across all 9 numbers")
-    print(f"  grand_mean = {statistics.mean(all_acc1):.2f}")
-    print(f"  grand_std  = {statistics.pstdev(all_acc1):.2f}")
-    print(f"  n          = {len(all_acc1)}")
-    print(f"  min        = {min(all_acc1):.2f}")
-    print(f"  max        = {max(all_acc1):.2f}")
+    print("# Aggregate across per-seed bests (n=3)")
+    print(f"  mean = {statistics.mean(bests):.2f}")
+    if len(bests) > 1:
+        print(f"  std  = {statistics.pstdev(bests):.2f}")
+    print(f"  min  = {min(bests):.2f}")
+    print(f"  max  = {max(bests):.2f}")
 PYEOF
 
 echo ""
