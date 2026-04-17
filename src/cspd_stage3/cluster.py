@@ -57,6 +57,7 @@ class ClassClusterResult:
     ipc: int
     num_clusters: int
     modes: list[ClusterMode]
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -297,6 +298,7 @@ def cluster_class_kmeans(
     return ClassClusterResult(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
         num_samples=n_samples, ipc=ipc, num_clusters=len(modes), modes=modes,
+        diagnostics={"branch": "kmeans", "kmeans_k": n_clusters},
     ), vae_centroids
 
 
@@ -352,6 +354,15 @@ def cluster_class_hdbscan(
     discovered_modes = sorted(set(int(l) for l in hdb_labels if l >= 0))
     noise_indices = [i for i in range(n_samples) if hdb_labels[i] == -1]
     n_discovered = len(discovered_modes)
+    n_noise = len(noise_indices)
+    # Mode sizes as discovered by HDBSCAN (before any noise reassignment or
+    # sub-clustering). Useful for attributing seed sensitivity: if
+    # n_discovered >= ipc the final medoid set is seed-invariant (HDBSCAN is
+    # deterministic and farthest-point sampling starts from index 0); if
+    # n_discovered < ipc, K-Means sub-clustering kicks in and uses `seed`.
+    hdbscan_discovered_sizes = [
+        int((hdb_labels == m).sum()) for m in discovered_modes
+    ]
 
     # Assign noise points to nearest discovered mode
     if noise_indices and discovered_modes:
@@ -366,17 +377,27 @@ def cluster_class_hdbscan(
 
     # Fallback: if HDBSCAN found 0 or 1 modes, fall back to K-Means
     if n_discovered <= 1:
-        return cluster_class_kmeans(
+        result, vae_c = cluster_class_kmeans(
             class_indices=class_indices, dino_embeds=dino_embeds,
             samples=samples, ipc=ipc, seed=seed, vae_latents=vae_latents,
             diversify_captions=diversify_captions,
         )
+        result.diagnostics = {
+            "branch": "hdbscan_fallback_kmeans",
+            "hdbscan_n_discovered": n_discovered,
+            "hdbscan_n_noise": n_noise,
+            "hdbscan_discovered_sizes": hdbscan_discovered_sizes,
+            "kmeans_k": ipc,
+        }
+        return result, vae_c
 
     # Build per-mode member lists
     mode_members: dict[int, list[int]] = {}
     for m in discovered_modes:
         mode_members[m] = [i for i in range(n_samples) if hdb_labels[i] == m]
     mode_sizes = [len(mode_members[m]) for m in discovered_modes]
+
+    took_farthest_point = n_discovered > ipc
 
     # Step 3+5: If more modes than IPC, select most diverse via farthest-point sampling
     if n_discovered > ipc:
@@ -436,9 +457,25 @@ def cluster_class_hdbscan(
     if diversify_captions:
         _diversify_captions(modes, samples)
 
+    n_modes_subclustered = sum(1 for a in allocation if a > 1)
+    branch = "hdbscan_farthest_point" if took_farthest_point else "hdbscan_proportional"
+    diagnostics = {
+        "branch": branch,
+        "hdbscan_n_discovered": n_discovered,
+        "hdbscan_n_noise": n_noise,
+        "hdbscan_discovered_sizes": hdbscan_discovered_sizes,
+        # After farthest-point absorption (if taken) or as-is
+        "modes_after_fps_sizes": mode_sizes,
+        # Slots per mode; any slot > 1 means K-Means sub-clustering was used
+        # within that mode (uses `seed`)
+        "allocation": allocation,
+        "n_modes_subclustered": n_modes_subclustered,
+    }
+
     return ClassClusterResult(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
         num_samples=n_samples, ipc=ipc, num_clusters=len(modes), modes=modes,
+        diagnostics=diagnostics,
     ), vae_centroids
 
 
@@ -567,6 +604,18 @@ def run_stage3_clustering(
     total_modes = sum(cr.num_clusters for cr in all_class_results)
     print(f"[Stage 3] Total modes: {total_modes}")
 
+    # Rollup of HDBSCAN branch decisions (only meaningful when method == "hdbscan")
+    branch_counts: dict[str, int] = {}
+    for cr in all_class_results:
+        b = cr.diagnostics.get("branch", "unknown")
+        branch_counts[b] = branch_counts.get(b, 0) + 1
+    if method == "hdbscan":
+        n_sub_total = sum(
+            cr.diagnostics.get("n_modes_subclustered", 0) for cr in all_class_results
+        )
+        print(f"[Stage 3] HDBSCAN branch rollup: {branch_counts}; "
+              f"total parent modes sub-clustered via seeded K-Means: {n_sub_total}")
+
     # Compute VAE-native mode centroids via separate K-Means in VAE space
     # This ensures centroids are maximally separated in the space where
     # mode guidance operates (unlike DINOv2-derived VAE means which cluster together)
@@ -633,6 +682,7 @@ def run_stage3_clustering(
             "space": "VAE latent (K-Means in VAE space, separate from DINOv2 clustering)" if mode_centroids_path else None,
             "path": mode_centroids_path,
         },
+        "branch_rollup": branch_counts,
         "source": {
             "encode_dir": str(encode_dir.resolve()),
         },
@@ -644,6 +694,7 @@ def run_stage3_clustering(
                 "num_samples": cr.num_samples,
                 "num_clusters": cr.num_clusters,
                 "cluster_sizes": [m.num_members for m in cr.modes],
+                "diagnostics": cr.diagnostics,
             }
             for cr in all_class_results
         ],
