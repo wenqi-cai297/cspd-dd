@@ -40,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     cluster_parser.add_argument("--min-cluster-size", type=int, default=15, help="HDBSCAN min_cluster_size (ignored for kmeans)")
     cluster_parser.add_argument("--min-samples", type=int, default=3, help="HDBSCAN min_samples: core point neighborhood density (ignored for kmeans)")
     cluster_parser.add_argument("--pca-dim", type=int, default=50, help="PCA dimensions for HDBSCAN pre-processing (ignored for kmeans)")
+    cluster_parser.add_argument("--diversify-captions", action="store_true", help="Replace medoid captions with most diverse alternatives (experimental, may hurt accuracy)")
 
     # --- run (encode + cluster in one shot) ---
     run_parser = subparsers.add_parser(
@@ -60,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--pca-dim", type=int, default=50, help="PCA dimensions for HDBSCAN pre-processing (ignored for kmeans)")
     run_parser.add_argument("--encode-vae", action="store_true", help="Also encode VAE latents (needed for mode guidance in Stage 4)")
     run_parser.add_argument("--vae-model-name", default="stabilityai/stable-diffusion-xl-base-1.0", help="SDXL model for VAE loading")
+    run_parser.add_argument("--diversify-captions", action="store_true", help="Replace medoid captions with most diverse alternatives (experimental)")
 
     return parser
 
@@ -100,6 +102,7 @@ def main() -> None:
             min_cluster_size=args.min_cluster_size,
             min_samples=args.min_samples,
             pca_dim=args.pca_dim,
+            diversify_captions=args.diversify_captions,
         )
         print(json.dumps({
             "output_dir": result.output_dir,
@@ -143,6 +146,7 @@ def main() -> None:
             min_cluster_size=args.min_cluster_size,
             min_samples=args.min_samples,
             pca_dim=args.pca_dim,
+            diversify_captions=args.diversify_captions,
         )
 
         print()

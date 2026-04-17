@@ -269,6 +269,7 @@ def cluster_class_kmeans(
     ipc: int,
     seed: int = 42,
     vae_latents: torch.Tensor | None = None,
+    diversify_captions: bool = False,
 ) -> tuple[ClassClusterResult, list[torch.Tensor] | None]:
     """Cluster one class using K-Means on DINOv2 features."""
     class_meta = samples[class_indices[0]]
@@ -290,7 +291,8 @@ def cluster_class_kmeans(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
         vae_latents=vae_latents,
     )
-    _diversify_captions(modes, samples)
+    if diversify_captions:
+        _diversify_captions(modes, samples)
 
     return ClassClusterResult(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
@@ -309,6 +311,7 @@ def cluster_class_hdbscan(
     min_samples: int = 3,
     pca_dim: int = 50,
     vae_latents: torch.Tensor | None = None,
+    diversify_captions: bool = False,
 ) -> tuple[ClassClusterResult, list[torch.Tensor] | None]:
     """Cluster one class using HDBSCAN mode discovery + proportional IPC allocation.
 
@@ -366,6 +369,7 @@ def cluster_class_hdbscan(
         return cluster_class_kmeans(
             class_indices=class_indices, dino_embeds=dino_embeds,
             samples=samples, ipc=ipc, seed=seed, vae_latents=vae_latents,
+            diversify_captions=diversify_captions,
         )
 
     # Build per-mode member lists
@@ -429,7 +433,8 @@ def cluster_class_hdbscan(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
         vae_latents=vae_latents,
     )
-    _diversify_captions(modes, samples)
+    if diversify_captions:
+        _diversify_captions(modes, samples)
 
     return ClassClusterResult(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
@@ -449,6 +454,7 @@ def cluster_class(
     min_samples: int = 3,
     pca_dim: int = 50,
     vae_latents: torch.Tensor | None = None,
+    diversify_captions: bool = False,
 ) -> tuple[ClassClusterResult, list[torch.Tensor] | None]:
     """Cluster one class using DINOv2 features and extract modes.
 
@@ -456,19 +462,20 @@ def cluster_class(
         method: "kmeans" (baseline) or "hdbscan" (mode discovery).
         dino_embeds: DINOv2 features tensor (required).
         vae_latents: Optional VAE latents for computing mode centroids (for mode guidance).
+        diversify_captions: If True, replace medoid captions with most diverse alternatives.
     """
     if method == "hdbscan":
         return cluster_class_hdbscan(
             class_indices=class_indices, dino_embeds=dino_embeds,
             samples=samples, ipc=ipc, seed=seed,
             min_cluster_size=min_cluster_size, min_samples=min_samples, pca_dim=pca_dim,
-            vae_latents=vae_latents,
+            vae_latents=vae_latents, diversify_captions=diversify_captions,
         )
     else:
         return cluster_class_kmeans(
             class_indices=class_indices, dino_embeds=dino_embeds,
             samples=samples, ipc=ipc, seed=seed,
-            vae_latents=vae_latents,
+            vae_latents=vae_latents, diversify_captions=diversify_captions,
         )
 
 
@@ -482,6 +489,7 @@ def run_stage3_clustering(
     min_cluster_size: int = 15,
     min_samples: int = 3,
     pca_dim: int = 50,
+    diversify_captions: bool = False,
 ) -> Stage3Result:
     """Run full Stage 3 pipeline: load encoded tensors, cluster per class, extract modes.
 
@@ -550,6 +558,7 @@ def run_stage3_clustering(
             min_cluster_size=min_cluster_size,
             min_samples=min_samples,
             pca_dim=pca_dim,
+            diversify_captions=diversify_captions,
             vae_latents=None,  # Don't compute VAE centroids from DINOv2 clusters
         )
 
