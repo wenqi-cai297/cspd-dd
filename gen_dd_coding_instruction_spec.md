@@ -1139,7 +1139,7 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 7. text2img + mode guidance (MGD³-style) → failed: detailed captions dominate, no usable sweet spot (see 16.11)
 8. text2img + multi-candidate selection, per-mode (DINOv2 prototype + diversity) → tested, did not beat single-medoid baseline at IPC=10
 9. **text2img + HDBSCAN + medoid caption** → current baseline (62.33% on ImageNette IPC=10)
-10. text2img + multi-candidate selection, **set-level** (D³HR moments or DAP MMD, 1-per-mode constraint) → implemented, evaluation pending
+10. text2img + multi-candidate selection, **set-level** (D³HR moments, 1-per-mode, N=10, IPC=10) → **59.53% ± 0.38, −2.80% vs baseline**; regression consistent across 3 repeats
 
 ---
 
@@ -1291,7 +1291,12 @@ Given current repo state (as of 2026-04-17):
   - 1-per-mode constraint (not free-pool) so IPC stays balanced across modes.
   - Greedy in original mode listing order, which for HDBSCAN is cluster-id order (i.e. discovery order from the HDBSCAN label assignment), **not** weight-desc. Processing large modes first is likely better in theory (more slack to compensate downstream); this is a candidate follow-up.
   - Requires `--num-candidates > 1` and `--visual-mode none`; raises on misuse.
-- **Status**: code implemented, eval pending. Expected to be most useful at higher IPC where Phase 2's per-mode heuristic leaves more slack.
+- **First A/B eval (2026-04-17, IPC=10, `moments` objective, N=10, HDBSCAN modes, ResNetAP-10 × 3 repeats)**: **59.53% ± 0.38** (runs: 59.0, 59.8, 59.8) — **−2.80% vs 62.33% baseline, consistent regression** (tight std confirms it is not noise). `distilled_dir` = `runs/stage4/ImageNette_train/ipc10/lora/setlevel_moments_n10_2026-04-17_195030`.
+- **Likely causes (not yet disentangled)**:
+  1. DINOv2 moment matching ≠ classifier-useful. D³HR operates in DiT latent space (model-native, magnitudes meaningful); we operate in DINOv2 CLS space with L2-normalized features, so "match class mean/std" collapses toward the *average-looking* image, which is more homogeneous than what downstream classifiers benefit from.
+  2. L2 normalization drops magnitude. Added to fix the `dino_embeds.pt` (raw) vs `scorer.encode_image` (normalized) mismatch, but magnitude may carry saliency cues in DINOv2. Should re-test without normalization.
+  3. Greedy in cluster-id order. First mode gets "closest to class mean" — similar to a global medoid — which biases the whole set toward the class centroid before later modes can compensate.
+- **Status**: **D³HR-style set-level matching on our DINOv2 space underperforms the single-medoid baseline at IPC=10**. Code kept; further iteration (MMD objective, no-normalize, weight-desc order, free-pool) to be decided.
 
 ### Current best configuration (as of 2026-04-17)
 - **Stage 2**: SDXL rank=64 LoRA, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, epoch 9 (checkpoint-7254)
@@ -1303,7 +1308,8 @@ Given current repo state (as of 2026-04-17):
   - Medoid caption (default) > diversity selection — kept medoid as default, diversity opt-in
   - HDBSCAN ≈ K-Means for medoid caption selection at IPC=10
   - Mode guidance (MGD³-style) incompatible with detailed text conditioning (see 16.11)
-  - Multi-candidate selection with DINOv2 probe/prototype doesn't beat baseline
+  - Multi-candidate selection with DINOv2 probe/prototype doesn't beat baseline (Phase 2)
+  - Multi-candidate **set-level** selection with D³HR moments in DINOv2 space **regresses** to 59.53% ± 0.38 (−2.80%); distribution matching in DINOv2 space is not classifier-useful as implemented (Phase 3, 2026-04-17)
   - SD v1.5 full fine-tuning underperforms SDXL LoRA (see 16.10)
 - **Eval**: mode_guidance protocol — RRC → ToTensor → HFlip → custom ColorJitter → Lighting → Normalize
 
