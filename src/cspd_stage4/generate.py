@@ -452,7 +452,12 @@ def generate_distilled_dataset(
                 prompt = m_meta.get("representative_caption", "") or m_meta.get("class_name", cls_key)
                 cand_images = []
                 for cand_idx in range(num_candidates):
-                    cand_seed = seed + m_idx * num_candidates + cand_idx
+                    # Per-round shared base seed + per-candidate offset so different
+                    # candidates for the *same* mode differ (required for selection).
+                    # Across modes, cand_idx=k shares the same initial noise — prompts
+                    # still differ so images differ. This replaces the old per-image
+                    # +mode_idx offset with a per-round shared-seed protocol.
+                    cand_seed = seed + cand_idx
                     cand_gen = torch.Generator(device=device).manual_seed(cand_seed)
                     cand_image = pipe(
                         prompt=prompt,
@@ -499,7 +504,7 @@ def generate_distilled_dataset(
 
                 prompt = m_meta.get("representative_caption", "") or m_meta.get("class_name", cls_key)
                 if refiner is not None:
-                    refiner_gen = torch.Generator(device=device).manual_seed(seed + m_idx)
+                    refiner_gen = torch.Generator(device=device).manual_seed(seed)
                     image = refiner(
                         prompt=prompt,
                         image=image,
@@ -552,14 +557,12 @@ def generate_distilled_dataset(
             representative_caption = mode_meta.get("representative_caption", "")
 
             # --- Text-to-image path (visual_mode="none") ---
-            # Mirrors scripts/inference/sample_sdxl_lora.py exactly:
-            #   generator = torch.Generator(device=device).manual_seed(seed + idx)
-            #   image = pipe(prompt=prompt, height=res, width=res,
-            #                num_inference_steps=steps, guidance_scale=gs,
-            #                generator=generator).images[0]
+            # Per-round shared-seed protocol: all images in one Stage 4 run share
+            # the same master seed (no +mode_idx offset). Run 3 times with 3 master
+            # seeds to get 3 independent datasets for eval variance measurement.
             if visual_mode == "none":
                 prompt = representative_caption if representative_caption else class_name
-                generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
+                generator = torch.Generator(device=device).manual_seed(seed)
 
                 if use_mode_guidance:
                     # Swap scheduler to mode-guided version for this image,
@@ -594,7 +597,9 @@ def generate_distilled_dataset(
                         best_score = -float("inf")
                         best_embedding = None
                         for cand_idx in range(num_candidates):
-                            cand_seed = seed + mode_idx * num_candidates + cand_idx
+                            # Per-candidate offset only; mode offset removed so all
+                            # modes in a round share the same candidate-seed sequence.
+                            cand_seed = seed + cand_idx
                             cand_gen = torch.Generator(device=device).manual_seed(cand_seed)
                             cand_image = pipe(
                                 prompt=prompt,
@@ -624,7 +629,7 @@ def generate_distilled_dataset(
 
                 # Optional refiner pass
                 if refiner is not None:
-                    refiner_gen = torch.Generator(device=device).manual_seed(seed + mode_idx)
+                    refiner_gen = torch.Generator(device=device).manual_seed(seed)
                     image = refiner(
                         prompt=prompt,
                         image=image,
@@ -669,7 +674,7 @@ def generate_distilled_dataset(
             init_image = init_image.resize((resolution, resolution), Image.LANCZOS)
 
             prompt = representative_caption if representative_caption else class_name
-            generator = torch.Generator(device=device).manual_seed(seed + mode_idx)
+            generator = torch.Generator(device=device).manual_seed(seed)
             output = pipe(
                 image=init_image,
                 prompt=prompt,
@@ -684,7 +689,7 @@ def generate_distilled_dataset(
 
             # Optional refiner pass
             if refiner is not None:
-                refiner_gen = torch.Generator(device=device).manual_seed(seed + mode_idx)
+                refiner_gen = torch.Generator(device=device).manual_seed(seed)
                 image = refiner(
                     prompt=prompt,
                     image=image,
