@@ -201,6 +201,40 @@ def _load_img2img_pipeline(
 
 
 @torch.no_grad()
+def _encode_images_to_vae_features(
+    pipe: Any,
+    images: list[Image.Image],
+    resolution: int,
+    device: str,
+) -> torch.Tensor:
+    """Encode PIL images to SDXL VAE latents, flattened to (B, D).
+
+    Mirrors the preprocessing in Stage 3's encode_dataset (PIL → [0,1] → [-1,1]
+    → vae.encode → × scaling_factor) so candidate features are comparable to
+    the real features saved in vae_latents.pt. Returned as fp32 on CPU.
+    """
+    import numpy as np
+
+    vae = pipe.vae
+    vae_dtype = next(vae.parameters()).dtype
+    scaling = vae.config.scaling_factor
+
+    tensors = []
+    for img in images:
+        if img.size != (resolution, resolution):
+            img = img.resize((resolution, resolution), Image.LANCZOS)
+        arr = np.array(img, dtype=np.float32) / 255.0
+        t = torch.from_numpy(arr).permute(2, 0, 1)
+        t = t * 2.0 - 1.0
+        tensors.append(t)
+    pixel_values = torch.stack(tensors).to(device, dtype=vae_dtype)
+
+    latent_dist = vae.encode(pixel_values).latent_dist
+    latents = latent_dist.sample() * scaling
+    return latents.flatten(start_dim=1).float().cpu()
+
+
+@torch.no_grad()
 def generate_distilled_dataset(
     *,
     modes_dir: str | Path,
@@ -225,6 +259,7 @@ def generate_distilled_dataset(
     eval_representativeness: bool = False,
     set_level_selection: bool = False,
     set_objective: str = "moments",
+    set_feature_space: str = "vae",
 ) -> GenerateResult:
     """Generate the distilled dataset using dual-anchor conditioning.
 
@@ -300,6 +335,8 @@ def generate_distilled_dataset(
             raise ValueError("set_level_selection currently only supports visual_mode='none' (text2img)")
         if set_objective not in ("moments", "mmd"):
             raise ValueError(f"set_objective must be 'moments' or 'mmd', got {set_objective!r}")
+        if set_feature_space not in ("vae", "dinov2"):
+            raise ValueError(f"set_feature_space must be 'vae' or 'dinov2', got {set_feature_space!r}")
 
     # Initialize candidate selector if per-mode multi-candidate mode
     selector = None
@@ -339,19 +376,51 @@ def generate_distilled_dataset(
 
         modes_dir_path = Path(modes_dir)
         encode_dir = candidate_probe_dir or str(modes_dir_path.parent / "encoded")
-        dino_path = Path(encode_dir) / "dino_embeds.pt"
         index_path = Path(encode_dir) / "encode_index.json"
-        if not (dino_path.exists() and index_path.exists()):
+        if not index_path.exists():
             raise FileNotFoundError(
-                f"set_level_selection requires encoded real DINOv2 features at "
-                f"{dino_path} and {index_path}"
+                f"set_level_selection requires {index_path} from Stage 3 encode"
             )
 
-        print(f"[Stage 4] Set-level selection: objective={set_objective}, "
-              f"num_candidates={num_candidates}")
-        scorer = RepresentativenessScorer(device=device)
+        if set_feature_space == "vae":
+            vae_path = Path(encode_dir) / "vae_latents.pt"
+            if not vae_path.exists():
+                raise FileNotFoundError(
+                    f"set_feature_space='vae' requires {vae_path}. "
+                    f"Re-run Stage 3 encode with --encode-vae."
+                )
+            real_features_raw = torch.load(vae_path, weights_only=True)
+            # (N, 4, H/8, W/8) → (N, D)
+            real_features = real_features_raw.flatten(start_dim=1).float()
+            normalize_features = False
+            feature_dim = real_features.shape[1]
+        else:  # dinov2
+            dino_path = Path(encode_dir) / "dino_embeds.pt"
+            if not dino_path.exists():
+                raise FileNotFoundError(
+                    f"set_feature_space='dinov2' requires {dino_path}"
+                )
+            real_features = torch.load(dino_path, weights_only=True).float()
+            normalize_features = True
+            feature_dim = real_features.shape[1]
 
-        real_features = torch.load(dino_path, weights_only=True)
+        print(f"[Stage 4] Set-level selection: objective={set_objective}, "
+              f"feature_space={set_feature_space} (dim={feature_dim}, "
+              f"normalize={normalize_features}), "
+              f"num_candidates={num_candidates}")
+
+        # Scorer is only used for select_set_greedy; encode_image (DINOv2) is
+        # only called when feature_space=='dinov2'.
+        scorer = RepresentativenessScorer(device=device) if set_feature_space == "dinov2" else None
+        if scorer is None:
+            # Lightweight: we still need the class for its select_set_greedy method
+            # but skip loading DINOv2. Build a minimal object.
+            class _SetLevelScorer:
+                def __init__(self_inner, device_inner):
+                    self_inner.device = device_inner
+                select_set_greedy = RepresentativenessScorer.select_set_greedy
+            scorer = _SetLevelScorer(device)
+
         with open(index_path, encoding="utf-8") as _f:
             _encode_index = json.load(_f)
         _samples_full = _encode_index.get("samples", [])
@@ -382,7 +451,6 @@ def generate_distilled_dataset(
             for m_idx, m_meta in cls_modes:
                 prompt = m_meta.get("representative_caption", "") or m_meta.get("class_name", cls_key)
                 cand_images = []
-                cand_feats = []
                 for cand_idx in range(num_candidates):
                     cand_seed = seed + m_idx * num_candidates + cand_idx
                     cand_gen = torch.Generator(device=device).manual_seed(cand_seed)
@@ -394,17 +462,26 @@ def generate_distilled_dataset(
                         guidance_scale=guidance_scale,
                         generator=cand_gen,
                     ).images[0]
-                    feat = scorer.encode_image(cand_image)
                     cand_images.append(cand_image)
-                    cand_feats.append(feat)
+
+                # Encode candidates in the chosen feature space
+                if set_feature_space == "vae":
+                    mode_feats = _encode_images_to_vae_features(
+                        pipe, cand_images, resolution, device
+                    )
+                else:  # dinov2
+                    mode_feats = torch.stack([
+                        scorer.encode_image(img) for img in cand_images
+                    ])
                 per_mode_images.append(cand_images)
-                per_mode_features.append(torch.stack(cand_feats))
+                per_mode_features.append(mode_feats)
 
             # Greedy select one candidate per mode
             selected_indices, running_scores = scorer.select_set_greedy(
                 cls_real_feats,
                 per_mode_features,
                 objective=set_objective,
+                normalize=normalize_features,
             )
             set_level_stats[cls_key] = {
                 "num_modes": len(cls_modes),
@@ -412,6 +489,8 @@ def generate_distilled_dataset(
                 "selected_indices": selected_indices,
                 "final_score": running_scores[-1] if running_scores else None,
                 "objective": set_objective,
+                "feature_space": set_feature_space,
+                "normalize": normalize_features,
             }
 
             # Save selected images and build metadata
@@ -448,6 +527,7 @@ def generate_distilled_dataset(
                     "generation_mode": "text2img+set_level",
                     "set_level_selection": {
                         "objective": set_objective,
+                        "feature_space": set_feature_space,
                         "num_candidates": num_candidates,
                         "selected_candidate_idx": sel_cand_idx,
                     },

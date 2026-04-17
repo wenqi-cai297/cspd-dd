@@ -246,6 +246,7 @@ class RepresentativenessScorer:
         candidates_per_mode: list[torch.Tensor],
         objective: str = "moments",
         skewness_weight: float = 0.1,
+        normalize: bool = True,
     ) -> tuple[list[int], list[float]]:
         """Greedy set-level selection: pick one candidate per mode to minimize
         set-level distance to the real class distribution.
@@ -260,13 +261,18 @@ class RepresentativenessScorer:
                 (N_cand, D) candidate features for that mode.
             objective: "moments" (D³HR mean+std+skew) or "mmd" (DAP linear kernel).
             skewness_weight: skew term weight for moments objective (D³HR uses 0.1).
+            normalize: L2-normalize features before scoring. True for DINOv2
+                (direction-only semantics). False for native model-space features
+                like VAE latents (magnitude is meaningful, per D³HR).
 
         Returns:
             (selected_indices, scores) where selected_indices[i] is the chosen
             candidate index for mode i, and scores[i] is the running set score
             after adding that mode's pick.
         """
-        real = F.normalize(real_features.to(self.device).float(), dim=1)
+        real = real_features.to(self.device).float()
+        if normalize:
+            real = F.normalize(real, dim=1)
         real_mean = real.mean(dim=0)
         real_std = real.std(dim=0)
 
@@ -275,7 +281,9 @@ class RepresentativenessScorer:
         running_scores: list[float] = []
 
         for mode_idx, cand_feats in enumerate(candidates_per_mode):
-            cand = F.normalize(cand_feats.to(self.device).float(), dim=1)
+            cand = cand_feats.to(self.device).float()
+            if normalize:
+                cand = F.normalize(cand, dim=1)
             if cand.shape[0] == 0:
                 raise ValueError(f"Mode {mode_idx} has no candidates")
 

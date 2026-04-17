@@ -52,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
     gen_parser.add_argument("--set-objective", default="moments", choices=["moments", "mmd"],
                             help="Objective for set-level selection: 'moments' (D3HR-style mean+std+0.1*skew) "
                                  "or 'mmd' (DAP linear kernel). Default: moments.")
+    gen_parser.add_argument("--set-feature-space", default="vae", choices=["vae", "dinov2"],
+                            help="Feature space for set-level moment/MMD matching. "
+                                 "'vae' (default): SDXL VAE latents (model-native space, "
+                                 "matches D3HR's in-latent approach; requires Stage 3 ran with --encode-vae). "
+                                 "'dinov2': DINOv2 CLS features (proxy space, L2-normalized; "
+                                 "regressed -2.8%% on first A/B).")
 
     return parser
 
@@ -86,6 +92,7 @@ def main() -> None:
             eval_representativeness=args.eval_representativeness,
             set_level_selection=args.set_level_selection,
             set_objective=args.set_objective,
+            set_feature_space=args.set_feature_space,
         )
         print(json.dumps({
             "output_dir": result.output_dir,

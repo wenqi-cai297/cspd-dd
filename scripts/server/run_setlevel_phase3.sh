@@ -8,15 +8,20 @@ set -euo pipefail
 # one per mode to minimize set-level distance to the real class distribution
 # (D3HR-style moment matching).
 #
-# Expected: comparable or better than 62.33% on ImageNette IPC=10 (ResNetAP-10,
-# 3 repeats).
+# DEFAULT: VAE latent space (SDXL-native, 16384-dim, no normalization).
+# Requires Stage 3 ran with --encode-vae (vae_latents.pt must exist).
+#
+# Prior DINOv2-space experiment (2026-04-17): 59.53% ± 0.38, -2.80% regression.
+# Hypothesis: DINOv2 is a proxy space; L2-normalization drops magnitude.
+# VAE space fixes both issues (model-native + magnitude preserved).
 #
 # Usage:
 #   bash scripts/server/run_setlevel_phase3.sh
 #
 # Environment:
-#   SETLEVEL_NUM_CANDIDATES=10   (N candidates per mode, default 10)
-#   SETLEVEL_OBJECTIVE=moments   (moments | mmd, default moments)
+#   SETLEVEL_NUM_CANDIDATES=10      (N candidates per mode, default 10)
+#   SETLEVEL_OBJECTIVE=moments      (moments | mmd, default moments)
+#   SETLEVEL_FEATURE_SPACE=vae      (vae | dinov2, default vae)
 #   SETLEVEL_SEED=42
 #   EVAL_REPEAT=3
 
@@ -29,6 +34,7 @@ IPC=10
 
 NUM_CANDIDATES="${SETLEVEL_NUM_CANDIDATES:-10}"
 OBJECTIVE="${SETLEVEL_OBJECTIVE:-moments}"
+FEATURE_SPACE="${SETLEVEL_FEATURE_SPACE:-vae}"
 SEED="${SETLEVEL_SEED:-42}"
 EVAL_REPEAT="${EVAL_REPEAT:-3}"
 
@@ -49,7 +55,13 @@ if [[ ! -f "$LORA" ]]; then
 fi
 
 TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
-STAGE4_OUT="runs/stage4/ImageNette_train/ipc${IPC}/lora/setlevel_${OBJECTIVE}_n${NUM_CANDIDATES}_${TIMESTAMP}"
+STAGE4_OUT="runs/stage4/ImageNette_train/ipc${IPC}/lora/setlevel_${FEATURE_SPACE}_${OBJECTIVE}_n${NUM_CANDIDATES}_${TIMESTAMP}"
+
+if [[ "$FEATURE_SPACE" == "vae" && ! -f "${ENCODE_DIR}/vae_latents.pt" ]]; then
+  echo "[ERROR] --set-feature-space vae requires ${ENCODE_DIR}/vae_latents.pt"
+  echo "        Re-run Stage 3 encode with --encode-vae first."
+  exit 1
+fi
 
 echo "============================================================"
 echo "[Phase 3 set-level] Generation"
@@ -57,6 +69,7 @@ echo "  modes_dir:        $MODES_DIR (HDBSCAN baseline 62.33%)"
 echo "  lora:             $LORA"
 echo "  num_candidates:   $NUM_CANDIDATES"
 echo "  set_objective:    $OBJECTIVE"
+echo "  set_feature_space:$FEATURE_SPACE"
 echo "  seed:             $SEED"
 echo "  output:           $STAGE4_OUT"
 echo "============================================================"
@@ -74,6 +87,7 @@ cspd-stage4 generate \
   --num-candidates "$NUM_CANDIDATES" \
   --set-level-selection \
   --set-objective "$OBJECTIVE" \
+  --set-feature-space "$FEATURE_SPACE" \
   --candidate-probe-dir "$ENCODE_DIR" \
   --eval-representativeness
 

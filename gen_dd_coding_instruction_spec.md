@@ -1107,6 +1107,7 @@ cspd-stage4 generate \
 - **--eval-representativeness**: After generation, evaluate set-level representativeness per class: MMD (linear kernel, per DAP), moment matching (mean+std+skewness, per D³HR), and coverage. Diagnostic only. Saves `representativeness_report.json`.
 - **--set-level-selection**: Phase 3 refinement. After generating N candidates per mode (`--num-candidates > 1`), greedy-pick one per mode to minimize set-level distance to the real class distribution. Replaces the per-mode prototype+diversity scoring (Phase 2) with D³HR-style set optimization, while preserving Stage 3's 1-per-mode structure. Requires `--visual-mode none`. Saves `set_level_selection_report.json`.
 - **--set-objective**: `"moments"` (default, D³HR mean+std+0.1·skew) or `"mmd"` (DAP linear kernel). Only used when `--set-level-selection` is set.
+- **--set-feature-space**: `"vae"` (default — SDXL VAE latents, flattened (4,64,64) → 16384-dim, no L2-normalization; model-native space, analogous to D³HR's in-latent approach; requires Stage 3 ran with `--encode-vae`) or `"dinov2"` (768-dim, L2-normalized; a proxy space which regressed −2.8% on first A/B, kept for ablation).
 - **--semantic-mode** (hidden, default `"caption"`): `"caption"` uses representative caption text as prompt. `"embedding"` uses mean text embedding (legacy baseline, blurry).
 
 ### Output artifacts
@@ -1291,12 +1292,13 @@ Given current repo state (as of 2026-04-17):
   - 1-per-mode constraint (not free-pool) so IPC stays balanced across modes.
   - Greedy in original mode listing order, which for HDBSCAN is cluster-id order (i.e. discovery order from the HDBSCAN label assignment), **not** weight-desc. Processing large modes first is likely better in theory (more slack to compensate downstream); this is a candidate follow-up.
   - Requires `--num-candidates > 1` and `--visual-mode none`; raises on misuse.
-- **First A/B eval (2026-04-17, IPC=10, `moments` objective, N=10, HDBSCAN modes, ResNetAP-10 × 3 repeats)**: **59.53% ± 0.38** (runs: 59.0, 59.8, 59.8) — **−2.80% vs 62.33% baseline, consistent regression** (tight std confirms it is not noise). `distilled_dir` = `runs/stage4/ImageNette_train/ipc10/lora/setlevel_moments_n10_2026-04-17_195030`.
+- **First A/B eval (2026-04-17, IPC=10, `moments` objective, N=10, HDBSCAN modes, ResNetAP-10 × 3 repeats)**: **59.53% ± 0.38** (runs: 59.0, 59.8, 59.8) — **−2.80% vs 62.33% baseline, consistent regression** (tight std confirms it is not noise). `distilled_dir` = `runs/stage4/ImageNette_train/ipc10/lora/setlevel_moments_n10_2026-04-17_195030`. **Feature space: DINOv2 CLS, L2-normalized.**
 - **Likely causes (not yet disentangled)**:
-  1. DINOv2 moment matching ≠ classifier-useful. D³HR operates in DiT latent space (model-native, magnitudes meaningful); we operate in DINOv2 CLS space with L2-normalized features, so "match class mean/std" collapses toward the *average-looking* image, which is more homogeneous than what downstream classifiers benefit from.
-  2. L2 normalization drops magnitude. Added to fix the `dino_embeds.pt` (raw) vs `scorer.encode_image` (normalized) mismatch, but magnitude may carry saliency cues in DINOv2. Should re-test without normalization.
+  1. DINOv2 moment matching ≠ classifier-useful. D³HR operates in DiT latent space (model-native, magnitudes meaningful); we operated in DINOv2 CLS space with L2-normalized features, so "match class mean/std" collapses toward the *average-looking* image, which is more homogeneous than what downstream classifiers benefit from.
+  2. L2 normalization drops magnitude. Added to fix the `dino_embeds.pt` (raw) vs `scorer.encode_image` (normalized) mismatch, but magnitude may carry saliency cues. Should re-test without normalization.
   3. Greedy in cluster-id order. First mode gets "closest to class mean" — similar to a global medoid — which biases the whole set toward the class centroid before later modes can compensate.
-- **Status**: **D³HR-style set-level matching on our DINOv2 space underperforms the single-medoid baseline at IPC=10**. Code kept; further iteration (MMD objective, no-normalize, weight-desc order, free-pool) to be decided.
+- **Follow-up (2026-04-17): VAE-space set-level selection**. Added `--set-feature-space vae` (default) which addresses causes 1+2 simultaneously: uses SDXL VAE latents (the model's native space, exactly analogous to D³HR's DiT latent approach) with magnitude preserved (no L2-normalize). Real features loaded from Stage 3's `vae_latents.pt`; candidates re-encoded at Stage 4 time via `pipe.vae.encode()` mirroring the Stage 3 preprocessing. Feature dim jumps from 768 (DINOv2) to 16384 (flattened 4×64×64). DINOv2 path kept as ablation.
+- **Status**: DINOv2-space set-level matching regresses. VAE-space variant code-complete, eval pending.
 
 ### Current best configuration (as of 2026-04-17)
 - **Stage 2**: SDXL rank=64 LoRA, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, epoch 9 (checkpoint-7254)
