@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-"""Training utilities for CSPD Stage 2.
+"""Training utilities for CSPD Stage 2 (SDXL LoRA only).
 
-This module is deliberately honest about scope:
-- it prepares run directories and paired manifests,
-- records text-conditioning-focused adaptation intent,
-- separates trainable and frozen component plans,
-- implements a minimal accelerate-based real FLUX training path over (image, canonical_caption) pairs when the runtime supports it,
-- keeps the older tiny placeholder loop as an explicit plumbing fallback,
-- does not pretend every environment can actually load or fine-tune gated FLUX checkpoints.
+This module prepares run directories + paired manifests and hands the actual
+training off to the official diffusers SDXL LoRA trainer via
+`cspd_stage2.families.sdxl.training.run_stage2_sdxl_official_training`.
+Legacy FLUX / PixArt / SD v1.5 paths were removed 2026-04-18.
 """
 
 import fnmatch
@@ -57,7 +54,6 @@ from cspd_stage2.training_common import (
     _should_force_full_update_fp32,
     _torch_dtype_label,
     _upcast_trainable_parameters_,
-    derive_stage2_baseline_sample_output_dir,
     derive_stage2_dataset_label,
     derive_stage2_output_dir,
     resolve_effective_module_selection,
@@ -83,7 +79,7 @@ class Stage2TrainConfig:
     dataset_root: str
     render_input: str
     output_dir: str | None = None
-    backbone_name: str = "black-forest-labs/FLUX.1-Kontext-dev"
+    backbone_name: str = "stabilityai/stable-diffusion-xl-base-1.0"
     memory_log_artifact_name: str = "memory_diagnostics.jsonl"
     wandb_enabled: bool = False
     wandb_project: str = "cspd-stage2"
@@ -94,13 +90,6 @@ class Stage2TrainConfig:
     wandb_dir: str | None = None
     wandb_resume: str | None = None
     wandb_run_id: str | None = None
-    sample_every: int = 0
-    sample_prompt_file: str | None = None
-    sample_prompts: list[str] = field(default_factory=list)
-    sample_num_prompts: int = 4
-    sample_num_inference_steps: int = 50
-    sample_guidance_scale: float = 7.0
-    sample_seed: int = 42
     batch_size: int = 4
     learning_rate: float = 2e-5
     epochs: int = 1
@@ -117,7 +106,6 @@ class Stage2TrainConfig:
     adam_beta2: float = 0.999
     adam_weight_decay: float = 0.0
     adam_epsilon: float = 1e-8
-    pixart_sigma_prompt_dropout_prob: float = 0.1
     log_every: int = 10
     save_every: int = 200
     max_train_samples: int | None = None
@@ -127,7 +115,6 @@ class Stage2TrainConfig:
     strict_pairing: bool = False
     dry_run: bool = False
     generate_manifest_only: bool = False
-    allow_placeholder_loop: bool = False
     freeze_text_encoder: bool = True
     freeze_vae: bool = True
     train_transformer_core_only: bool = True
@@ -152,8 +139,6 @@ class Stage2TrainConfig:
     gradient_accumulation_steps: int = 1
     dataloader_drop_last: bool = False
     enable_gradient_checkpointing: bool = True
-    full_update_fp32_for_pixart: bool = True
-    lora_fp32_for_pixart: bool = True
     sdxl_official_script: str | None = None
     sdxl_num_processes: int | None = None
     sdxl_accelerate_extra_args: list[str] = field(default_factory=list)
@@ -266,123 +251,7 @@ def _wandb_log(run: Any | None, payload: dict[str, Any], *, step: int) -> None:
         pass
 
 
-def _read_sample_prompts_from_file(path: str | Path) -> list[str]:
-    prompt_path = Path(path)
-    if not prompt_path.exists():
-        raise FileNotFoundError(f"Sample prompt file not found: {prompt_path}")
-    suffix = prompt_path.suffix.lower()
-    if suffix in {".json", ".jsonl"}:
-        rows: list[str] = []
-        with prompt_path.open("r", encoding="utf-8-sig") as handle:
-            if suffix == ".json":
-                payload = json.load(handle)
-                if isinstance(payload, list):
-                    for item in payload:
-                        if isinstance(item, str) and item.strip():
-                            rows.append(item.strip())
-                        elif isinstance(item, dict):
-                            prompt = str(item.get("prompt") or item.get("text") or "").strip()
-                            if prompt:
-                                rows.append(prompt)
-                else:
-                    raise ValueError(f"Expected a list in sample prompt JSON file: {prompt_path}")
-            else:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    payload = json.loads(line)
-                    if isinstance(payload, str) and payload.strip():
-                        rows.append(payload.strip())
-                    elif isinstance(payload, dict):
-                        prompt = str(payload.get("prompt") or payload.get("text") or "").strip()
-                        if prompt:
-                            rows.append(prompt)
-        return rows
-    prompts: list[str] = []
-    with prompt_path.open("r", encoding="utf-8-sig") as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                prompts.append(line)
-    return prompts
 
-
-def _resolve_sample_prompts(*, config: Stage2TrainConfig, pairs: list[Any]) -> list[str]:
-    prompts: list[str] = []
-    if config.sample_prompt_file:
-        prompts.extend(_read_sample_prompts_from_file(config.sample_prompt_file))
-    prompts.extend([prompt.strip() for prompt in config.sample_prompts if str(prompt).strip()])
-    if not prompts:
-        for pair in pairs:
-            caption = str(getattr(pair, "canonical_caption", "") or "").strip()
-            if caption:
-                prompts.append(caption)
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for prompt in prompts:
-        if prompt not in seen:
-            deduped.append(prompt)
-            seen.add(prompt)
-    limit = max(int(config.sample_num_prompts), 0) or len(deduped)
-    return deduped[:limit]
-
-
-def _run_pixart_wandb_sampling(*, pipeline: Any, transformer: Any, accelerator: Any | None, config: Stage2TrainConfig, run_dir: Path, epoch: int, optimizer_step: int, prompts: list[str], device: Any, train_dtype: Any, wandb_run: Any | None) -> dict[str, Any]:
-    """Backward-compatible wrapper around the PixArt family sampling helper."""
-    from cspd_stage2.families.pixart.training import _run_pixart_wandb_sampling as _impl
-
-    return _impl(
-        pipeline=pipeline,
-        transformer=transformer,
-        accelerator=accelerator,
-        config=config,
-        run_dir=run_dir,
-        epoch=epoch,
-        optimizer_step=optimizer_step,
-        prompts=prompts,
-        device=device,
-        train_dtype=train_dtype,
-        wandb_run=wandb_run,
-    )
-
-
-def run_stage2_pixart_baseline_sampling(
-    *,
-    dataset_root: str,
-    backbone_name: str,
-    output_dir: str | None = None,
-    sample_prompt_file: str | None = None,
-    sample_prompts: list[str] | None = None,
-    sample_num_prompts: int = 4,
-    sample_num_inference_steps: int = 50,
-    sample_guidance_scale: float = 7.0,
-    sample_seed: int = 42,
-    resolution: int = 512,
-    backbone_torch_dtype: str = "float16",
-    backbone_device: str | None = None,
-    backbone_device_map: str | None = None,
-    backbone_local_files_only: bool = False,
-) -> dict[str, Any]:
-    """Dispatch standalone baseline sampling to the PixArt family module."""
-    from cspd_stage2.families.pixart.training import run_stage2_pixart_baseline_sampling as _impl
-
-    return _impl(
-        dataset_root=dataset_root,
-        backbone_name=backbone_name,
-        output_dir=output_dir,
-        sample_prompt_file=sample_prompt_file,
-        sample_prompts=sample_prompts,
-        sample_num_prompts=sample_num_prompts,
-        sample_num_inference_steps=sample_num_inference_steps,
-        sample_guidance_scale=sample_guidance_scale,
-        sample_seed=sample_seed,
-        resolution=resolution,
-        backbone_torch_dtype=backbone_torch_dtype,
-        backbone_device=backbone_device,
-        backbone_device_map=backbone_device_map,
-        backbone_local_files_only=backbone_local_files_only,
-    )
 
 
 
@@ -451,50 +320,31 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         write_json(run_dir / "trainer_plan.json", trainer_plan)
         last_known_phase = "after_write_trainer_plan"
 
-        should_enter_training_dispatch = infer_backbone_family(config.backbone_name) == 'sdxl' or (not config.generate_manifest_only and not config.dry_run)
-        if should_enter_training_dispatch:
+        if infer_backbone_family(config.backbone_name) == 'sdxl' and not config.generate_manifest_only and not config.dry_run:
             try:
                 last_known_phase = "before_real_training"
-                family = infer_backbone_family(config.backbone_name)
-                if family == 'sdxl':
-                    training_result = run_stage2_sdxl_official_training(
-                        config=config,
-                        pairs=pairing.pairs,
-                        run_dir=run_dir,
-                        manifest_path=manifest_paths.manifest_path,
-                    )
-                else:
-                    training_result = run_real_stage2_backbone_training(
-                        config=config,
-                        pairs=pairing.pairs,
-                        run_dir=run_dir,
-                        manifest_path=manifest_paths.manifest_path,
-                    )
+                training_result = run_stage2_sdxl_official_training(
+                    config=config,
+                    pairs=pairing.pairs,
+                    run_dir=run_dir,
+                    manifest_path=manifest_paths.manifest_path,
+                )
                 last_known_phase = training_result.get("last_known_phase", "after_real_training")
             except Exception as exc:  # noqa: BLE001
                 last_known_phase = "real_training_exception"
-                if config.allow_placeholder_loop:
-                    training_result = run_placeholder_transformer_core_loop(config, manifest_paths.manifest_path)
-                    training_result["real_training_error"] = str(exc)
-                    training_result["real_training_traceback"] = traceback.format_exc()
-                    training_result["last_known_phase"] = training_result.get("last_known_phase") or last_known_phase
-                    training_result["message"] = (
-                        "Real Stage 2 backbone training could not run in this environment; fell back to the explicit placeholder loop."
-                    )
-                else:
-                    training_result = {
-                        "status": "failed_before_training",
-                        "implemented_training": False,
-                        "placeholder_training": False,
-                        "message": (
-                            "Real Stage 2 backbone training was attempted but could not start or complete in this environment. "
-                            "See training_error for the real runtime failure."
-                        ),
-                        "training_error": str(exc),
-                        "training_traceback": traceback.format_exc(),
-                        "component_plan_status": "real_training_attempted",
-                        "last_known_phase": last_known_phase,
-                    }
+                training_result = {
+                    "status": "failed_before_training",
+                    "implemented_training": False,
+                    "placeholder_training": False,
+                    "message": (
+                        "SDXL Stage 2 training was attempted but could not start or complete in this environment. "
+                        "See training_error for the real runtime failure."
+                    ),
+                    "training_error": str(exc),
+                    "training_traceback": traceback.format_exc(),
+                    "component_plan_status": "real_training_attempted",
+                    "last_known_phase": last_known_phase,
+                }
     except Exception as exc:  # noqa: BLE001
         top_level_failure = {
             "error_type": type(exc).__name__,
@@ -525,54 +375,6 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
     )
     _safe_write_json(run_dir / "stage2_run_summary.json", summary)
     return summary
-
-
-
-def _effective_prompt_max_sequence_length(config: Stage2TrainConfig) -> int:
-    family = infer_backbone_family(config.backbone_name)
-    if family in {"pixart", "pixart_sigma"}:
-        return 300
-    return 512
-
-
-def _resolve_pixart_partial_full_update_fp32_exclude_patterns(*, config: Stage2TrainConfig) -> list[str]:
-    from cspd_stage2.families.pixart.training import _resolve_pixart_partial_full_update_fp32_exclude_patterns as _impl
-
-    return _impl(config=config)
-
-
-def _infer_trainable_parameter_dtype(module: Any, *, fallback: Any) -> Any:
-    for parameter in module.parameters():
-        if parameter.requires_grad:
-            return parameter.dtype
-    return fallback
-
-
-def _infer_module_parameter_dtype(module: Any | None, *, fallback: Any) -> Any:
-    if module is None or not hasattr(module, "parameters"):
-        return fallback
-    for parameter in module.parameters():
-        return parameter.dtype
-    return fallback
-
-
-def _prepare_pixart_forward_inputs(
-    *,
-    transformer: Any,
-    noisy_latents: Any,
-    prompt_embeds: Any,
-    device: Any,
-    train_dtype: Any,
-) -> dict[str, Any]:
-    from cspd_stage2.families.pixart.training import _prepare_pixart_forward_inputs as _impl
-
-    return _impl(transformer=transformer, noisy_latents=noisy_latents, prompt_embeds=prompt_embeds, device=device, train_dtype=train_dtype)
-
-
-def _maybe_apply_conditioning_dropout(conditioning_text: list[str], *, config: Stage2TrainConfig, torch_module: Any) -> tuple[list[str], int]:
-    from cspd_stage2.families.pixart.training import _maybe_apply_conditioning_dropout as _impl
-
-    return _impl(conditioning_text, config=config, torch_module=torch_module)
 
 
 
@@ -940,130 +742,6 @@ def _move_component_with_diagnostics(
 
 
 
-def run_real_stage2_backbone_training(
-    *,
-    config: Stage2TrainConfig,
-    pairs: list[Any],
-    run_dir: Path,
-    manifest_path: str,
-) -> dict[str, Any]:
-    family = infer_backbone_family(config.backbone_name)
-    if family in {"pixart_sigma", "pixart"}:
-        return run_real_stage2_pixart_training(
-            config=config,
-            pairs=pairs,
-            run_dir=run_dir,
-            manifest_path=manifest_path,
-        )
-    return run_real_stage2_flux_training(
-        config=config,
-        pairs=pairs,
-        run_dir=run_dir,
-        manifest_path=manifest_path,
-    )
-
-
-def run_real_stage2_flux_training(
-    *,
-    config: Stage2TrainConfig,
-    pairs: list[Any],
-    run_dir: Path,
-    manifest_path: str,
-) -> dict[str, Any]:
-    """Dispatch FLUX-family training to the dedicated family module."""
-    from cspd_stage2.families.flux.training import run_real_stage2_flux_training as _impl
-
-    return _impl(config=config, pairs=pairs, run_dir=run_dir, manifest_path=manifest_path)
-
-
-
-def run_real_stage2_pixart_training(
-    *,
-    config: Stage2TrainConfig,
-    pairs: list[Any],
-    run_dir: Path,
-    manifest_path: str,
-) -> dict[str, Any]:
-    """Dispatch PixArt-family training to the dedicated family module."""
-    from cspd_stage2.families.pixart.training import run_real_stage2_pixart_training as _impl
-
-    return _impl(config=config, pairs=pairs, run_dir=run_dir, manifest_path=manifest_path)
-
-
-
-def _run_real_pixart_train_step(
-    *,
-    pipeline: Any,
-    transformer: Any,
-    batch: dict[str, Any],
-    optimizer: Any,
-    lr_scheduler: Any | None,
-    accelerator: Any | None,
-    device: Any,
-    train_dtype: Any,
-    memory_log_path: Path,
-    epoch: int,
-    global_step: int,
-    optimizer_step: int,
-    config: Stage2TrainConfig,
-) -> Any:
-    """Backward-compatible wrapper around the PixArt family step implementation."""
-    from cspd_stage2.families.pixart.training import _run_real_pixart_train_step as _impl
-
-    return _impl(
-        pipeline=pipeline,
-        transformer=transformer,
-        batch=batch,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        accelerator=accelerator,
-        device=device,
-        train_dtype=train_dtype,
-        memory_log_path=memory_log_path,
-        epoch=epoch,
-        global_step=global_step,
-        optimizer_step=optimizer_step,
-        config=config,
-    )
-
-
-
-def _run_real_flux_train_step(
-    *,
-    pipeline: Any,
-    transformer: Any,
-    batch: dict[str, Any],
-    optimizer: Any,
-    accelerator: Any | None,
-    device: Any,
-    train_dtype: Any,
-    resolution: int,
-    memory_log_path: Path,
-    epoch: int,
-    global_step: int,
-    optimizer_step: int,
-) -> Any:
-    """Backward-compatible wrapper around the FLUX family step implementation."""
-    from cspd_stage2.families.flux.training import _run_real_flux_train_step as _impl
-
-    return _impl(
-        pipeline=pipeline,
-        transformer=transformer,
-        batch=batch,
-        optimizer=optimizer,
-        accelerator=accelerator,
-        device=device,
-        train_dtype=train_dtype,
-        resolution=resolution,
-        memory_log_path=memory_log_path,
-        epoch=epoch,
-        global_step=global_step,
-        optimizer_step=optimizer_step,
-    )
-
-
-
-
 def _classify_training_failure(exc: Exception) -> str:
     message = str(exc).lower()
     if "non-finite" in message or "nan" in message or "inf" in message:
@@ -1182,13 +860,6 @@ def _assert_trainable_parameters_finite(*, module: Any, accelerator: Any | None,
     if not diagnostics["all_trainable_parameters_finite"]:
         raise RuntimeError(f"Detected non-finite trainable parameters immediately after optimizer step {optimizer_step}: {diagnostics['non_finite_parameter_names_sample']}")
     return diagnostics
-
-
-def _sample_flux_flow_matching_timesteps(*, batch_size: int, device: Any, dtype: Any) -> tuple[Any, Any]:
-    from cspd_stage2.families.flux.training import _sample_flux_flow_matching_timesteps as _impl
-
-    return _impl(batch_size=batch_size, device=device, dtype=dtype)
-
 
 
 def _move_stage2_nontransformer_modules_to_device(pipeline: Any, *, device: Any, train_dtype: Any) -> None:
@@ -1404,56 +1075,6 @@ def _resolve_training_dtype(config: Stage2TrainConfig, device: Any) -> Any:
 def _torch_dtype_label(dtype: Any) -> str:
     text = str(dtype)
     return text.split(".")[-1]
-
-
-
-def run_placeholder_transformer_core_loop(config: Stage2TrainConfig, manifest_path: str) -> dict[str, Any]:
-    """Optional tiny placeholder loop.
-
-    This keeps the training surface honest: if torch is present, we can verify
-    argument plumbing and a few optimizer steps, but we still do not pretend to
-    be training FLUX Kontext itself.
-    """
-    if importlib.util.find_spec("torch") is None:
-        return {
-            "status": "placeholder_skipped",
-            "implemented_training": False,
-            "placeholder_training": False,
-            "message": "PyTorch is not installed in this environment, so the optional placeholder loop was skipped.",
-            "component_plan_status": "implemented_metadata_only",
-        }
-
-    import torch
-
-    torch.manual_seed(config.seed)
-    model = torch.nn.Linear(8, 8)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
-    max_steps = config.max_steps or min(5, max(config.epochs, 1) * 2)
-    losses: list[float] = []
-
-    for _step in range(max_steps):
-        inputs = torch.randn(config.batch_size, 8)
-        targets = torch.randn(config.batch_size, 8)
-        outputs = model(inputs)
-        loss = torch.nn.functional.mse_loss(outputs, targets)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        losses.append(float(loss.detach().cpu().item()))
-
-    return {
-        "status": "placeholder_complete",
-        "implemented_training": False,
-        "placeholder_training": True,
-        "message": (
-            "Ran a tiny PyTorch placeholder optimization loop to validate Stage 2 training plumbing. "
-            "This is not FLUX Kontext fine-tuning."
-        ),
-        "manifest_path": str(Path(manifest_path).resolve()),
-        "steps": max_steps,
-        "losses": losses,
-        "component_plan_status": "implemented_metadata_only",
-    }
 
 
 
@@ -1780,23 +1401,11 @@ def _build_trainer_plan(
             "text_conditioning_manifest_fields": "implemented",
             "run_directory_setup": "implemented",
             "config_snapshot": "implemented",
-            "component_target_plan": "implemented_with_optional_real_module_inspection",
-            "adapter_target_plan": "implemented_with_optional_real_module_lora_injection",
-            "real_module_target_selection": "implemented_for_real_training_when_conditioning_submodule_path_is_selected",
-            "real_module_adapter_injection": "optional_when_explicit_module_reference_is_provided",
-            "placeholder_loop": "optional",
-            "full_flux_kontext_finetuning": "minimally_implemented_when_runtime_supports_real_backbone_loading",
+            "sdxl_lora_training": "delegated_to_official_diffusers_trainer",
         },
         "notes": [
-            "This scaffold is intentionally conservative.",
-            "Stage 2 is canonical-caption-conditioned generative adaptation, not image-editing fine-tuning.",
-            "Stage 2 no longer means render; render belongs to Stage 1.",
-            "Current code records a default policy of freezing non-transformer top-level modules and fine-tuning the full transformer.",
-            "When a conditioning-focused transformer submodule group is selected, the real training path now applies that selection to requires_grad before optimization.",
-            "The real training path now attempts transformer gradient checkpointing when the loaded FLUX transformer exposes a supported interface.",
-            "Frozen VAE/text components now stay on the active runtime device for the whole training run; Stage 2 no longer shuttles them between CPU and GPU.",
-            "Real accelerate-based diffusers-backed FLUX-family training is wired conservatively around packed VAE latents and canonical-caption prompt encoding, but successful execution still depends on the local runtime actually loading the requested backbone.",
-            "Heavier optimizer/state sharding or FSDP-style offload is still not implemented here.",
+            "Stage 2 is SDXL LoRA fine-tuning only (as of 2026-04-18).",
+            "Training is delegated to the official diffusers train_text_to_image_lora_sdxl.py via a thin wrapper.",
         ],
     }
 
@@ -1804,28 +1413,16 @@ def _build_trainer_plan(
 
 def _infer_backbone_assumptions(backbone_name: str) -> dict[str, Any]:
     family = infer_backbone_family(backbone_name)
-    if family == "flux_kontext":
+    if family == "sdxl":
         return {
-            "family": "flux_kontext",
+            "family": "sdxl",
             "notes": [
-                "Current target family is experimental FLUX.1 Kontext [dev].",
-                "Default Stage 2 policy is to freeze non-transformer top-level modules and fine-tune the full FluxTransformer2DModel.",
-                "If memory is insufficient, the intended fallback is conditioning-related transformer submodules only.",
-            ],
-        }
-    if family in {"pixart_sigma", "pixart"}:
-        return {
-            "family": family,
-            "notes": [
-                "Current target family is PixArt text-to-image diffusion transformers via diffusers.",
-                "Stage 2 semantics stay canonical-caption-conditioned generation on real images, not image editing.",
-                "The practical first fallback for constrained hardware is transformer LoRA over selected PixArt attention/feed-forward modules.",
+                "SDXL LoRA fine-tuning via the official diffusers trainer.",
             ],
         }
     return {
         "family": "generic_diffusion_backbone",
         "notes": [
-            "Stage 2 wording stays generic at the method level.",
-            "Module-group selectors may need replacement for a different backbone family.",
+            "Non-SDXL backbones are not supported; cspd-stage2 train will not attempt training.",
         ],
     }

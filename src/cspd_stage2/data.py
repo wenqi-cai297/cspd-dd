@@ -4,7 +4,7 @@ from __future__ import annotations
 
 Stage 2 now means generative-backbone adaptation / canonical-semantic-space familiarization.
 This module implements the parts we can make real without claiming a complete
-FLUX Kontext fine-tuning stack:
+SDXL LoRA fine-tuning stack:
 - scan an ImageFolder-style visual dataset,
 - load Stage 1 render records,
 - pair images to canonical captions conservatively,

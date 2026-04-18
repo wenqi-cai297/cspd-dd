@@ -12,11 +12,9 @@ from cspd_stage2.training import (
     AdapterPlan,
     CONDITIONING_RELATED_GROUP_PATTERNS,
     Stage2TrainConfig,
-    derive_stage2_baseline_sample_output_dir,
     derive_stage2_output_dir,
     inspect_stage2_backbone_targets,
     resolve_effective_module_selection,
-    run_stage2_pixart_baseline_sampling,
     run_stage2_training,
 )
 
@@ -48,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.add_argument(
         "--backbone-name",
-        default="black-forest-labs/FLUX.1-Kontext-dev",
+        default="stabilityai/stable-diffusion-xl-base-1.0",
         help="Backbone identifier for the intended Stage 2 generative-backbone adaptation target",
     )
     train_parser.add_argument("--batch-size", type=int, default=4, help="Logical training batch size")
@@ -60,7 +58,6 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--adam-beta2", type=float, default=0.999, help="AdamW beta2")
     train_parser.add_argument("--adam-weight-decay", type=float, default=0.0, help="AdamW weight decay")
     train_parser.add_argument("--adam-epsilon", type=float, default=1e-8, help="AdamW epsilon")
-    train_parser.add_argument("--pixart-sigma-prompt-dropout-prob", type=float, default=0.1, help="Classifier-free style prompt dropout probability used on the PixArt canonical-caption conditioning path")
     train_parser.add_argument("--epochs", type=int, default=1, help="Number of epochs for the training scaffold")
     train_parser.add_argument("--max-steps", type=int, default=None, help="Optional maximum number of optimization steps")
     train_parser.add_argument("--num-workers", type=int, default=0, help="Data loader worker count placeholder")
@@ -80,11 +77,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--generate-manifest-only",
         action="store_true",
         help="Alias-like explicit mode that skips any training attempt and only writes manifest artifacts",
-    )
-    train_parser.add_argument(
-        "--allow-placeholder-loop",
-        action="store_true",
-        help="Run a tiny optional PyTorch placeholder loop if torch is installed; still not real FLUX training",
     )
     train_parser.add_argument(
         "--unfreeze-text-encoder",
@@ -108,8 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.add_argument(
         "--conditioning-objective",
-        default="finetune_full_flux_transformer_on_real_image_and_stage1_canonical_caption_pairs",
-        help="Short objective label describing the full-transformer fine-tuning target for this run",
+        default="finetune_sdxl_unet_lora_on_real_image_and_stage1_canonical_caption_pairs",
+        help="Short objective label describing the SDXL LoRA fine-tuning target for this run",
     )
     train_parser.add_argument(
         "--conditioning-text-field",
@@ -208,17 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "--disable-gradient-checkpointing",
         action="store_true",
-        help="Disable the default attempt to enable gradient checkpointing on the loaded FLUX transformer when supported",
-    )
-    train_parser.add_argument(
-        "--disable-full-update-fp32-for-pixart",
-        action="store_true",
-        help="Disable the default safer FP32 full-update path for PixArt full-parameter training",
-    )
-    train_parser.add_argument(
-        "--disable-lora-fp32-for-pixart",
-        action="store_true",
-        help="Disable the default safer FP32 LoRA adapter-weight path for PixArt LoRA training",
+        help="Disable the default attempt to enable gradient checkpointing on the loaded transformer when supported",
     )
     train_parser.add_argument("--wandb", action="store_true", help="Enable optional Weights & Biases logging when wandb is installed")
     train_parser.add_argument("--wandb-project", default="cspd-stage2", help="W&B project name")
@@ -229,13 +211,6 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--wandb-dir", default=None, help="Optional local W&B run directory")
     train_parser.add_argument("--wandb-resume", default=None, help="Optional W&B resume mode, e.g. allow or must")
     train_parser.add_argument("--wandb-run-id", default=None, help="Optional explicit W&B run id for resume/reuse")
-    train_parser.add_argument("--sample-every", type=int, default=0, help="Run PixArt sample inference every X optimizer steps; 0 disables sampling")
-    train_parser.add_argument("--sample-prompt-file", default=None, help="Optional text/json/jsonl file of sample prompts for PixArt periodic inference")
-    train_parser.add_argument("--sample-prompt", action="append", dest="sample_prompts", default=None, help="Inline sample prompt; may be repeated")
-    train_parser.add_argument("--sample-num-prompts", type=int, default=4, help="Maximum number of sample prompts to use per PixArt sampling event")
-    train_parser.add_argument("--sample-num-inference-steps", type=int, default=50, help="Number of inference steps for PixArt sample generation")
-    train_parser.add_argument("--sample-guidance-scale", type=float, default=7.0, help="Guidance scale for PixArt sample generation")
-    train_parser.add_argument("--sample-seed", type=int, default=42, help="Base RNG seed for PixArt sample generation")
     train_parser.add_argument(
         "--inspect-limit",
         type=int,
@@ -276,7 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
         "inspect-targets",
         help="Inspect candidate trainable module names on an explicitly provided torch module tree",
     )
-    inspect_parser.add_argument("--backbone-name", default="black-forest-labs/FLUX.1-Kontext-dev")
+    inspect_parser.add_argument("--backbone-name", default="stabilityai/stable-diffusion-xl-base-1.0")
     inspect_parser.add_argument(
         "--module-reference",
         default=None,
@@ -342,37 +317,11 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--adapter-dropout", type=float, default=0.0, help="Adapter dropout for optional injection")
     inspect_parser.add_argument("--adapter-bias", default="none", help="Adapter bias label for metadata")
 
-    baseline_parser = subparsers.add_parser(
-        "sample-baseline",
-        help="Run standalone pretrained PixArt baseline sampling outside the training loop",
-    )
-    baseline_parser.add_argument("--dataset-root", required=True, help="Dataset root used only to derive the default baseline run directory label")
-    baseline_parser.add_argument("--backbone-name", default="PixArt-alpha/PixArt-Sigma-XL-2-512-MS", help="PixArt backbone identifier to sample from")
-    baseline_parser.add_argument(
-        "--output-dir",
-        default=None,
-        help=(
-            "Optional output directory for standalone baseline samples. Defaults to "
-            "runs/stage2/baseline_samples/<dataset_label>/<backbone_slug>/<timestamp>."
-        ),
-    )
-    baseline_parser.add_argument("--sample-prompt-file", default=None, help="Text/json/jsonl prompt file used for standalone baseline sampling")
-    baseline_parser.add_argument("--sample-prompt", action="append", dest="sample_prompts", default=None, help="Inline prompt; may be repeated")
-    baseline_parser.add_argument("--sample-num-prompts", type=int, default=4, help="Maximum number of prompts to sample in one standalone run")
-    baseline_parser.add_argument("--sample-num-inference-steps", type=int, default=50, help="Number of inference steps for standalone PixArt baseline sampling")
-    baseline_parser.add_argument("--sample-guidance-scale", type=float, default=7.0, help="Guidance scale for standalone PixArt baseline sampling")
-    baseline_parser.add_argument("--sample-seed", type=int, default=42, help="Base RNG seed for standalone PixArt baseline sampling")
-    baseline_parser.add_argument("--resolution", type=int, default=512, help="Output image resolution")
-    baseline_parser.add_argument("--backbone-torch-dtype", default="float16", help="Torch dtype label used when loading the pretrained PixArt backbone")
-    baseline_parser.add_argument("--backbone-device", default=None, help="Optional device passed to pipeline.to(...) after load, e.g. cuda. If omitted and CUDA is available, baseline sampling now defaults to cuda.")
-    baseline_parser.add_argument("--backbone-device-map", default=None, help="Optional device_map forwarded to diffusers from_pretrained")
-    baseline_parser.add_argument("--backbone-local-files-only", action="store_true", help="Require the backbone load to use only the local Hugging Face cache")
-
     dump_parser = subparsers.add_parser(
         "dump-modules",
         help="Dump real loaded backbone module names to text files for later trainable-component review",
     )
-    dump_parser.add_argument("--backbone-name", default="black-forest-labs/FLUX.1-Kontext-dev")
+    dump_parser.add_argument("--backbone-name", default="stabilityai/stable-diffusion-xl-base-1.0")
     dump_parser.add_argument(
         "--module-reference",
         default=None,
@@ -432,11 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _resolve_conditioning_objective(backbone_name: str, requested_objective: str) -> str:
-    family = infer_backbone_family(backbone_name)
-    if requested_objective == "finetune_full_flux_transformer_on_real_image_and_stage1_canonical_caption_pairs" and family in {"pixart", "pixart_sigma"}:
-        return "finetune_pixart_transformer_on_real_image_and_stage1_canonical_caption_pairs"
-    if requested_objective == "finetune_full_flux_transformer_on_real_image_and_stage1_canonical_caption_pairs" and family == "sdxl":
-        return "launch_official_diffusers_sdxl_lora_training_on_real_image_and_stage1_canonical_caption_pairs"
+    # SDXL is the only supported family; the helper stays for future expansion.
     return requested_objective
 
 
@@ -457,13 +402,6 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         wandb_dir=args.wandb_dir,
         wandb_resume=args.wandb_resume,
         wandb_run_id=args.wandb_run_id,
-        sample_every=args.sample_every,
-        sample_prompt_file=args.sample_prompt_file,
-        sample_prompts=args.sample_prompts or [],
-        sample_num_prompts=args.sample_num_prompts,
-        sample_num_inference_steps=args.sample_num_inference_steps,
-        sample_guidance_scale=args.sample_guidance_scale,
-        sample_seed=args.sample_seed,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         lr_scheduler=args.lr_scheduler,
@@ -473,7 +411,6 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         adam_beta2=args.adam_beta2,
         adam_weight_decay=args.adam_weight_decay,
         adam_epsilon=args.adam_epsilon,
-        pixart_sigma_prompt_dropout_prob=args.pixart_sigma_prompt_dropout_prob,
         epochs=args.epochs,
         max_steps=args.max_steps,
         num_workers=args.num_workers,
@@ -490,7 +427,6 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         strict_pairing=args.strict_pairing,
         dry_run=args.dry_run,
         generate_manifest_only=args.generate_manifest_only,
-        allow_placeholder_loop=args.allow_placeholder_loop,
         freeze_text_encoder=not args.unfreeze_text_encoder,
         freeze_vae=not args.unfreeze_vae,
         train_transformer_core_only=not args.disable_train_transformer_core_only,
@@ -512,7 +448,7 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
             alpha=args.adapter_alpha,
             dropout=args.adapter_dropout,
             bias=args.adapter_bias,
-            master_weight_dtype=(None if args.disable_lora_fp32_for_pixart else "float32") if args.training_parameterization == "lora" and "pixart" in args.backbone_name.lower() else None,
+            master_weight_dtype=None,
             target_module_patterns=args.module_include_patterns or [],
             exclude_module_patterns=args.module_exclude_patterns or [
                 "vae",
@@ -534,8 +470,6 @@ def config_from_args(args: argparse.Namespace) -> Stage2TrainConfig:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         dataloader_drop_last=args.dataloader_drop_last,
         enable_gradient_checkpointing=not args.disable_gradient_checkpointing,
-        full_update_fp32_for_pixart=not args.disable_full_update_fp32_for_pixart,
-        lora_fp32_for_pixart=not args.disable_lora_fp32_for_pixart,
         sdxl_official_script=args.sdxl_official_script,
         sdxl_num_processes=args.sdxl_num_processes,
         sdxl_accelerate_extra_args=args.sdxl_accelerate_extra_args or [],
@@ -778,26 +712,6 @@ def main() -> None:
             device_map=args.device_map,
             local_files_only=args.local_files_only,
             component=args.component,
-        )
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
-        return
-
-    if args.command == "sample-baseline":
-        summary = run_stage2_pixart_baseline_sampling(
-            dataset_root=args.dataset_root,
-            backbone_name=args.backbone_name,
-            output_dir=args.output_dir or derive_stage2_baseline_sample_output_dir(args.dataset_root, args.backbone_name),
-            sample_prompt_file=args.sample_prompt_file,
-            sample_prompts=args.sample_prompts or [],
-            sample_num_prompts=args.sample_num_prompts,
-            sample_num_inference_steps=args.sample_num_inference_steps,
-            sample_guidance_scale=args.sample_guidance_scale,
-            sample_seed=args.sample_seed,
-            resolution=args.resolution,
-            backbone_torch_dtype=args.backbone_torch_dtype,
-            backbone_device=args.backbone_device,
-            backbone_device_map=args.backbone_device_map,
-            backbone_local_files_only=args.backbone_local_files_only,
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return

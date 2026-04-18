@@ -8,7 +8,6 @@ This module stays honest about scope:
 - applies include/exclude targeting rules to a real torch module tree when available,
 - offers a small inspection surface for candidate module names,
 - supports optional adapter injection on explicitly provided torch modules,
-- does not pretend full FLUX.1 Kontext training is already integrated.
 """
 
 from dataclasses import dataclass
@@ -255,14 +254,8 @@ if importlib.util.find_spec("torch") is not None:
 
 def infer_backbone_family(backbone_name: str) -> str:
     lowered = backbone_name.lower()
-    if "pixart" in lowered:
-        return infer_pixart_family(backbone_name)
-    if "flux" in lowered:
-        return infer_flux_family(backbone_name)
     if "sdxl" in lowered or "stable-diffusion-xl" in lowered:
         return infer_sdxl_family(backbone_name)
-    if "stable-diffusion" in lowered and "xl" not in lowered:
-        return "sd15"
     return "generic_diffusion_backbone"
 
 
@@ -294,7 +287,7 @@ def load_generative_backbone(
             ],
         )
 
-    if loader_name in {"diffusers_flux_kontext", "diffusers_flux", "diffusers_pixart_sigma", "diffusers_pixart", "diffusers_sdxl"}:
+    if loader_name == "diffusers_sdxl":
         try:
             return _load_diffusers_backbone(
                 backbone_name,
@@ -312,7 +305,7 @@ def load_generative_backbone(
             if status == "dependency_missing":
                 notes.append("Install/repair the missing runtime dependencies first.")
             elif status == "unsupported_runtime":
-                notes.append("The installed diffusers build likely lacks the required FLUX pipeline class.")
+                notes.append("The installed diffusers build lacks the required SDXL pipeline class.")
             elif status == "load_failed_local_files_only":
                 notes.append("The requested model was not found in the local Hugging Face cache while local_files_only=True.")
             elif status == "auth_required":
@@ -543,10 +536,6 @@ def load_real_backbone_module(
 
 
 def _default_loader_name(family: str) -> str:
-    if family in {"flux_kontext", "flux"}:
-        return default_flux_loader_name(family=family)
-    if family in {"pixart_sigma", "pixart"}:
-        return default_pixart_loader_name(family=family)
     if family in {"sdxl"}:
         return default_sdxl_loader_name(family=family)
     return "generic_python_loader"
@@ -616,10 +605,6 @@ def _load_diffusers_backbone(
 
 
 def _resolve_pipeline_class_name(family: str) -> str:
-    if family in {"flux_kontext", "flux"}:
-        return resolve_flux_pipeline_class_name(family=family)
-    if family in {"pixart_sigma", "pixart"}:
-        return resolve_pixart_pipeline_class_name(family=family)
     if family in {"sdxl"}:
         return resolve_sdxl_pipeline_class_name(family=family)
     raise RuntimeError(f"Unsupported diffusers backbone family: {family}")
@@ -636,23 +621,6 @@ def _load_family_diffusers_pipeline(
     diffusers_module: Any,
     local_files_only: bool,
 ) -> Any:
-    if family in {"flux_kontext", "flux"}:
-        return load_flux_pipeline(
-            backbone_name,
-            family=family,
-            pipeline_class=pipeline_class,
-            load_kwargs=load_kwargs,
-        )
-    if family in {"pixart_sigma", "pixart"}:
-        return load_pixart_pipeline(
-            backbone_name,
-            family=family,
-            pipeline_class=pipeline_class,
-            load_kwargs=load_kwargs,
-            resolved_dtype=resolved_dtype,
-            diffusers_module=diffusers_module,
-            local_files_only=local_files_only,
-        )
     if family in {"sdxl"}:
         return load_sdxl_pipeline(
             backbone_name,
@@ -708,8 +676,6 @@ def _classify_loader_exception(exc: Exception) -> str:
     if (
         "does not expose fluxkontextpipeline" in text
         or "does not expose fluxpipeline" in text
-        or "does not expose pixartsigmapipeline" in text
-        or "does not expose pixartalphapipeline" in text
     ):
         return "unsupported_runtime"
     if "local_files_only" in text or "cannot find the requested files in the disk cache" in text:

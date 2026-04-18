@@ -128,18 +128,12 @@ def _build_lr_scheduler(*, optimizer: Any, config: Any, total_optimizer_steps: i
 
 
 def _should_force_full_update_fp32(*, config: Any) -> bool:
-    family = infer_backbone_family(config.backbone_name)
-    parameterization = str(getattr(config, "training_parameterization", "full")).strip().lower()
-    return bool(config.full_update_fp32_for_pixart and parameterization == "full" and family in {"pixart", "pixart_sigma"})
+    # PixArt-only dtype rescue path removed with the PixArt family (2026-04-18).
+    return False
 
 
 def _resolve_lora_master_weight_dtype(*, config: Any) -> str | None:
-    family = infer_backbone_family(config.backbone_name)
-    parameterization = str(getattr(config, "training_parameterization", "full")).strip().lower()
-    if parameterization != "lora":
-        return None
-    if family in {"pixart", "pixart_sigma"} and bool(getattr(config, "lora_fp32_for_pixart", True)):
-        return "float32"
+    # PixArt-only LoRA upcast rescue removed with the PixArt family (2026-04-18).
     return None
 
 
