@@ -1126,7 +1126,7 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 ### Design decisions
 - **Text2img is the recommended default**: eval showed text2img significantly outperforms img2img for classifier training accuracy. Text2img produces more "prototypical" class representations even though images look more homogeneous to the human eye.
 - **Img2img from medoid available as alternative**: `--visual-mode medoid --strength 0.8` preserves diversity from real images but eval accuracy is lower.
-- **Per-round shared-seed seeding (2026-04-18)**: within a single Stage 4 run, all images share the run's master seed (`torch.Generator().manual_seed(seed)`); per-image `+mode_idx` offset was removed. For multi-candidate selection, candidates of the same mode use `seed + cand_idx` (candidates must differ for selection to be meaningful); mode offset stays removed so cand_0 across all modes shares the same initial noise (different prompts still produce different images). The evaluation protocol is to run Stage 4 3 times with 3 master seeds and eval each dataset × 3 repeats → 9 accuracy numbers total, capturing both generation and eval variance.
+- **Per-image seeding, shared base per round (2026-04-18, after a brief detour on 2026-04-17)**: image `i` uses `torch.Generator().manual_seed(base_seed + mode_idx)`. The 3×3 protocol varies `base_seed` across three rounds while keeping the within-round per-image `+mode_idx` pattern. This lets the `base_seed=42` round reproduce the historical 62.33% baseline exactly while the three rounds capture generation variance. (An earlier change shared one seed across all 100 images within a round; reverted so the eval protocol can be compared against pre-2026-04-18 numbers.) Multi-candidate paths use `base_seed + mode_idx * num_candidates + cand_idx`.
 - **ImageFolder output structure**: images organized by class for downstream classifier training
 - **SDXL refiner**: optional second pass that adds detail/sharpness after base generation
 
@@ -1187,7 +1187,7 @@ Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditionin
 Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed at IPC=10):
 
 1. **Rebaseline HDBSCAN + medoid under full 3×3 protocol (2026-04-18)**
-   - For each seed in {42, 123, 456}: re-run Stage 3 clustering with that seed (produces its own `modes_hdbscan_s<seed>` — HDBSCAN is deterministic but PCA pre-processing and the K-Means fallback/sub-clustering are seeded, so medoid selection changes between seeds); then Stage 4 generate with per-round shared master seed; then eval with 3 repeats.
+   - For each seed in {42, 123, 456}: re-run Stage 3 clustering with that seed (produces its own `modes_hdbscan_s<seed>` — HDBSCAN is deterministic but PCA pre-processing and the K-Means fallback/sub-clustering are seeded, so medoid selection changes between seeds); then Stage 4 generate with that seed as the base (image `i` uses `seed + mode_idx`); then eval with 3 repeats. The `seed=42` round should exactly reproduce the historical 62.33% baseline.
    - The seed is **shared across Stage 3 and Stage 4** for each round (paired), so each round is a single coherent "random trajectory".
    - **Aggregation rule**: for each seed take `max(3 eval repeats)` = best-of-3 (de-noising the eval-training axis); then report mean / std / min / max across the 3 per-seed bests.
    - Measures **combined Stage 3 + Stage 4 generation variance**. Previous 62.33% ± 1.47 used a fixed Stage 3 modes + fixed per-image `+mode_idx` seeding at Stage 4, so it underestimated generation variance.
@@ -1317,7 +1317,7 @@ Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed 
 - **Stage 3**: DINOv2 HDBSCAN + medoid caption (no diversity selection), IPC=10
 - **Stage 4**: text2img (visual_mode=none), resolution=512, guidance=7.5, steps=50
 - **Baseline accuracy (old protocol, 1 generation × 3 eval repeats; per-image +mode_idx seeding)**: 62.33% ± 1.47 on ImageNette IPC=10 (ResNetAP-10). K-Means + medoid: 62.13% ± 0.68. These numbers only reflect eval variance, not generation variance, and used the pre-2026-04-18 per-image seeding.
-- **Baseline accuracy (new 3×3 protocol, per-round shared seed)**: pending — run via `scripts/server/run_baseline_3x3.sh` with master seeds {42, 123, 456} × 3 eval repeats each. This will replace the single-number baseline once complete.
+- **Baseline accuracy (new 3×3 protocol, per-image `seed + mode_idx` with three rounds of different base seeds)**: pending — run via `scripts/server/run_baseline_3x3.sh` with base seeds {42, 123, 456} × 3 eval repeats each. Aggregation: best-of-3 per seed, then mean/std/min/max across 3 per-seed bests. The `seed=42` round should reproduce 62.33%; the 3 numbers together will replace the single-point baseline going forward.
 - **Key insights (empirical)**:
   - Medoid caption (default) > diversity selection — kept medoid as default, diversity opt-in
   - HDBSCAN ≈ K-Means for medoid caption selection at IPC=10
