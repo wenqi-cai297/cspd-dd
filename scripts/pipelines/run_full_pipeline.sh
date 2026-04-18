@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# End-to-end CSPD dataset-distillation pipeline.
+# End-to-end CSPD dataset-distillation pipeline with the 3×3 measurement protocol.
 #
 #   Stage 1 (extract -> normalize -> render)
-#   -> Stage 2 (SDXL LoRA training, pick best-epoch checkpoint)
-#   -> Stage 3A (DINOv2 encode, shared across IPC sweep)
-#   -> per IPC: Stage 3B (HDBSCAN cluster) + Stage 4 (text2img generate) + Eval
+#   -> Stage 2 (SDXL LoRA training)
+#   -> Stage 3A (DINOv2 encode, shared)
+#   -> for each IPC x each seed:
+#        Stage 3B cluster (--seed) -> Stage 4 generate (--seed) -> Eval x REPEAT
+#   -> per-IPC aggregator: best-of-REPEAT per seed, then mean/std/min/max
+#      across the per-seed bests.
 #
 # Every stage is idempotent: if its output already exists on disk the stage
 # is skipped. Delete the corresponding run directory to force a rebuild.
@@ -26,19 +29,23 @@ set -euo pipefail
 #   STAGE1_BACKEND=qwen_local              # or "mock" for a plumbing smoke run
 #   STAGE2_NUM_PROCESSES=2                 # accelerate --num_processes
 #   STAGE2_BATCH_SIZE=8
-#   STAGE2_EPOCHS=9                        # total training epochs. Epoch 9
-#                                          # was empirically best on ImageNette
-#                                          # with cosine LR; training beyond
-#                                          # that overfits. Stage 2 is skipped
-#                                          # if any pytorch_lora_weights.safetensors
+#   STAGE2_EPOCHS=9                        # epoch 9 was empirically best on
+#                                          # ImageNette with cosine LR. Stage 2
+#                                          # is skipped if any
+#                                          # pytorch_lora_weights.safetensors
 #                                          # already exists under the Stage 2
-#                                          # train dir — the newest-mtime one
+#                                          # train dir - the newest-mtime one
 #                                          # wins.
-#   STAGE2_RANK=64                         # LoRA rank
+#   STAGE2_RANK=64
 #   DIFFUSERS_REPO_ROOT=./diffusers        # required for the Stage 2 trainer
 #   PIPELINE_IPC="10"                      # space-separated IPC values to sweep
-#   EVAL_ARCH=resnet_ap                    # single arch; use "all" for 3-arch
+#   PIPELINE_SEEDS="42 123 456"            # seeds for the 3x3 protocol. Use
+#                                          # PIPELINE_SEEDS="42" for a 1-seed
+#                                          # sanity run.
+#   EVAL_ARCH=resnet_ap                    # single arch; "all" for 3-arch
 #   EVAL_REPEAT=3
+#   LORA_WEIGHTS=<path>                    # explicit override of the Stage 2
+#                                          # checkpoint auto-detect.
 #
 # Prep assumption: classes.json + class_to_archetype.json must already exist
 # in-tree (scripts/prep/prepare_stage1_metadata.sh covers this). The bundled
@@ -60,14 +67,8 @@ if [[ ! -d "$TRAIN_ROOT" ]]; then
   exit 1
 fi
 
-# Auto-derive val_root if not provided
 if [[ -z "$VAL_ROOT" ]]; then
-  case "$(basename "$TRAIN_ROOT")" in
-    train|Train|TRAIN)
-      VAL_ROOT="$(dirname "$TRAIN_ROOT")/val" ;;
-    *)
-      VAL_ROOT="$(dirname "$TRAIN_ROOT")/val" ;;
-  esac
+  VAL_ROOT="$(dirname "$TRAIN_ROOT")/val"
 fi
 if [[ ! -d "$VAL_ROOT" ]]; then
   echo "[ERROR] val_root does not exist: $VAL_ROOT"
@@ -75,7 +76,6 @@ if [[ ! -d "$VAL_ROOT" ]]; then
   exit 1
 fi
 
-# Auto-detect nclass if not provided
 NCLASS="${NCLASS_ARG:-$(find "$TRAIN_ROOT" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')}"
 if [[ "$NCLASS" -lt 1 ]]; then
   echo "[ERROR] could not detect any class subdirectories under $TRAIN_ROOT"
@@ -90,6 +90,7 @@ STAGE2_BATCH_SIZE="${STAGE2_BATCH_SIZE:-8}"
 STAGE2_EPOCHS="${STAGE2_EPOCHS:-9}"
 STAGE2_RANK="${STAGE2_RANK:-64}"
 IPC_LIST="${PIPELINE_IPC:-10}"
+SEEDS="${PIPELINE_SEEDS:-42 123 456}"
 EVAL_ARCH="${EVAL_ARCH:-resnet_ap}"
 EVAL_REPEAT="${EVAL_REPEAT:-3}"
 
@@ -114,14 +115,15 @@ BACKBONE_NAME="stabilityai/stable-diffusion-xl-base-1.0"
 BACKBONE_SLUG="stabilityai_stable-diffusion-xl-base-1.0"
 
 echo "============================================================"
-echo " CSPD full pipeline"
+echo " CSPD full pipeline (3x3 protocol)"
 echo "  dataset:    $DATASET_LABEL"
 echo "  train_root: $TRAIN_ROOT"
 echo "  val_root:   $VAL_ROOT"
 echo "  nclass:     $NCLASS"
 echo "  ipc_list:   $IPC_LIST"
+echo "  seeds:      $SEEDS"
 echo "  backend:    $STAGE1_BACKEND"
-echo "  eval:       $EVAL_ARCH x $EVAL_REPEAT"
+echo "  eval:       $EVAL_ARCH x $EVAL_REPEAT per seed"
 echo "============================================================"
 
 # ============================================================
@@ -138,7 +140,7 @@ fi
 
 if [[ -n "$RENDER_INPUT" ]]; then
   echo ""
-  echo "[Stage 1] Render output found at $RENDER_INPUT — skipping."
+  echo "[Stage 1] Render output found at $RENDER_INPUT - skipping."
 else
   echo ""
   echo "============================================================"
@@ -172,11 +174,13 @@ find_latest_lora_weights() {
     | sort -nr | head -1 | cut -d' ' -f2-
 }
 
-LORA_WEIGHTS="$(find_latest_lora_weights "$STAGE2_TRAIN_DIR")"
+if [[ -z "${LORA_WEIGHTS:-}" ]]; then
+  LORA_WEIGHTS="$(find_latest_lora_weights "$STAGE2_TRAIN_DIR")"
+fi
 
 if [[ -n "$LORA_WEIGHTS" && -f "$LORA_WEIGHTS" ]]; then
   echo ""
-  echo "[Stage 2] LoRA weights found at $LORA_WEIGHTS — skipping training."
+  echo "[Stage 2] LoRA weights found at $LORA_WEIGHTS - skipping training."
 else
   echo ""
   echo "============================================================"
@@ -205,13 +209,13 @@ fi
 echo "[Stage 2] LoRA: $LORA_WEIGHTS"
 
 # ============================================================
-# Stage 3A: DINOv2 encode (shared across the IPC sweep)
+# Stage 3A: DINOv2 encode (shared across IPC sweep and across seeds)
 # ============================================================
 ENCODE_DIR="runs/stage3/${DATASET_LABEL}/encoded"
 
 if [[ -f "${ENCODE_DIR}/dino_embeds.pt" && -f "${ENCODE_DIR}/encode_index.json" ]]; then
   echo ""
-  echo "[Stage 3A] Encode output found at $ENCODE_DIR — skipping."
+  echo "[Stage 3A] Encode output found at $ENCODE_DIR - skipping."
 else
   echo ""
   echo "============================================================"
@@ -224,40 +228,116 @@ else
 fi
 
 # ============================================================
-# Stage 3B + Stage 4 + Eval: per-IPC sweep
+# Stage 3B + Stage 4 + Eval: IPC sweep, 3x3 per IPC
 # ============================================================
 for IPC in $IPC_LIST; do
   echo ""
   echo "############################################################"
-  echo "# IPC=$IPC"
+  echo "# IPC=$IPC   (seeds: $SEEDS)"
   echo "############################################################"
 
-  MODES_DIR="runs/stage3/${DATASET_LABEL}/ipc${IPC}/modes_hdbscan"
-  if [[ -f "${MODES_DIR}/modes_index.json" ]]; then
-    echo "[IPC=$IPC] Stage 3B modes found at $MODES_DIR — skipping cluster."
-  else
-    echo "[IPC=$IPC] Stage 3B clustering..."
-    cspd-stage3 cluster \
-      --encode-dir "$ENCODE_DIR" \
-      --output-dir "$MODES_DIR" \
-      --ipc "$IPC"
-  fi
-
   TIMESTAMP="$(date +%Y-%m-%d_%H%M%S)"
-  STAGE4_OUT="runs/stage4/${DATASET_LABEL}/ipc${IPC}/lora/${TIMESTAMP}"
-  echo "[IPC=$IPC] Stage 4 text2img -> $STAGE4_OUT"
-  cspd-stage4 generate \
-    --modes-dir "$MODES_DIR" \
-    --output-dir "$STAGE4_OUT" \
-    --lora-weights "$LORA_WEIGHTS" \
-    --model-name "$BACKBONE_NAME" \
-    --visual-mode none
+  RUN_ROOT="runs/stage4/${DATASET_LABEL}/ipc${IPC}/lora/pipeline_${TIMESTAMP}"
+  SUMMARY_FILE="${RUN_ROOT}/summary.txt"
+  mkdir -p "$RUN_ROOT"
 
-  echo "[IPC=$IPC] Eval ($EVAL_ARCH, repeat=$EVAL_REPEAT)"
-  EVAL_REPEAT="$EVAL_REPEAT" bash scripts/eval/run_eval_pipeline.sh \
-    "${STAGE4_OUT}/images" \
-    "$VAL_ROOT" \
-    "$NCLASS" "$IPC" "$EVAL_ARCH"
+  {
+    echo "# CSPD full pipeline, 3x3 protocol"
+    echo "# dataset=$DATASET_LABEL  IPC=$IPC  seeds=$SEEDS"
+    echo "# encode=$ENCODE_DIR"
+    echo "# lora=$LORA_WEIGHTS"
+    echo "# eval_arch=$EVAL_ARCH  eval_repeat=$EVAL_REPEAT"
+    echo ""
+  } > "$SUMMARY_FILE"
+
+  for SEED in $SEEDS; do
+    echo ""
+    echo "--- IPC=$IPC, seed=$SEED ---"
+
+    MODES_DIR="runs/stage3/${DATASET_LABEL}/ipc${IPC}/hdbscan_medoid_s${SEED}"
+    if [[ -f "${MODES_DIR}/modes_index.json" ]]; then
+      echo "[IPC=$IPC seed=$SEED] Stage 3B modes exist at $MODES_DIR - skipping cluster."
+    else
+      echo "[IPC=$IPC seed=$SEED] Stage 3B clustering with --seed $SEED"
+      cspd-stage3 cluster \
+        --encode-dir "$ENCODE_DIR" \
+        --output-dir "$MODES_DIR" \
+        --ipc "$IPC" \
+        --seed "$SEED"
+    fi
+
+    STAGE4_OUT="${RUN_ROOT}/gen_seed${SEED}"
+    mkdir -p "$STAGE4_OUT"
+    echo "[IPC=$IPC seed=$SEED] Stage 4 text2img -> $STAGE4_OUT"
+    cspd-stage4 generate \
+      --modes-dir "$MODES_DIR" \
+      --output-dir "$STAGE4_OUT" \
+      --lora-weights "$LORA_WEIGHTS" \
+      --model-name "$BACKBONE_NAME" \
+      --visual-mode none \
+      --resolution 512 \
+      --guidance-scale 7.5 \
+      --num-inference-steps 50 \
+      --seed "$SEED"
+
+    echo "[IPC=$IPC seed=$SEED] Eval ($EVAL_ARCH, repeat=$EVAL_REPEAT)"
+    EVAL_REPEAT="$EVAL_REPEAT" bash scripts/eval/run_eval_pipeline.sh \
+      "${STAGE4_OUT}/images" \
+      "$VAL_ROOT" \
+      "$NCLASS" "$IPC" "$EVAL_ARCH"
+  done
+
+  # --- Aggregate this IPC ---
+  echo ""
+  echo "[IPC=$IPC] Aggregating 3x3 results..."
+  python - <<PYEOF | tee -a "$SUMMARY_FILE"
+import json, glob, os, statistics
+
+run_root = "$RUN_ROOT"
+seeds = "$SEEDS".split()
+ipc = $IPC
+arch = "$EVAL_ARCH"
+
+eval_candidates = glob.glob(
+    f"runs/eval/**/ipc{ipc}/{arch}/**/eval_{arch}.json", recursive=True,
+)
+eval_candidates += glob.glob(f"runs/eval/*_ipc{ipc}_{arch}/eval_{arch}.json")
+
+per_seed_best = []
+for s in seeds:
+    gen_dir = os.path.join(run_root, f"gen_seed{s}")
+    cand = []
+    for p in eval_candidates:
+        try:
+            d = json.load(open(p))
+            if d.get("distilled_dir", "").startswith(gen_dir):
+                cand.append((os.path.getmtime(p), p, d))
+        except Exception:
+            pass
+    if not cand:
+        print(f"[WARN] no eval found for IPC={ipc} seed={s}")
+        continue
+    cand.sort()
+    _, p, d = cand[-1]
+    runs_acc = [r.get("best_acc1") for r in d.get("runs", [])]
+    best = max(runs_acc) if runs_acc else None
+    per_seed_best.append((s, best, runs_acc, p))
+
+print("")
+print(f"# IPC={ipc}  per-seed best-of-{len(per_seed_best and per_seed_best[0][2] or [])}:")
+for s, best, runs, p in per_seed_best:
+    print(f"  seed={s:>4}: best={best:.2f}  runs={runs}  (eval={p})")
+
+bests = [b for _, b, _, _ in per_seed_best if b is not None]
+if bests:
+    print("")
+    print(f"# IPC={ipc}  aggregate across {len(bests)} per-seed bests:")
+    print(f"  mean = {statistics.mean(bests):.2f}")
+    if len(bests) > 1:
+        print(f"  std  = {statistics.pstdev(bests):.2f}")
+    print(f"  min  = {min(bests):.2f}")
+    print(f"  max  = {max(bests):.2f}")
+PYEOF
 done
 
 echo ""
@@ -268,4 +348,5 @@ echo "  render:     $RENDER_INPUT"
 echo "  LoRA:       $LORA_WEIGHTS"
 echo "  encode:     $ENCODE_DIR"
 echo "  IPC sweep:  $IPC_LIST"
+echo "  seeds:      $SEEDS"
 echo "############################################################"

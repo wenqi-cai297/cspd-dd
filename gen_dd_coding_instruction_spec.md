@@ -147,8 +147,7 @@ Right now, the repo is best understood as:
 - `scripts/stage3/run_stage3_pipeline.sh` — Stage 3 encode + cluster
 - `scripts/stage4/run_stage4_pipeline.sh` — Stage 4 generate distilled dataset
 - `scripts/eval/run_eval_pipeline.sh` — train classifier + evaluate
-- `scripts/pipelines/run_full_pipeline.sh <train_root> [val_root] [nclass]` — end-to-end driver: Stage 1 → Stage 2 → Stage 3 → Stage 4 → Eval. Idempotent per stage (skips work that already exists on disk). `PIPELINE_IPC="10 20 50"` controls the IPC sweep at the end.
-- `scripts/pipelines/run_baseline_3x3.sh <train_root> [val_root] [nclass]` — 3×3 measurement protocol (three paired seeds, each `(cluster, generate, eval)`). Assumes Stage 1 / 2 / 3A already done by the full-pipeline script; auto-detects the LoRA weights by picking the newest `pytorch_lora_weights.safetensors` under the dataset-specific Stage 2 train dir (override via `LORA_WEIGHTS=<path>`).
+- `scripts/pipelines/run_full_pipeline.sh <train_root> [val_root] [nclass]` — single end-to-end driver: Stage 1 → Stage 2 → Stage 3 → Stage 4 → Eval, with the 3×3 measurement protocol applied per-IPC by default. Idempotent per stage (skips work that already exists on disk). Env overrides: `PIPELINE_IPC="10 20 50"` for the IPC sweep, `PIPELINE_SEEDS="42 123 456"` for the 3×3 seeds (set to a single seed for a sanity run), `EVAL_REPEAT=3`, `STAGE2_EPOCHS=9`, `LORA_WEIGHTS=<path>` to override Stage 2 checkpoint auto-detect (newest `pytorch_lora_weights.safetensors` wins).
 
 ### Stage 2 output-dir rule (must remember)
 - The repo-standard Stage 2 run root is:
@@ -1030,8 +1029,8 @@ Method is locked in as of 2026-04-18 (HDBSCAN + medoid text2img SDXL LoRA; 3×3 
    - **IPC=10 done: 63.27% ± 0.19** (per-seed bests 63.4 / 63.0 / 63.4; replaces the old single-run 62.33%).
    - **IPC=20 and IPC=50 pending**. Run:
      ```bash
-     IPC=20 bash scripts/pipelines/run_baseline_3x3.sh /path/to/ImageNette/train
-     IPC=50 bash scripts/pipelines/run_baseline_3x3.sh /path/to/ImageNette/train
+     PIPELINE_IPC=20 bash scripts/pipelines/run_full_pipeline.sh /path/to/ImageNette/train
+     PIPELINE_IPC=50 bash scripts/pipelines/run_full_pipeline.sh /path/to/ImageNette/train
      ```
    - Compare against published IPC-scaling baselines (MGD³, DD-VLCP, RDED, SRe2L).
 
@@ -1164,9 +1163,9 @@ runs/eval/<dataset>/ipc<IPC>/<arch>/<stage4_tag>/<eval_timestamp>/eval_<arch>.js
 | Stage 4 output | `<stage4_tag>` |
 | --- | --- |
 | `runs/stage4/ImageNette_train/ipc10/lora/2026-04-17_150048/images` | `lora__2026-04-17_150048` |
-| `runs/stage4/ImageNette_train/ipc10/lora/baseline_3x3_TS/gen_seed42/images` | `lora__baseline_3x3_TS__gen_seed42` |
+| `runs/stage4/ImageNette_train/ipc10/lora/pipeline_TS/gen_seed42/images` | `lora__pipeline_TS__gen_seed42` |
 
-Old flat layout (`runs/eval/<timestamp>_ipc<IPC>_<arch>/eval_<arch>.json`) still on disk from pre-2026-04-18 runs is untouched; the 3×3 aggregator in `scripts/pipelines/run_baseline_3x3.sh` accepts both old and new layouts when looking up per-seed eval files.
+Old flat layout (`runs/eval/<timestamp>_ipc<IPC>_<arch>/eval_<arch>.json`) still on disk from pre-2026-04-18 runs is untouched; the 3×3 aggregator in `scripts/pipelines/run_full_pipeline.sh` accepts both old and new layouts when looking up per-seed eval files.
 
 ### Repo cleanup pass (2026-04-18)
 With the method locked in, the repo went through a multi-stage cleanup to drop every experimental side-branch and leave only the code that the locked-in pipeline actually reaches. Summary of what was removed:
@@ -1178,7 +1177,7 @@ With the method locked in, the repo went through a multi-stage cleanup to drop e
 - **Stage 4**: `candidate_selection.py` (Phase 2 per-mode scorer), `representativeness.py` (Phase 3 set-level scorer), `mode_guidance.py` (MGD³-style scheduler). Related CLI flags (`--num-candidates`, `--candidate-beta`, `--candidate-probe-dir`, `--eval-representativeness`, `--set-level-selection`, `--set-objective`, `--set-feature-space`, `--mode-guidance-*`). `generate.py` went from 814 to ~320 lines; kept text2img + img2img-medoid + optional refiner.
 - **Stage 3 VAE encoding** (`--encode-vae` / `--vae-model-name` flags, the VAE branch of `encode.py`): last consumer (Stage 4 set-level VAE feature space) is gone.
 - **Eval `train_utils.py`**: unused `Logger`, `TimeStamp`, `Plotter`, `CutOut`, custom `Normalize`, `dist_l2`, `get_time`. Kept only what `train.py` imports plus the internals `ColorJitter` composes.
-- **Pipeline scripts**: `run_ipc_sweep.sh`, `run_candidate_sweep.sh`, `run_setlevel_phase3.sh` deleted. `run_full_pipeline.sh` and `run_baseline_3x3.sh` rewritten to accept `<train_root> [val_root] [nclass]` as positional arguments (instead of hardcoded ImageNette paths) with sensible env overrides.
+- **Pipeline scripts**: `run_ipc_sweep.sh`, `run_candidate_sweep.sh`, `run_setlevel_phase3.sh` deleted. `run_full_pipeline.sh` rewritten to accept `<train_root> [val_root] [nclass]` as positional arguments (instead of hardcoded ImageNette paths) with sensible env overrides, and now runs the 3×3 measurement protocol (3 seeds × `EVAL_REPEAT` per IPC) inline — the separate `run_baseline_3x3.sh` driver was folded into it and deleted.
 - **Script layout**: `scripts/server/` flattened; everything now lives under stage-specific folders (`scripts/{prep,stage1,stage2,stage3,stage4,eval,pipelines}/`).
 
 Cumulative net change across all cleanup commits: roughly **−7700 lines** of source + scripts + spec dead weight.

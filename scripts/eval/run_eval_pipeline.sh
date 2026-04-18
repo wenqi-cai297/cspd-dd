@@ -16,9 +16,9 @@ set -euo pipefail
 #   <stage4_tag>  preserves the full Stage 4 lineage (everything under
 #                 "runs/stage4/<dataset>/ipc<IPC>/" with slashes replaced by "__",
 #                 so for example
-#                   runs/stage4/ImageNette_train/ipc10/lora/baseline_3x3_TS/gen_seed42/images
+#                   runs/stage4/ImageNette_train/ipc10/lora/pipeline_TS/gen_seed42/images
 #                 ->
-#                   runs/eval/ImageNette_train/ipc10/resnet_ap/lora__baseline_3x3_TS__gen_seed42/<ts>/
+#                   runs/eval/ImageNette_train/ipc10/resnet_ap/lora__pipeline_TS__gen_seed42/<ts>/
 #                 ).
 #
 # Examples:

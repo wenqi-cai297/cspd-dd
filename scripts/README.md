@@ -237,31 +237,24 @@ This helper:
 
 Mainline training config (produces the 63.27% IPC=10 baseline): rank=64 LoRA, cosine LR with 500-step warmup, noise_offset=0.05, snr_gamma=5.0, batch=8, epoch 9 on 2 GPUs at 512 resolution.
 
-## End-to-end pipeline drivers
+## End-to-end pipeline driver
 
-Two cross-stage drivers live under `scripts/pipelines/`:
-
-### Full pipeline (Stage 1 → Stage 2 → Stage 3 → Stage 4 → Eval)
+### Full pipeline (Stage 1 → Stage 2 → Stage 3 → Stage 4 → Eval, 3×3 protocol by default)
 
 ```bash
 bash scripts/pipelines/run_full_pipeline.sh <train_root> [val_root] [nclass]
 ```
 
-- Runs every stage from raw dataset to final eval numbers.
-- Each stage is idempotent: Stage 1 is skipped if a render `records.jsonl` already exists under `runs/stage1/render/<dataset>/<backend>/`, Stage 2 is skipped if the target checkpoint exists under `runs/stage2/train/<dataset>/<backbone>/`, Stage 3 encode is skipped if `dino_embeds.pt` exists, per-IPC cluster is skipped if `modes_index.json` exists. Stage 4 always produces a fresh timestamped run.
+- Runs every stage from raw dataset to the final eval numbers, and applies the 3×3 measurement protocol (3 seeds × `EVAL_REPEAT` independent classifier trainings, aggregated as best-of-REPEAT per seed then mean/std/min/max across the three per-seed bests).
+- Each stage is idempotent: Stage 1 is skipped if a render `records.jsonl` already exists under `runs/stage1/render/<dataset>/<backend>/`; Stage 2 is skipped if any `pytorch_lora_weights.safetensors` exists under `runs/stage2/train/<dataset>/<backbone>/` (the newest-mtime one wins); Stage 3A encode is skipped if `dino_embeds.pt` exists; per-seed Stage 3B cluster is skipped if `modes_index.json` exists. Stage 4 always produces a fresh timestamped run under `runs/stage4/<dataset>/ipc<IPC>/lora/pipeline_<TS>/gen_seed<SEED>/`.
 - If `val_root` is omitted it defaults to `<parent(train_root)>/val`. If `nclass` is omitted it is auto-detected from the class subdirectories under `train_root`.
-- Useful env overrides: `PIPELINE_IPC="10 20 50"` for the IPC sweep, `STAGE2_EPOCHS` (default 9), `STAGE2_RANK` (default 64), `EVAL_REPEAT`.
-
-### 3×3 measurement protocol (Stage 3B + Stage 4 + Eval, three paired seeds)
-
-```bash
-IPC=10 bash scripts/pipelines/run_baseline_3x3.sh <train_root> [val_root] [nclass]
-```
-
-- Expects Stage 1 + Stage 2 + Stage 3A to already exist on disk (run the full pipeline first).
-- For each seed in `{42, 123, 456}` (override via `BASELINE_SEEDS`): re-cluster Stage 3B with that seed, then `cspd-stage4 generate --seed`, then eval with `EVAL_REPEAT` independent classifier trainings.
-- Aggregation: per-seed takes the max over eval repeats (best-of-3); the final report gives mean / std / min / max across the three per-seed bests.
-- Auto-detects the LoRA weights by picking the newest `pytorch_lora_weights.safetensors` (trainer final or a `checkpoint-N/` subdir) under the dataset's Stage 2 train dir; override explicitly via `LORA_WEIGHTS=<path>`.
+- Useful env overrides:
+  - `PIPELINE_IPC="10 20 50"` — IPC sweep (default `"10"`).
+  - `PIPELINE_SEEDS="42 123 456"` — seeds for the 3×3 protocol (default). Set `PIPELINE_SEEDS="42"` for a 1-seed sanity run.
+  - `EVAL_REPEAT=3` — independent classifier trainings per seed.
+  - `STAGE2_EPOCHS` (default 9), `STAGE2_RANK` (default 64), `STAGE2_BATCH_SIZE` (default 8), `STAGE2_NUM_PROCESSES` (default 2).
+  - `LORA_WEIGHTS=<path>` — explicit override of the Stage 2 checkpoint auto-detect.
+- Per-IPC summary (including the 3×3 aggregate) is written to `runs/stage4/<dataset>/ipc<IPC>/lora/pipeline_<TS>/summary.txt`.
 
 ### Eval output layout
 
@@ -272,9 +265,9 @@ runs/eval/<dataset>/ipc<IPC>/<arch>/<stage4_tag>/<eval_timestamp>/eval_<arch>.js
 ```
 
 `<stage4_tag>` mirrors the original `distilled_dir` path: the `runs/stage4/<dataset>/ipc<IPC>/` prefix and trailing `/images` are stripped, and the remaining segments are joined with `__`. For example,
-`runs/stage4/ImageNette_train/ipc10/lora/baseline_3x3_<TS>/gen_seed42/images`
+`runs/stage4/ImageNette_train/ipc10/lora/pipeline_<TS>/gen_seed42/images`
 maps to
-`runs/eval/ImageNette_train/ipc10/resnet_ap/lora__baseline_3x3_<TS>__gen_seed42/<eval_ts>/eval_resnet_ap.json`.
+`runs/eval/ImageNette_train/ipc10/resnet_ap/lora__pipeline_<TS>__gen_seed42/<eval_ts>/eval_resnet_ap.json`.
 
 `EVAL_SAVE_DIR=<path>` on `run_eval_pipeline.sh` overrides the computed save dir if you want a custom location.
 
