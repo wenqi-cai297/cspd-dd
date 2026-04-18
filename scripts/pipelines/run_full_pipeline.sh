@@ -26,15 +26,15 @@ set -euo pipefail
 #   STAGE1_BACKEND=qwen_local              # or "mock" for a plumbing smoke run
 #   STAGE2_NUM_PROCESSES=2                 # accelerate --num_processes
 #   STAGE2_BATCH_SIZE=8
-#   STAGE2_EPOCHS=9                        # total training epochs.
-#                                          # Epoch 9 was empirically best on
-#                                          # ImageNette with cosine LR; training
-#                                          # beyond that overfits.
+#   STAGE2_EPOCHS=9                        # total training epochs. Epoch 9
+#                                          # was empirically best on ImageNette
+#                                          # with cosine LR; training beyond
+#                                          # that overfits. Stage 2 is skipped
+#                                          # if any pytorch_lora_weights.safetensors
+#                                          # already exists under the Stage 2
+#                                          # train dir — the newest-mtime one
+#                                          # wins.
 #   STAGE2_RANK=64                         # LoRA rank
-#   STAGE2_BEST_EPOCH=9                    # which epoch checkpoint to consume
-#                                          # (0 => final weights). When this
-#                                          # equals STAGE2_EPOCHS the target
-#                                          # checkpoint is the final one.
 #   DIFFUSERS_REPO_ROOT=./diffusers        # required for the Stage 2 trainer
 #   PIPELINE_IPC="10"                      # space-separated IPC values to sweep
 #   EVAL_ARCH=resnet_ap                    # single arch; use "all" for 3-arch
@@ -89,7 +89,6 @@ STAGE2_NUM_PROCESSES="${STAGE2_NUM_PROCESSES:-2}"
 STAGE2_BATCH_SIZE="${STAGE2_BATCH_SIZE:-8}"
 STAGE2_EPOCHS="${STAGE2_EPOCHS:-9}"
 STAGE2_RANK="${STAGE2_RANK:-64}"
-STAGE2_BEST_EPOCH="${STAGE2_BEST_EPOCH:-9}"
 IPC_LIST="${PIPELINE_IPC:-10}"
 EVAL_ARCH="${EVAL_ARCH:-resnet_ap}"
 EVAL_REPEAT="${EVAL_REPEAT:-3}"
@@ -157,62 +156,48 @@ fi
 echo "[Stage 1] render: $RENDER_INPUT"
 
 # ============================================================
-# Stage 2: SDXL LoRA training (skip if target checkpoint already exists)
+# Stage 2: SDXL LoRA training (skip if any LoRA weights are already on disk)
 # ============================================================
 STAGE2_TRAIN_DIR="runs/stage2/train/${DATASET_LABEL}/${BACKBONE_SLUG}"
-LORA_WEIGHTS=""
 
-# Estimate steps/epoch for checkpoint path derivation
-NUM_PAIRS="$(wc -l < "$RENDER_INPUT" 2>/dev/null | tr -d ' ' || echo 0)"
-if [[ "$NUM_PAIRS" -lt 1 ]]; then NUM_PAIRS=1; fi
-# Steps-per-epoch with ceiling division (accelerate + diffusers pads the
-# last batch rather than dropping it, so NUM_PAIRS=12894 with batch=8 and
-# num_processes=2 gives 806 steps/epoch, not 805). Getting this exact
-# matters for the checkpoint path derivation below.
-EFFECTIVE_BATCH=$(( STAGE2_BATCH_SIZE * STAGE2_NUM_PROCESSES ))
-STEPS_PER_EPOCH=$(( (NUM_PAIRS + EFFECTIVE_BATCH - 1) / EFFECTIVE_BATCH ))
-if [[ $STEPS_PER_EPOCH -lt 1 ]]; then STEPS_PER_EPOCH=100; fi
-TARGET_STEP=$(( STEPS_PER_EPOCH * STAGE2_BEST_EPOCH ))
+# find_latest_lora_weights <train_dir>
+#   Prints the most recently modified pytorch_lora_weights.safetensors under
+#   <train_dir>, searching all historical Stage 2 runs. Accepts either the
+#   trainer's final `official_output/pytorch_lora_weights.safetensors` or any
+#   intermediate `official_output/checkpoint-N/pytorch_lora_weights.safetensors`.
+find_latest_lora_weights() {
+  local train_dir="$1"
+  [[ -d "$train_dir" ]] || return 0
+  find "$train_dir" -type f -name 'pytorch_lora_weights.safetensors' -printf '%T@ %p\n' 2>/dev/null \
+    | sort -nr | head -1 | cut -d' ' -f2-
+}
 
-# Search existing training runs for the target checkpoint (latest first)
-if [[ -d "$STAGE2_TRAIN_DIR" ]]; then
-  for run_dir in $(ls -1d "${STAGE2_TRAIN_DIR}"/*/ 2>/dev/null | sort -r); do
-    if [[ "$STAGE2_BEST_EPOCH" -gt 0 ]]; then
-      CAND="${run_dir}official_output/checkpoint-${TARGET_STEP}/pytorch_lora_weights.safetensors"
-    else
-      CAND="${run_dir}official_output/pytorch_lora_weights.safetensors"
-    fi
-    if [[ -f "$CAND" ]]; then
-      LORA_WEIGHTS="$CAND"
-      break
-    fi
-  done
-fi
+LORA_WEIGHTS="$(find_latest_lora_weights "$STAGE2_TRAIN_DIR")"
 
-if [[ -n "$LORA_WEIGHTS" ]]; then
+if [[ -n "$LORA_WEIGHTS" && -f "$LORA_WEIGHTS" ]]; then
   echo ""
-  echo "[Stage 2] LoRA checkpoint found at $LORA_WEIGHTS — skipping training."
+  echo "[Stage 2] LoRA weights found at $LORA_WEIGHTS — skipping training."
 else
   echo ""
   echo "============================================================"
   echo "[Stage 2] Training SDXL LoRA (rank=$STAGE2_RANK, epochs=$STAGE2_EPOCHS)..."
-  echo "  steps/epoch (estimated): $STEPS_PER_EPOCH"
   echo "============================================================"
+
+  # steps/epoch only used to set --checkpointing_steps on the official trainer
+  NUM_PAIRS="$(wc -l < "$RENDER_INPUT" 2>/dev/null | tr -d ' ' || echo 0)"
+  if [[ "$NUM_PAIRS" -lt 1 ]]; then NUM_PAIRS=1; fi
+  EFFECTIVE_BATCH=$(( STAGE2_BATCH_SIZE * STAGE2_NUM_PROCESSES ))
+  STEPS_PER_EPOCH=$(( (NUM_PAIRS + EFFECTIVE_BATCH - 1) / EFFECTIVE_BATCH ))
+  if [[ $STEPS_PER_EPOCH -lt 1 ]]; then STEPS_PER_EPOCH=100; fi
+  echo "  steps/epoch (for --checkpointing_steps): $STEPS_PER_EPOCH"
 
   STAGE2_NUM_PROCESSES="$STAGE2_NUM_PROCESSES" bash scripts/stage2/run_sdxl_stage2_official.sh \
     "$TRAIN_ROOT" "$RENDER_INPUT" "$STAGE2_BATCH_SIZE" "$STAGE2_EPOCHS" \
     --adapter-rank "$STAGE2_RANK" \
     --save-every "$STEPS_PER_EPOCH"
 
-  LATEST_RUN="$(ls -1d "${STAGE2_TRAIN_DIR}"/*/ 2>/dev/null | sort | tail -1)"
-  if [[ "$STAGE2_BEST_EPOCH" -gt 0 ]]; then
-    LORA_WEIGHTS="${LATEST_RUN}official_output/checkpoint-${TARGET_STEP}/pytorch_lora_weights.safetensors"
-  fi
-  if [[ ! -f "$LORA_WEIGHTS" ]]; then
-    # Fall back to final weights
-    LORA_WEIGHTS="${LATEST_RUN}official_output/pytorch_lora_weights.safetensors"
-  fi
-  if [[ ! -f "$LORA_WEIGHTS" ]]; then
+  LORA_WEIGHTS="$(find_latest_lora_weights "$STAGE2_TRAIN_DIR")"
+  if [[ -z "$LORA_WEIGHTS" || ! -f "$LORA_WEIGHTS" ]]; then
     echo "[ERROR] LoRA weights not found after training"
     exit 1
   fi

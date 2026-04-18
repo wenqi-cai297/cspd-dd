@@ -148,7 +148,7 @@ Right now, the repo is best understood as:
 - `scripts/stage4/run_stage4_pipeline.sh` — Stage 4 generate distilled dataset
 - `scripts/eval/run_eval_pipeline.sh` — train classifier + evaluate
 - `scripts/pipelines/run_full_pipeline.sh <train_root> [val_root] [nclass]` — end-to-end driver: Stage 1 → Stage 2 → Stage 3 → Stage 4 → Eval. Idempotent per stage (skips work that already exists on disk). `PIPELINE_IPC="10 20 50"` controls the IPC sweep at the end.
-- `scripts/pipelines/run_baseline_3x3.sh <train_root> [val_root] [nclass]` — 3×3 measurement protocol (three paired seeds, each `(cluster, generate, eval)`). Assumes Stage 1 / 2 / 3A already done by the full-pipeline script; auto-detects the latest LoRA checkpoint under `STAGE2_BEST_EPOCH` (default 9).
+- `scripts/pipelines/run_baseline_3x3.sh <train_root> [val_root] [nclass]` — 3×3 measurement protocol (three paired seeds, each `(cluster, generate, eval)`). Assumes Stage 1 / 2 / 3A already done by the full-pipeline script; auto-detects the LoRA weights by picking the newest `pytorch_lora_weights.safetensors` under the dataset-specific Stage 2 train dir (override via `LORA_WEIGHTS=<path>`).
 
 ### Stage 2 output-dir rule (must remember)
 - The repo-standard Stage 2 run root is:

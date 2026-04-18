@@ -30,11 +30,10 @@ set -euo pipefail
 #   IPC=10                                 # single IPC value
 #   BASELINE_SEEDS="42 123 456"            # paired across Stage 3 + Stage 4
 #   EVAL_REPEAT=3
-#   STAGE2_BEST_EPOCH=9                    # which checkpoint-N to consume
-#                                          # (0 => final weights)
-#   STAGE2_BATCH_SIZE=8                    # only needed to recompute
-#   STAGE2_NUM_PROCESSES=2                 # the checkpoint step number
-#   LORA_WEIGHTS=<path>                    # explicit override of auto-detect
+#   LORA_WEIGHTS=<path>                    # explicit override. If unset,
+#                                          # the newest pytorch_lora_weights.safetensors
+#                                          # under the dataset-specific
+#                                          # Stage 2 train dir is used.
 #   ENCODE_DIR=<path>                      # explicit override of auto-detect
 
 if [[ $# -lt 1 ]]; then
@@ -65,9 +64,6 @@ ENV_NAME="${CSPD_ENV_NAME:-cspd-dd}"
 IPC="${IPC:-10}"
 SEEDS="${BASELINE_SEEDS:-42 123 456}"
 EVAL_REPEAT="${EVAL_REPEAT:-3}"
-STAGE2_BEST_EPOCH="${STAGE2_BEST_EPOCH:-9}"
-STAGE2_BATCH_SIZE="${STAGE2_BATCH_SIZE:-8}"
-STAGE2_NUM_PROCESSES="${STAGE2_NUM_PROCESSES:-2}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -98,6 +94,11 @@ if [[ ! -f "${ENCODE_DIR}/dino_embeds.pt" ]]; then
 fi
 
 # --- Resolve LoRA checkpoint ---
+# Pick the newest pytorch_lora_weights.safetensors on disk under the
+# dataset-specific Stage 2 train dir. Accepts either the trainer's final
+# `official_output/pytorch_lora_weights.safetensors` or any intermediate
+# `official_output/checkpoint-N/pytorch_lora_weights.safetensors`.
+# LORA_WEIGHTS=<path> in env overrides this entirely.
 if [[ -z "${LORA_WEIGHTS:-}" ]]; then
   STAGE2_TRAIN_DIR="runs/stage2/train/${DATASET_LABEL}/${BACKBONE_SLUG}"
   if [[ ! -d "$STAGE2_TRAIN_DIR" ]]; then
@@ -105,35 +106,14 @@ if [[ -z "${LORA_WEIGHTS:-}" ]]; then
     echo "       Run scripts/pipelines/run_full_pipeline.sh first, or set LORA_WEIGHTS."
     exit 1
   fi
-  # Need to know steps/epoch to derive the target checkpoint path. Use the
-  # render records count the training run was built from.
-  RENDER_DIR_ROOT="runs/stage1/render/${DATASET_LABEL}"
-  LATEST_RENDER_ANY="$(find "$RENDER_DIR_ROOT" -maxdepth 3 -name records.jsonl 2>/dev/null | sort | tail -1 || true)"
-  if [[ -z "$LATEST_RENDER_ANY" ]]; then
-    echo "[WARN] Could not find any Stage 1 render records under $RENDER_DIR_ROOT"
-    echo "       Falling back to final LoRA weights (no checkpoint lookup)."
-    STAGE2_BEST_EPOCH=0
-  else
-    NUM_PAIRS="$(wc -l < "$LATEST_RENDER_ANY" | tr -d ' ')"
-    EFFECTIVE_BATCH=$(( STAGE2_BATCH_SIZE * STAGE2_NUM_PROCESSES ))
-    STEPS_PER_EPOCH=$(( (NUM_PAIRS + EFFECTIVE_BATCH - 1) / EFFECTIVE_BATCH ))
-    if [[ $STEPS_PER_EPOCH -lt 1 ]]; then STEPS_PER_EPOCH=100; fi
-    TARGET_STEP=$(( STEPS_PER_EPOCH * STAGE2_BEST_EPOCH ))
-  fi
-  for run_dir in $(ls -1d "${STAGE2_TRAIN_DIR}"/*/ 2>/dev/null | sort -r); do
-    if [[ "$STAGE2_BEST_EPOCH" -gt 0 ]]; then
-      CAND="${run_dir}official_output/checkpoint-${TARGET_STEP}/pytorch_lora_weights.safetensors"
-    else
-      CAND="${run_dir}official_output/pytorch_lora_weights.safetensors"
-    fi
-    if [[ -f "$CAND" ]]; then
-      LORA_WEIGHTS="$CAND"
-      break
-    fi
-  done
+  LORA_WEIGHTS="$(
+    find "$STAGE2_TRAIN_DIR" -type f -name 'pytorch_lora_weights.safetensors' -printf '%T@ %p\n' 2>/dev/null \
+      | sort -nr | head -1 | cut -d' ' -f2-
+  )"
 fi
 if [[ -z "${LORA_WEIGHTS:-}" || ! -f "$LORA_WEIGHTS" ]]; then
-  echo "[ERROR] Could not locate a LoRA checkpoint. Pass LORA_WEIGHTS=<path> explicitly."
+  echo "[ERROR] Could not locate a LoRA checkpoint under $STAGE2_TRAIN_DIR."
+  echo "       Pass LORA_WEIGHTS=<path> explicitly."
   exit 1
 fi
 
