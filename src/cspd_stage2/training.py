@@ -42,7 +42,6 @@ from cspd_stage2.backbone import (
 )
 from cspd_stage2.data import ManifestPaths, build_stage2_pairs, make_stage2_dataloader, write_pairing_artifacts
 from cspd_stage2.families.sdxl.training import run_stage2_sdxl_official_training
-from cspd_stage2.families.sd15.training import run_stage2_sd15_official_training
 from cspd_stage2.training_common import (
     CONDITIONING_RELATED_GROUP_PATTERNS,
     DEFAULT_EXCLUDE_PATTERNS,
@@ -452,20 +451,13 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
         write_json(run_dir / "trainer_plan.json", trainer_plan)
         last_known_phase = "after_write_trainer_plan"
 
-        should_enter_training_dispatch = infer_backbone_family(config.backbone_name) in ('sdxl', 'sd15') or (not config.generate_manifest_only and not config.dry_run)
+        should_enter_training_dispatch = infer_backbone_family(config.backbone_name) == 'sdxl' or (not config.generate_manifest_only and not config.dry_run)
         if should_enter_training_dispatch:
             try:
                 last_known_phase = "before_real_training"
                 family = infer_backbone_family(config.backbone_name)
                 if family == 'sdxl':
                     training_result = run_stage2_sdxl_official_training(
-                        config=config,
-                        pairs=pairing.pairs,
-                        run_dir=run_dir,
-                        manifest_path=manifest_paths.manifest_path,
-                    )
-                elif family == 'sd15':
-                    training_result = run_stage2_sd15_official_training(
                         config=config,
                         pairs=pairing.pairs,
                         run_dir=run_dir,

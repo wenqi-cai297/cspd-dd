@@ -31,7 +31,7 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - **Stage 1 extraction** is implemented and runnable.
 - **Stage 1 normalization** is implemented as a deterministic-first canonicalization step with inline constrained VLM review enabled by default.
 - **Stage 1 render** is implemented as a deterministic archetype-template renderer.
-- **Stage 2 training** is implemented for both SDXL LoRA (**primary, validated**) and SD v1.5 full fine-tuning (tested but worse). SDXL is the mainline backbone.
+- **Stage 2 training** is implemented for SDXL LoRA (mainline, 63.27% baseline). Other families are out of scope.
 - **Stage 2 inference / sampling** script is implemented for LoRA vs baseline A/B comparison.
 - **Stage 3 mode discovery** is implemented: DINOv2 encoding + per-class clustering (K-Means or HDBSCAN) + medoid caption extraction (default) or diversity selection (opt-in via `--diversify-captions`).
 - **Stage 4 distilled dataset generation** is implemented: text-to-image generation with optional multi-candidate selection — per-mode prototype+diversity (Phase 2) or set-level greedy matching in VAE or DINOv2 feature space (Phase 3) — plus set-level representativeness evaluation and legacy img2img/mode guidance paths.
@@ -41,15 +41,11 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 ### Not implemented yet
 - FID evaluation is not yet automated.
 
-### Partially implemented / legacy exploratory
-- **Stage 2 FLUX family**: backbone loading and inspection work; training code removed (was never production-ready).
-- **Stage 2 PixArt family**: backbone loading works; training code removed (was deprioritized exploratory branch).
-
 ### Important practical reading
 Right now, the repo is best understood as:
 - a working **Prep** pipeline for class metadata,
 - a working **Stage 1** pipeline consisting of extraction → normalization → render,
-- a working **Stage 2 SDXL LoRA** training pipeline (primary) that delegates to the official diffusers trainer; SD v1.5 full fine-tuning also available but underperforms,
+- a working **Stage 2 SDXL LoRA** training pipeline that delegates to the official diffusers trainer,
 - a working **Stage 2 inference** script for sampling from trained LoRA weights,
 - a working **Stage 3** pipeline for DINOv2 encoding, per-class clustering (K-Means or HDBSCAN), and medoid caption extraction,
 - a working **Stage 4** pipeline for text-to-image distilled dataset generation with optional candidate selection and representativeness evaluation,
@@ -97,9 +93,6 @@ Right now, the repo is best understood as:
   - `data.py` — pairing, manifest, dataloader
   - `backbone.py` — backbone loading, module inspection, LoRA injection
   - `families/sdxl/backbone.py`, `families/sdxl/training.py` — SDXL LoRA family (**primary / mainline**)
-  - `families/sd15/training.py` — SD v1.5 full fine-tuning wrapper (tested but underperforms SDXL LoRA; kept for reference)
-  - `families/flux/backbone.py` — FLUX backbone loading (training removed)
-  - `families/pixart/backbone.py` — PixArt backbone loading (training removed)
   - implements Stage 2 pairing / planning / backbone inspection / SDXL LoRA training via official diffusers delegation
 
 - `src/cspd_stage3/`
@@ -151,14 +144,11 @@ Right now, the repo is best understood as:
 - `scripts/prep/generate_class_to_archetype_vlm.sh`
 - `scripts/stage2/check_stage2_sdxl_env.sh` — Stage 2 SDXL environment preflight
 - `scripts/stage2/run_sdxl_stage2_official.sh` — SDXL LoRA training launcher (default: 2 GPUs, 512 resolution)
-- `scripts/stage2/run_pixart_stage2_baseline_sampling.sh`
-- `scripts/stage2/run_pixart_stage2_wandb.sh`
 - `scripts/stage2/run_stage2_train.sh`
 - `scripts/stage2/dump_stage2_backbone_modules.sh`
 - `scripts/README.md` documents the recommended Prep + Stage 1 + Stage 2 helper flow
 - `scripts/stage1/run_stage1_pipeline.sh` — full Stage 1: extract → normalize → render
 - `scripts/stage2/run_stage2_pipeline.sh` — Stage 2 training + checkpoint sampling
-- `scripts/stage2/run_sd15_stage2_official.sh` — SD v1.5 full fine-tuning launcher (tested but worse than SDXL)
 - `scripts/stage3/run_stage3_pipeline.sh` — Stage 3 encode + cluster
 - `scripts/stage4/run_stage4_pipeline.sh` — Stage 4 generate distilled dataset
 - `scripts/eval/run_eval_pipeline.sh` — train classifier + evaluate
@@ -176,42 +166,8 @@ Right now, the repo is best understood as:
   - if `dataset_root` ends with a split-only directory name in `{train,val,valid,validation,test,testing}`, use `<parent>_<split>`
 - `--output-dir` remains only as an explicit override, not the normal required path.
 
-### Stage 2 PixArt debugging / status note (must remember)
-- As of 2026-04-09, the PixArt-Sigma Stage 2 path is best treated as a **debugged exploratory branch, not the forward mainline**.
-- Confirmed working pieces on the real server include:
-  - successful pairing when the exact Stage 1-compatible split root is used,
-  - successful real diffusers PixArt backbone load,
-  - successful VAE encode / prompt encode / first forward / first backward,
-  - successful multi-step continuation beyond the first optimizer step,
-  - optional W&B logging and periodic sampling wiring,
-  - standalone baseline text-to-image sampling helper.
-- The earlier dominant failure patterns were materially improved by repo changes:
-  - prompt-cache path removed;
-  - Stage 2 output-dir auto-derivation aligned with helper scripts;
-  - PixArt frozen-module shuttle/offload complexity removed in favor of always-on-device frozen runtime;
-  - PixArt full-update path given a safer FP32 trainable-parameter route;
-  - PixArt LoRA path given FP32 adapter master/update weights by default;
-  - first-step / post-step finite diagnostics added.
-- Important limitation discovered during the latest debugging cycle:
-  - standalone baseline text-to-image sampling can produce valid pretrained outputs,
-  - but training-path `step=0` sampling is currently **not yet behavior-equivalent** to the clean pretrained baseline,
-  - so any `step=0` mismatch should be treated as a code-path inconsistency to debug, not as evidence that LoRA initialization itself is corrupting the model.
-- Current practical reading of the PixArt branch:
-  - useful for preserving prior debugging lessons,
-  - but **not** the recommended next family for the user's main CSPD direction.
-- Why it is no longer the preferred mainline:
-  - current runtime exposure is still fundamentally text-to-image-oriented,
-  - no ready-made img2img branch is exposed in the present repo/runtime path,
-  - this mismatches the user's longer-term goal of visual mode + semantic mode driven distilled-dataset creation, which is image-to-image flavored.
-- Environment dependency reality check from real PixArt runs:
-  - repo environment metadata must include `protobuf` and `tiktoken` for the current PixArt tokenizer / prompt path,
-  - these were added to both `environment.yml` and `pyproject.toml` on 2026-04-09.
-- Dataset-root contract is still critical for Stage 2 pairing:
-  - use the exact Stage 1-compatible ImageFolder split root used by render records (e.g. `.../ImageNette/train`),
-  - not the parent dataset root, or pairing may collapse to zero.
-- Strategic decision after the 2026-04-09 review:
-  - preserve PixArt as a separated family branch in the codebase,
-  - but shift the next main investigation to **`stabilityai/stable-diffusion-xl-base-1.0`**.
+### Stage 2 dataset-root contract (must remember)
+- Use the exact Stage 1-compatible ImageFolder split root that the render records point at (e.g. `.../ImageNette/train`), not the parent dataset root. Passing the parent can collapse pairing to zero.
 
 ---
 
@@ -232,7 +188,6 @@ For implementation tracking in this repo, use the following stage view:
 ### Stage 2
 - generative-backbone adaptation / canonical-semantic-space familiarization
 - current working implementation: **SDXL base 1.0 UNet LoRA** via official diffusers trainer
-- legacy exploratory families: FLUX (stub), PixArt (functional but deprioritized)
 
 ### Stage 3
 - visual/semantic mode discovery via latent clustering
@@ -752,14 +707,13 @@ The normalization rules in `configs/stage1/normalization/stage1_attribute_normal
 ## 12. Stage 2 — Diffusion model LoRA training
 
 ### Implementation status
-**Implemented for SDXL LoRA (primary / mainline) and SD v1.5 full fine-tuning (tested but worse; kept in-tree for reference).**
+**Implemented for SDXL LoRA only (mainline).**
 
 ### Core purpose
 Train the diffusion model's UNet so it learns to recognize our Stage 1 canonical captions. Training pairs are `(real image, canonical_caption)` from Stage 1 render outputs.
 
 ### Backbone choice
 - **SDXL** (`stabilityai/stable-diffusion-xl-base-1.0`): **primary**. Native 1024 but trained at 512 (resolution mismatch); 2.6B params; dual CLIP text encoders. LoRA fine-tuning via `train_text_to_image_lora_sdxl.py`. Current best: **63.27% ± 0.19** on ImageNette IPC=10 under the 3×3 protocol (checkpoint-7254, rank=64, epoch 9 with cosine LR).
-- **SD v1.5** (`stable-diffusion-v1-5/stable-diffusion-v1-5`): tested, underperforms SDXL. Native 512, CLIP ViT-L/14, ~860M params. Full fine-tuning via `train_text_to_image.py`. Despite the native-resolution advantage cited by DD-VLCP (ICCV 2025), visual quality was slightly better but eval accuracy was lower than SDXL LoRA.
 
 ### Architecture
 Stage 2 delegates training to official diffusers training scripts. The repo owns:
@@ -770,11 +724,9 @@ Stage 2 delegates training to official diffusers training scripts. The repo owns
 
 ### Main code
 - `src/cspd_stage2/families/sdxl/training.py` — SDXL LoRA materialization, command building, launch (**primary**)
-- `src/cspd_stage2/families/sd15/training.py` — SD v1.5 full fine-tuning wrapper (tested but worse)
-- `src/cspd_stage2/training.py` — dispatch (detects `sdxl`/`sd15` family, routes to official wrapper)
+- `src/cspd_stage2/training.py` — dispatch (SDXL only)
 - `src/cspd_stage2/cli.py` — CLI with all SDXL-specific flags (`--sdxl-*`)
 - `scripts/stage2/run_sdxl_stage2_official.sh` — server helper (SDXL)
-- `scripts/stage2/run_sd15_stage2_official.sh` — server helper (SD v1.5)
 - `scripts/stage2/check_stage2_sdxl_env.sh` — environment check
 
 ### Training configuration (current defaults, SDXL mainline)
@@ -806,12 +758,7 @@ cspd-stage2 train \
 
 ### Server helper usage
 ```bash
-# SDXL LoRA (mainline)
 bash scripts/stage2/run_sdxl_stage2_official.sh \
-  <dataset_root> <render_records_jsonl> [batch_size] [epochs] [extra args...]
-
-# SD v1.5 full fine-tuning (kept for reference, not recommended)
-bash scripts/stage2/run_sd15_stage2_official.sh \
   <dataset_root> <render_records_jsonl> [batch_size] [epochs] [extra args...]
 ```
 
@@ -1102,8 +1049,8 @@ Latest accelerate rejects `"none"` as an unsupported tracker. The repo already h
 ### 16.7 Stage 2 best known config is rank=64, epoch=9
 From checkpoint comparison on ImageNette with cosine LR. The checkpoint at step 7254 (epoch 9 of 15) gives the best quality. Cosine LR peaks earlier than constant LR.
 
-### 16.10 SD v1.5 full fine-tuning underperforms SDXL LoRA
-Tested 2026-04-17: SD v1.5 full fine-tuning eval accuracy is worse than SDXL LoRA (61.3%). Despite native 512 resolution and DD-VLCP validation, our pipeline works better with SDXL. Likely because SDXL's dual CLIP encoder better handles our detailed structured captions.
+### 16.10 Non-SDXL generative backbones underperformed or were never usable
+Settled 2026-04-18. SD v1.5 full fine-tuning was tested end-to-end and eval'd worse than SDXL LoRA (61.3% vs 62.33% at the time). FLUX.1 and PixArt-Sigma never had a working training path on our stack despite the exploratory code. All three family subpackages (`families/{sd15,flux,pixart}`) and their server helpers were removed from the repo in the 2026-04-18 cleanup; the rule is simply: Stage 2 uses SDXL LoRA only.
 
 ### 16.11 Mode guidance (MGD³-style) is incompatible with detailed captions
 Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditioning is weak (class name only) but fails with our detailed structured captions. With strong text conditioning (CFG=7.5 + detailed caption), the UNet locks onto the caption's content. Mode guidance either has no effect (scale ≤ 0.1) or destroys image quality (scale ≥ 0.2). There is no sweet spot. The fundamental issue: text conditioning and latent guidance compete for control over the same features. MGD³ works because its text is weak ("tench"), leaving room for guidance. Our text is strong ("a brown speckled long and flat body tench being held in riverbank..."), leaving no room.
@@ -1201,8 +1148,9 @@ Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed 
 - **Implemented**: full fine-tuning of SD v1.5 UNet via `train_text_to_image.py` (not LoRA). Stage 4 auto-detects SD v1.5 vs SDXL and loads via `from_pretrained`.
 - **Training**: 8 epochs, batch=8, 2 GPUs, cosine LR, noise_offset=0.05, snr_gamma=5.0.
 - **Result**: sample quality looks good visually but eval accuracy was **worse** than SDXL baseline (61.3%). Hypothesis falsified.
-- **Conclusion**: SDXL LoRA remains mainline. SDXL's dual CLIP text encoders + larger capacity compensate for non-native resolution. SD v1.5 code path is kept in repo but not used.
+- **Conclusion**: SDXL LoRA remains mainline. SDXL's dual CLIP text encoders + larger capacity compensate for non-native resolution.
 - **PixArt-alpha considered**: 256 native + text-conditional, but no DD validation and poor fine-tuning ecosystem. Not tested.
+- **Follow-up (2026-04-18)**: SD v1.5, FLUX, and PixArt family subpackages + their server helpers removed from the repo entirely; see 16.10.
 
 ### Candidate selection v2 + representativeness scoring (2026-04-16)
 - **Phase 2 (candidate selection v2)**: architecture-agnostic scoring — prototype similarity (cosine to class mean DINOv2) + diversity (cosine distance to accepted set). No proxy classifier. IPC-dependent beta.

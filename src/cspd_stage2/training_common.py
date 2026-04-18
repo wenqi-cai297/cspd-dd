@@ -13,7 +13,6 @@ from typing import Any
 
 from cspd_stage1.io_utils import write_json
 from cspd_stage2.backbone import apply_trainable_parameter_selection, infer_backbone_family, inject_lora_adapters, inspect_target_modules
-from cspd_stage2.families.pixart.backbone import resolve_pixart_conditioning_transformer_patterns
 
 DEFAULT_TEXT_CONDITIONING_GROUPS = ["full_transformer"]
 DEFAULT_LORA_TARGET_GROUPS = ["conditioning_transformer"]
@@ -189,9 +188,6 @@ def resolve_effective_module_selection(config: Any) -> dict[str, Any]:
     group_patterns, unknown_groups = _expand_component_group_patterns(groups)
     manual_patterns = list(dict.fromkeys(config.module_include_patterns or []))
     effective_include_patterns = list(dict.fromkeys(group_patterns + manual_patterns))
-    family = infer_backbone_family(config.backbone_name)
-    if family in {"pixart_sigma", "pixart"} and not manual_patterns and groups == ["conditioning_transformer"]:
-        effective_include_patterns = resolve_pixart_conditioning_transformer_patterns()
     if not effective_include_patterns:
         effective_include_patterns = ["*"]
     effective_exclude_patterns = list(dict.fromkeys(config.module_exclude_patterns or []))
