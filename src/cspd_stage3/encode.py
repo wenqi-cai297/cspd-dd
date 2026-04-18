@@ -1,8 +1,10 @@
 """Stage 3A — Encode images to DINOv2 features for clustering.
 
-Only DINOv2 CLS features are computed. Text encoding and VAE encoding are not
-needed because Stage 4 uses text2img generation with representative captions
-(selected by DINOv2 clustering) passed as plain text strings.
+DINOv2 CLS features are the primary output (used by Stage 3B clustering).
+SDXL VAE latents are an optional secondary output (`--encode-vae`) consumed
+only by Stage 4 `--set-level-selection` when feature_space=vae. Text
+encoding is not needed because Stage 4 uses text2img generation with
+representative captions passed as plain strings.
 """
 
 from __future__ import annotations
@@ -107,7 +109,7 @@ def encode_dataset(
     encode_vae: bool = False,
     vae_model_name: str = "stabilityai/stable-diffusion-xl-base-1.0",
 ) -> EncodeResult:
-    """Encode images to DINOv2 features for clustering, optionally VAE latents for mode guidance.
+    """Encode images to DINOv2 features for clustering, optionally SDXL VAE latents for Stage 4 set-level selection.
 
     Args:
         dataset_root: ImageFolder dataset root (same as Stage 2).
@@ -116,7 +118,7 @@ def encode_dataset(
         resolution: Image resolution for loading.
         batch_size: Encoding batch size.
         device: Torch device.
-        encode_vae: If True, also encode images to VAE latents (needed for mode guidance in Stage 4).
+        encode_vae: If True, also encode images to SDXL VAE latents (consumed by Stage 4 --set-level-selection feature_space=vae).
         vae_model_name: SDXL model identifier for VAE loading.
 
     Returns:
@@ -134,7 +136,7 @@ def encode_dataset(
         raise ValueError("No pairs found. Check dataset_root and render_input paths.")
     print(f"[Stage 3A] Found {len(pairs)} paired samples")
 
-    # --- VAE encoding (optional, for mode guidance) ---
+    # --- VAE encoding (optional, for Stage 4 set-level selection) ---
     vae_latents_path = None
     if encode_vae:
         from diffusers import AutoencoderKL

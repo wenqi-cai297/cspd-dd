@@ -1,10 +1,11 @@
-"""Stage 3A/3B/3C — Per-class clustering and visual/semantic mode extraction.
+"""Stage 3B/3C — Per-class mode discovery and medoid-caption extraction.
 
-Two clustering methods are supported:
-- **kmeans** (baseline): K-Means with K = IPC. Simple and fast, but may over-represent
-  head modes in long-tailed distributions.
-- **hdbscan**: Density-based mode discovery that first finds natural modes via HDBSCAN,
-  then allocates IPC representatives proportionally. Better captures tail modes.
+HDBSCAN finds natural density modes in DINOv2 feature space and allocates the
+IPC budget proportionally. K-Means is retained as the internal fallback for
+classes where HDBSCAN collapses (<=1 mode) and as the sub-clustering strategy
+when a parent mode receives more than one slot from the proportional
+allocator. Each final cluster contributes its medoid's canonical caption as
+the representative for Stage 4.
 """
 
 from __future__ import annotations
@@ -70,7 +71,6 @@ class Stage3Result:
     total_modes: int
     class_results: list[ClassClusterResult]
     modes_index_path: str        # .json: per-mode metadata
-    mode_centroids_path: str | None = None  # .pt: (total_modes, 4, H, W) VAE latent centroids
 
 
 def _extract_modes_from_labels(
@@ -82,16 +82,9 @@ def _extract_modes_from_labels(
     samples: list[dict[str, Any]],
     class_name: str,
     class_name_raw: str,
-    archetype: str,
-    vae_latents: torch.Tensor | None = None,
-) -> tuple[list[ClusterMode], list[torch.Tensor] | None]:
-    """Shared mode extraction: find DINOv2 medoid per cluster, optionally compute VAE centroids.
-
-    Returns:
-        (modes, vae_centroids) where vae_centroids is a list of centroid tensors if vae_latents is provided.
-    """
+    archetype: str) -> list[ClusterMode]:
+    """Shared mode extraction: find the DINOv2 medoid per cluster."""
     modes = []
-    vae_centroids = [] if vae_latents is not None else None
 
     unique_labels = sorted(set(int(l) for l in labels if l >= 0))  # skip noise label -1
 
@@ -116,12 +109,6 @@ def _extract_modes_from_labels(
         mean_dist = float(distances_to_centroid.mean()) if len(distances_to_centroid) > 0 else 1.0
         density = 1.0 / max(mean_dist, 1e-8)
 
-        # VAE centroid: mean of VAE latents in this cluster (for mode guidance)
-        if vae_latents is not None:
-            cluster_latents = vae_latents[member_global_indices]
-            vae_centroid = cluster_latents.mean(dim=0)
-            vae_centroids.append(vae_centroid)
-
         modes.append(ClusterMode(
             cluster_id=k_idx,
             class_name=class_name,
@@ -134,63 +121,9 @@ def _extract_modes_from_labels(
             weight=weight,
             density=density,
             dino_centroid=dino_centroid,
-            member_indices=member_global_indices,
-        ))
+            member_indices=member_global_indices))
 
-    return modes, vae_centroids
-
-
-def _caption_token_distance(cap1: str, cap2: str) -> float:
-    """Token-level Jaccard distance between two captions. 1.0 = completely different."""
-    words1 = set(cap1.lower().split())
-    words2 = set(cap2.lower().split())
-    if not words1 or not words2:
-        return 1.0
-    intersection = len(words1 & words2)
-    union = len(words1 | words2)
-    return 1.0 - intersection / union
-
-
-def _diversify_captions(
-    modes: list[ClusterMode],
-    samples: list[dict[str, Any]],
-) -> None:
-    """Replace representative captions with most diverse alternatives from each cluster.
-
-    Greedy selection: process modes in order, for each mode pick the member caption
-    that maximizes minimum token distance from all already-selected captions.
-    The medoid_index/medoid_record_id stay as the visual medoid (DINOv2 centroid);
-    only the representative_caption may change to a different member's caption.
-    """
-    if len(modes) <= 1:
-        return
-
-    selected_captions: list[str] = []
-
-    for mode in modes:
-        member_captions = [
-            (idx, samples[idx]["canonical_caption"])
-            for idx in mode.member_indices
-            if samples[idx].get("canonical_caption")
-        ]
-
-        if not selected_captions:
-            # First mode: keep medoid caption
-            selected_captions.append(mode.representative_caption)
-            continue
-
-        # Find the member caption most different from all already-selected
-        best_caption = mode.representative_caption
-        best_min_dist = -1.0
-
-        for _, caption in member_captions:
-            min_dist = min(_caption_token_distance(caption, sel) for sel in selected_captions)
-            if min_dist > best_min_dist:
-                best_min_dist = min_dist
-                best_caption = caption
-
-        mode.representative_caption = best_caption
-        selected_captions.append(best_caption)
+    return modes
 
 
 def _farthest_point_sampling(points: np.ndarray, n: int) -> list[int]:
@@ -245,8 +178,7 @@ def _sub_cluster_mode(
     flat_latents: np.ndarray,
     member_indices: list[int],
     n_sub: int,
-    seed: int,
-) -> list[np.ndarray]:
+    seed: int) -> list[np.ndarray]:
     """Sub-cluster a single mode into n_sub groups using K-Means."""
     if n_sub <= 1:
         return [np.array(member_indices)]
@@ -268,10 +200,7 @@ def cluster_class_kmeans(
     dino_embeds: torch.Tensor,
     samples: list[dict[str, Any]],
     ipc: int,
-    seed: int = 42,
-    vae_latents: torch.Tensor | None = None,
-    diversify_captions: bool = False,
-) -> tuple[ClassClusterResult, list[torch.Tensor] | None]:
+    seed: int = 42) -> ClassClusterResult:
     """Cluster one class using K-Means on DINOv2 features."""
     class_meta = samples[class_indices[0]]
     class_name = class_meta["class_name"]
@@ -285,21 +214,16 @@ def cluster_class_kmeans(
     kmeans = KMeans(n_clusters=n_clusters, random_state=seed, n_init=10)
     labels = kmeans.fit_predict(class_dino)
 
-    modes, vae_centroids = _extract_modes_from_labels(
+    modes = _extract_modes_from_labels(
         labels=labels, n_clusters=n_clusters,
         class_indices=class_indices, class_dino=class_dino,
         samples=samples,
-        class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
-        vae_latents=vae_latents,
-    )
-    if diversify_captions:
-        _diversify_captions(modes, samples)
+        class_name=class_name, class_name_raw=class_name_raw, archetype=archetype)
 
     return ClassClusterResult(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
         num_samples=n_samples, ipc=ipc, num_clusters=len(modes), modes=modes,
-        diagnostics={"branch": "kmeans", "kmeans_k": n_clusters},
-    ), vae_centroids
+        diagnostics={"branch": "kmeans", "kmeans_k": n_clusters})
 
 
 def cluster_class_hdbscan(
@@ -311,10 +235,7 @@ def cluster_class_hdbscan(
     seed: int = 42,
     min_cluster_size: int = 15,
     min_samples: int = 3,
-    pca_dim: int = 50,
-    vae_latents: torch.Tensor | None = None,
-    diversify_captions: bool = False,
-) -> tuple[ClassClusterResult, list[torch.Tensor] | None]:
+    pca_dim: int = 50) -> ClassClusterResult:
     """Cluster one class using HDBSCAN mode discovery + proportional IPC allocation.
 
     Steps:
@@ -377,11 +298,9 @@ def cluster_class_hdbscan(
 
     # Fallback: if HDBSCAN found 0 or 1 modes, fall back to K-Means
     if n_discovered <= 1:
-        result, vae_c = cluster_class_kmeans(
+        result = cluster_class_kmeans(
             class_indices=class_indices, dino_embeds=dino_embeds,
-            samples=samples, ipc=ipc, seed=seed, vae_latents=vae_latents,
-            diversify_captions=diversify_captions,
-        )
+            samples=samples, ipc=ipc, seed=seed)
         result.diagnostics = {
             "branch": "hdbscan_fallback_kmeans",
             "hdbscan_n_discovered": n_discovered,
@@ -389,7 +308,7 @@ def cluster_class_hdbscan(
             "hdbscan_discovered_sizes": hdbscan_discovered_sizes,
             "kmeans_k": ipc,
         }
-        return result, vae_c
+        return result
 
     # Build per-mode member lists
     mode_members: dict[int, list[int]] = {}
@@ -447,15 +366,11 @@ def cluster_class_hdbscan(
         if final_labels[i] < 0:
             final_labels[i] = 0
 
-    modes, vae_centroids = _extract_modes_from_labels(
+    modes = _extract_modes_from_labels(
         labels=final_labels, n_clusters=final_cluster_id,
         class_indices=class_indices, class_dino=class_dino,
         samples=samples,
-        class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
-        vae_latents=vae_latents,
-    )
-    if diversify_captions:
-        _diversify_captions(modes, samples)
+        class_name=class_name, class_name_raw=class_name_raw, archetype=archetype)
 
     n_modes_subclustered = sum(1 for a in allocation if a > 1)
     branch = "hdbscan_farthest_point" if took_farthest_point else "hdbscan_proportional"
@@ -475,45 +390,7 @@ def cluster_class_hdbscan(
     return ClassClusterResult(
         class_name=class_name, class_name_raw=class_name_raw, archetype=archetype,
         num_samples=n_samples, ipc=ipc, num_clusters=len(modes), modes=modes,
-        diagnostics=diagnostics,
-    ), vae_centroids
-
-
-def cluster_class(
-    *,
-    class_indices: list[int],
-    dino_embeds: torch.Tensor,
-    samples: list[dict[str, Any]],
-    ipc: int,
-    seed: int = 42,
-    method: str = "kmeans",
-    min_cluster_size: int = 15,
-    min_samples: int = 3,
-    pca_dim: int = 50,
-    vae_latents: torch.Tensor | None = None,
-    diversify_captions: bool = False,
-) -> tuple[ClassClusterResult, list[torch.Tensor] | None]:
-    """Cluster one class using DINOv2 features and extract modes.
-
-    Args:
-        method: "kmeans" (baseline) or "hdbscan" (mode discovery).
-        dino_embeds: DINOv2 features tensor (required).
-        vae_latents: Optional VAE latents for computing mode centroids (for mode guidance).
-        diversify_captions: If True, replace medoid captions with most diverse alternatives.
-    """
-    if method == "hdbscan":
-        return cluster_class_hdbscan(
-            class_indices=class_indices, dino_embeds=dino_embeds,
-            samples=samples, ipc=ipc, seed=seed,
-            min_cluster_size=min_cluster_size, min_samples=min_samples, pca_dim=pca_dim,
-            vae_latents=vae_latents, diversify_captions=diversify_captions,
-        )
-    else:
-        return cluster_class_kmeans(
-            class_indices=class_indices, dino_embeds=dino_embeds,
-            samples=samples, ipc=ipc, seed=seed,
-            vae_latents=vae_latents, diversify_captions=diversify_captions,
-        )
+        diagnostics=diagnostics)
 
 
 def run_stage3_clustering(
@@ -522,29 +399,24 @@ def run_stage3_clustering(
     output_dir: str | Path,
     ipc: int = 10,
     seed: int = 42,
-    method: str = "kmeans",
     min_cluster_size: int = 15,
     min_samples: int = 3,
-    pca_dim: int = 50,
-    diversify_captions: bool = False,
-) -> Stage3Result:
-    """Run full Stage 3 pipeline: load encoded tensors, cluster per class, extract modes.
+    pca_dim: int = 50) -> Stage3Result:
+    """Run the full Stage 3 pipeline: load encoded tensors, cluster per class, extract modes.
 
-    Clustering uses DINOv2 features. VAE latents are optionally loaded for
-    computing mode centroids (used by Stage 4 mode guidance).
+    Uses HDBSCAN on DINOv2 features with K-Means fallback/sub-clustering.
 
     Args:
         encode_dir: Directory containing Stage 3A encode outputs.
         output_dir: Directory for Stage 3 mode outputs.
         ipc: Images per class — number of clusters per class.
-        seed: Random seed.
-        method: "kmeans" (baseline) or "hdbscan" (mode discovery).
-        min_cluster_size: HDBSCAN min_cluster_size parameter.
-        min_samples: HDBSCAN min_samples parameter.
-        pca_dim: PCA dimensions for HDBSCAN pre-processing.
+        seed: Random seed (affects PCA + K-Means fallback / sub-clustering).
+        min_cluster_size: HDBSCAN min_cluster_size.
+        min_samples: HDBSCAN min_samples.
+        pca_dim: PCA dimensions for HDBSCAN pre-processing (0 skips PCA).
 
     Returns:
-        Stage3Result with paths to mode metadata and optional centroids.
+        Stage3Result with the path to the modes index JSON.
     """
     encode_dir = Path(encode_dir)
     output_dir = Path(output_dir)
@@ -555,12 +427,9 @@ def run_stage3_clustering(
     dino_embeds = torch.load(encode_dir / "dino_embeds.pt", weights_only=True)
     print(f"[Stage 3] Loaded DINOv2 features: {list(dino_embeds.shape)}")
 
-    # Load VAE latents if available (for mode guidance centroids)
-    vae_latents = None
-    vae_latents_path = encode_dir / "vae_latents.pt"
-    if vae_latents_path.exists():
-        vae_latents = torch.load(vae_latents_path, weights_only=True)
-        print(f"[Stage 3] Loaded VAE latents: {list(vae_latents.shape)}")
+    # The Stage 3 cluster step does not consume VAE latents directly (medoids
+    # are selected in DINOv2 space). VAE latents live under encode_dir and
+    # are consumed later by Stage 4 --set-level-selection.
 
     with open(encode_dir / "encode_index.json", encoding="utf-8") as f:
         encode_index = json.load(f)
@@ -576,27 +445,25 @@ def run_stage3_clustering(
             class_groups[key] = []
         class_groups[key].append(i)
 
-    print(f"[Stage 3] Found {len(class_groups)} classes, IPC={ipc}, method={method}")
+    print(f"[Stage 3] Found {len(class_groups)} classes, IPC={ipc}, method=hdbscan")
 
-    # Cluster each class (DINOv2 for caption selection)
+    # Cluster each class on DINOv2 features. K-Means is still used internally
+    # by the HDBSCAN path as the <=1-mode fallback and sub-clustering strategy.
     all_class_results = []
 
     for class_raw, indices in sorted(class_groups.items()):
         class_name = samples[indices[0]]["class_name"]
-        print(f"[Stage 3] Clustering class '{class_name}' ({len(indices)} samples, method={method})...")
+        print(f"[Stage 3] Clustering class '{class_name}' ({len(indices)} samples)...")
 
-        class_result, _ = cluster_class(
+        class_result = cluster_class_hdbscan(
             class_indices=indices,
             dino_embeds=dino_embeds,
             samples=samples,
             ipc=ipc,
             seed=seed,
-            method=method,
             min_cluster_size=min_cluster_size,
             min_samples=min_samples,
             pca_dim=pca_dim,
-            diversify_captions=diversify_captions,
-            vae_latents=None,  # Don't compute VAE centroids from DINOv2 clusters
         )
 
         all_class_results.append(class_result)
@@ -604,43 +471,17 @@ def run_stage3_clustering(
     total_modes = sum(cr.num_clusters for cr in all_class_results)
     print(f"[Stage 3] Total modes: {total_modes}")
 
-    # Rollup of HDBSCAN branch decisions (only meaningful when method == "hdbscan")
+    # Rollup of HDBSCAN branch decisions per class
     branch_counts: dict[str, int] = {}
     for cr in all_class_results:
         b = cr.diagnostics.get("branch", "unknown")
         branch_counts[b] = branch_counts.get(b, 0) + 1
-    if method == "hdbscan":
-        n_sub_total = sum(
-            cr.diagnostics.get("n_modes_subclustered", 0) for cr in all_class_results
-        )
-        print(f"[Stage 3] HDBSCAN branch rollup: {branch_counts}; "
-              f"total parent modes sub-clustered via seeded K-Means: {n_sub_total}")
+    n_sub_total = sum(
+        cr.diagnostics.get("n_modes_subclustered", 0) for cr in all_class_results
+    )
+    print(f"[Stage 3] HDBSCAN branch rollup: {branch_counts}; "
+          f"total parent modes sub-clustered via seeded K-Means: {n_sub_total}")
 
-    # Compute VAE-native mode centroids via separate K-Means in VAE space
-    # This ensures centroids are maximally separated in the space where
-    # mode guidance operates (unlike DINOv2-derived VAE means which cluster together)
-    mode_centroids_path = None
-    if vae_latents is not None:
-        print(f"[Stage 3] Computing VAE-native mode centroids (K-Means in VAE space, K={ipc})...")
-        all_vae_centroids = []
-        for class_raw, indices in sorted(class_groups.items()):
-            class_vae = vae_latents[indices]
-            n_samples = len(indices)
-            n_clusters = min(ipc, n_samples)
-            # Flatten for K-Means: (N, 4, H, W) → (N, 4*H*W)
-            flat_vae = class_vae.reshape(n_samples, -1).numpy()
-            km = KMeans(n_clusters=n_clusters, random_state=seed, n_init=10)
-            km.fit(flat_vae)
-            # Reshape centroids back: (K, 4*H*W) → (K, 4, H, W)
-            latent_shape = class_vae.shape[1:]  # (4, H, W)
-            for center in km.cluster_centers_:
-                all_vae_centroids.append(torch.from_numpy(center).reshape(latent_shape).float())
-
-        centroids_tensor = torch.stack(all_vae_centroids)  # (total_modes, 4, H, W)
-        centroids_file = output_dir / "mode_centroids.pt"
-        torch.save(centroids_tensor, centroids_file)
-        mode_centroids_path = str(centroids_file)
-        print(f"[Stage 3] Saved {centroids_tensor.shape[0]} VAE-native centroids: {list(centroids_tensor.shape)}")
 
     # Save modes index
     modes_index_path = output_dir / "modes_index.json"
@@ -668,19 +509,13 @@ def run_stage3_clustering(
         "num_classes": len(all_class_results),
         "total_modes": total_modes,
         "clustering": {
-            "method": method,
+            "method": "hdbscan",
             "feature_space": "DINOv2 (dinov2_vitb14, 768-dim CLS token)",
-            "caption_selection": "diversify_captions (greedy Jaccard distance)" if diversify_captions else "medoid (closest sample to DINOv2 cluster centroid)",
+            "caption_selection": "medoid (closest sample to DINOv2 cluster centroid)",
             "seed": seed,
-            "kmeans_n_init": 10 if method == "kmeans" else None,
-            "hdbscan_min_cluster_size": min_cluster_size if method == "hdbscan" else None,
-            "hdbscan_min_samples": min_samples if method == "hdbscan" else None,
-            "hdbscan_pca_dim": pca_dim if method == "hdbscan" else None,
-        },
-        "mode_centroids": {
-            "available": mode_centroids_path is not None,
-            "space": "VAE latent (K-Means in VAE space, separate from DINOv2 clustering)" if mode_centroids_path else None,
-            "path": mode_centroids_path,
+            "hdbscan_min_cluster_size": min_cluster_size,
+            "hdbscan_min_samples": min_samples,
+            "hdbscan_pca_dim": pca_dim,
         },
         "branch_rollup": branch_counts,
         "source": {
@@ -711,6 +546,4 @@ def run_stage3_clustering(
         num_classes=len(all_class_results),
         total_modes=total_modes,
         class_results=all_class_results,
-        modes_index_path=str(modes_index_path),
-        mode_centroids_path=mode_centroids_path,
-    )
+        modes_index_path=str(modes_index_path))

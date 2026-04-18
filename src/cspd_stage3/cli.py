@@ -1,4 +1,11 @@
-"""CLI entrypoint for CSPD Stage 3 — visual/semantic mode discovery."""
+"""CLI entrypoint for CSPD Stage 3 — DINOv2-based mode discovery.
+
+Stage 3 is HDBSCAN-based mode discovery over DINOv2 features with medoid
+caption selection. K-Means is retained internally as the fallback /
+sub-clustering path inside the HDBSCAN algorithm; it is not exposed as a
+top-level choice. Caption diversification via Jaccard distance was tested
+and removed on 2026-04-18.
+"""
 
 from __future__ import annotations
 
@@ -7,10 +14,14 @@ import json
 from pathlib import Path
 
 
+def _add_hdbscan_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--min-cluster-size", type=int, default=15, help="HDBSCAN min_cluster_size")
+    parser.add_argument("--min-samples", type=int, default=3, help="HDBSCAN min_samples (core point neighborhood density)")
+    parser.add_argument("--pca-dim", type=int, default=50, help="PCA dimensions for HDBSCAN pre-processing (0 skips PCA)")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="CSPD Stage 3 CLI for visual/semantic mode discovery via latent clustering"
-    )
+    parser = argparse.ArgumentParser(description="CSPD Stage 3 CLI for DINOv2-based mode discovery")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # --- encode ---
@@ -24,23 +35,21 @@ def build_parser() -> argparse.ArgumentParser:
     encode_parser.add_argument("--resolution", type=int, default=512, help="Image resolution for loading")
     encode_parser.add_argument("--batch-size", type=int, default=8, help="Encoding batch size")
     encode_parser.add_argument("--device", default="cuda", help="Torch device")
-    encode_parser.add_argument("--encode-vae", action="store_true", help="Also encode VAE latents (needed for mode guidance in Stage 4)")
-    encode_parser.add_argument("--vae-model-name", default="stabilityai/stable-diffusion-xl-base-1.0", help="SDXL model for VAE loading")
+    encode_parser.add_argument("--encode-vae", action="store_true",
+                               help="Also encode SDXL VAE latents (used by Stage 4 --set-level-selection)")
+    encode_parser.add_argument("--vae-model-name", default="stabilityai/stable-diffusion-xl-base-1.0",
+                               help="SDXL model for VAE loading (only used when --encode-vae is set)")
 
     # --- cluster ---
     cluster_parser = subparsers.add_parser(
         "cluster",
-        help="Cluster latents per class and extract visual/semantic modes (Stage 3B+3C)",
+        help="HDBSCAN mode discovery + medoid caption extraction (Stage 3B+3C)",
     )
     cluster_parser.add_argument("--encode-dir", required=True, help="Directory with Stage 3A encode outputs")
     cluster_parser.add_argument("--output-dir", required=True, help="Directory for mode outputs")
-    cluster_parser.add_argument("--ipc", type=int, required=True, help="Images per class (number of clusters per class)")
-    cluster_parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    cluster_parser.add_argument("--cluster-method", default="kmeans", choices=["kmeans", "hdbscan"], help="Clustering method: kmeans (baseline) or hdbscan (mode discovery)")
-    cluster_parser.add_argument("--min-cluster-size", type=int, default=15, help="HDBSCAN min_cluster_size (ignored for kmeans)")
-    cluster_parser.add_argument("--min-samples", type=int, default=3, help="HDBSCAN min_samples: core point neighborhood density (ignored for kmeans)")
-    cluster_parser.add_argument("--pca-dim", type=int, default=50, help="PCA dimensions for HDBSCAN pre-processing (ignored for kmeans)")
-    cluster_parser.add_argument("--diversify-captions", action="store_true", help="Replace medoid captions with most diverse alternatives (experimental, may hurt accuracy)")
+    cluster_parser.add_argument("--ipc", type=int, required=True, help="Images per class (total clusters per class)")
+    cluster_parser.add_argument("--seed", type=int, default=42, help="Random seed (affects PCA + K-Means fallback / sub-clustering)")
+    _add_hdbscan_args(cluster_parser)
 
     # --- run (encode + cluster in one shot) ---
     run_parser = subparsers.add_parser(
@@ -55,13 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--batch-size", type=int, default=8, help="Encoding batch size")
     run_parser.add_argument("--device", default="cuda", help="Torch device")
     run_parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    run_parser.add_argument("--cluster-method", default="kmeans", choices=["kmeans", "hdbscan"], help="Clustering method: kmeans (baseline) or hdbscan (mode discovery)")
-    run_parser.add_argument("--min-cluster-size", type=int, default=15, help="HDBSCAN min_cluster_size (ignored for kmeans)")
-    run_parser.add_argument("--min-samples", type=int, default=3, help="HDBSCAN min_samples: core point neighborhood density (ignored for kmeans)")
-    run_parser.add_argument("--pca-dim", type=int, default=50, help="PCA dimensions for HDBSCAN pre-processing (ignored for kmeans)")
-    run_parser.add_argument("--encode-vae", action="store_true", help="Also encode VAE latents (needed for mode guidance in Stage 4)")
-    run_parser.add_argument("--vae-model-name", default="stabilityai/stable-diffusion-xl-base-1.0", help="SDXL model for VAE loading")
-    run_parser.add_argument("--diversify-captions", action="store_true", help="Replace medoid captions with most diverse alternatives (experimental)")
+    _add_hdbscan_args(run_parser)
+    run_parser.add_argument("--encode-vae", action="store_true",
+                            help="Also encode SDXL VAE latents (used by Stage 4 --set-level-selection)")
+    run_parser.add_argument("--vae-model-name", default="stabilityai/stable-diffusion-xl-base-1.0",
+                            help="SDXL model for VAE loading (only used when --encode-vae is set)")
 
     return parser
 
@@ -98,11 +105,9 @@ def main() -> None:
             output_dir=args.output_dir,
             ipc=args.ipc,
             seed=args.seed,
-            method=args.cluster_method,
             min_cluster_size=args.min_cluster_size,
             min_samples=args.min_samples,
             pca_dim=args.pca_dim,
-            diversify_captions=args.diversify_captions,
         )
         print(json.dumps({
             "output_dir": result.output_dir,
@@ -122,7 +127,7 @@ def main() -> None:
         print("=" * 60)
         print("[Stage 3] Phase 1: Encoding")
         print("=" * 60)
-        encode_result = encode_dataset(
+        encode_dataset(
             dataset_root=args.dataset_root,
             render_input=args.render_input,
             output_dir=str(encode_dir),
@@ -142,11 +147,9 @@ def main() -> None:
             output_dir=str(modes_dir),
             ipc=args.ipc,
             seed=args.seed,
-            method=args.cluster_method,
             min_cluster_size=args.min_cluster_size,
             min_samples=args.min_samples,
             pca_dim=args.pca_dim,
-            diversify_captions=args.diversify_captions,
         )
 
         print()

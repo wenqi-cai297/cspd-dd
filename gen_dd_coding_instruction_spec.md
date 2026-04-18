@@ -33,7 +33,7 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - **Stage 1 render** is implemented as a deterministic archetype-template renderer.
 - **Stage 2 training** is implemented for SDXL LoRA (mainline, 63.27% baseline). Other families are out of scope.
 - **Stage 2 inference / sampling** script is implemented for LoRA vs baseline A/B comparison.
-- **Stage 3 mode discovery** is implemented: DINOv2 encoding + per-class clustering (K-Means or HDBSCAN) + medoid caption extraction (default) or diversity selection (opt-in via `--diversify-captions`).
+- **Stage 3 mode discovery** is implemented: DINOv2 encoding + per-class HDBSCAN clustering (with internal K-Means fallback / sub-clustering) + medoid caption extraction.
 - **Stage 4 distilled dataset generation** is implemented: text-to-image generation with optional multi-candidate selection — per-mode prototype+diversity (Phase 2) or set-level greedy matching in VAE or DINOv2 feature space (Phase 3) — plus set-level representativeness evaluation and legacy img2img/mode guidance paths.
 - **Evaluation** is implemented: train classifier (ConvNet-6/ResNet-18/ResNetAP-10) on distilled dataset, evaluate on real val set.
 - Supporting server scripts, metadata prep, mock/regression runs, and full workflow wiring exist.
@@ -47,7 +47,7 @@ Right now, the repo is best understood as:
 - a working **Stage 1** pipeline consisting of extraction → normalization → render,
 - a working **Stage 2 SDXL LoRA** training pipeline that delegates to the official diffusers trainer,
 - a working **Stage 2 inference** script for sampling from trained LoRA weights,
-- a working **Stage 3** pipeline for DINOv2 encoding, per-class clustering (K-Means or HDBSCAN), and medoid caption extraction,
+- a working **Stage 3** pipeline for DINOv2 encoding, per-class HDBSCAN mode discovery, and medoid caption extraction,
 - a working **Stage 4** pipeline for text-to-image distilled dataset generation with optional candidate selection and representativeness evaluation,
 - a working **Evaluation** pipeline for training classifiers on distilled datasets and evaluating on real validation sets,
 - where Stage 1 normalization is deterministic-first but can invoke constrained VLM review on ambiguous slots.
@@ -98,7 +98,7 @@ Right now, the repo is best understood as:
 - `src/cspd_stage3/`
   - `__init__.py`
   - `encode.py` — DINOv2 feature encoding + optional VAE latent encoding (Stage 3A)
-  - `cluster.py` — per-class clustering (K-Means or HDBSCAN) + caption diversity + optional VAE centroids (Stage 3B+3C)
+  - `cluster.py` — per-class HDBSCAN clustering + K-Means fallback/sub-clustering + medoid caption extraction (Stage 3B+3C)
   - `cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
 
 - `src/cspd_stage4/`
@@ -191,7 +191,7 @@ For implementation tracking in this repo, use the following stage view:
 ### Stage 3
 - visual/semantic mode discovery via latent clustering
 - encoding: VAE latents + CLIP text embeddings + DINOv2 CLS features
-- clustering: K-Means (baseline) or HDBSCAN (density-based mode discovery)
+- clustering: HDBSCAN mode discovery on DINOv2 features (K-Means is the internal fallback / sub-clustering path)
 - feature space: VAE latents (baseline) or DINOv2 features (better mode separation)
 - outputs: visual mode centroids/medoids, semantic mode mean embeddings, representative captions
 
@@ -849,66 +849,58 @@ Discover representative modes per class via DINOv2 clustering. Each mode's medoi
 ```
 Stage 3A: Encode
   images → DINOv2 (dinov2_vitb14) → CLS features (N, 768)
-  (optional: --encode-vae also saves VAE latents for mode guidance experiments)
+  (optional: --encode-vae also saves SDXL VAE latents, consumed only by
+   Stage 4 --set-level-selection feature_space=vae)
 
 Stage 3B: Cluster + Extract
-  per class:
-    K-Means: cluster on DINOv2 features, K = IPC
-    HDBSCAN: discover natural density modes, allocate IPC proportionally
+  per class: HDBSCAN discovers natural density modes, allocates IPC
+             proportionally; K-Means is used internally as the <=1-mode
+             fallback and as the sub-clustering strategy.
   per cluster:
-    medoid = sample closest to DINOv2 cluster centroid
-    representative_caption = medoid's canonical caption (default)
-    optional --diversify-captions: replace with most distinctive caption in cluster
+    medoid = real sample closest to the DINOv2 cluster centroid
+    representative_caption = medoid's canonical caption
 ```
 
 ### Main code
-- `src/cspd_stage3/encode.py` — DINOv2 feature encoding (optional VAE encoding)
-- `src/cspd_stage3/cluster.py` — per-class K-Means/HDBSCAN + medoid caption extraction
+- `src/cspd_stage3/encode.py` — DINOv2 feature encoding (optional SDXL VAE encoding)
+- `src/cspd_stage3/cluster.py` — per-class HDBSCAN clustering + K-Means fallback/sub-clustering + medoid caption extraction
 - `src/cspd_stage3/cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
 
 ### CLI usage
 ```bash
-# Recommended: encode once, cluster multiple times
+# Encode once
 cspd-stage3 encode \
   --dataset-root /path/to/ImageNette/train \
   --render-input /path/to/records.jsonl \
   --output-dir runs/stage3/.../encoded
 
-# HDBSCAN (current baseline)
+# Cluster (HDBSCAN is the only method; the flag was removed 2026-04-18)
 cspd-stage3 cluster \
   --encode-dir runs/stage3/.../encoded \
   --output-dir runs/stage3/.../modes_hdbscan \
-  --ipc 10 --cluster-method hdbscan
-
-# K-Means (also competitive)
-cspd-stage3 cluster \
-  --encode-dir runs/stage3/.../encoded \
-  --output-dir runs/stage3/.../modes_kmeans \
-  --ipc 10 --cluster-method kmeans
+  --ipc 10
 ```
 
 ### Clustering parameters
-- **--cluster-method**: `"kmeans"` (K=IPC) or `"hdbscan"` (density-based, proportional allocation)
 - **--min-cluster-size** (HDBSCAN): minimum points for a real cluster split. Default 15.
 - **--min-samples** (HDBSCAN): k-NN for core distance. Default 3.
-- **--pca-dim** (HDBSCAN): PCA dims, 0 to skip. Default 50 but 0 works well for DINOv2.
-- **--diversify-captions** (opt-in): greedy Jaccard-distance selection instead of medoid caption. Experimental — may hurt accuracy. Default OFF.
-- **--encode-vae** (Stage 3A): also compute VAE latents for mode guidance experiments. Default OFF.
+- **--pca-dim** (HDBSCAN): PCA dims, 0 to skip. Default 50. Reduces DINOv2 768-dim before HDBSCAN.
+- **--encode-vae** (Stage 3A): also compute SDXL VAE latents for Stage 4 set-level selection. Default OFF.
 
 ### HDBSCAN mode discovery flow
-1. Optional PCA dimensionality reduction
-2. HDBSCAN discovers natural density modes (no preset K)
+1. Optional PCA dimensionality reduction (seeded)
+2. HDBSCAN discovers natural density modes (no preset K; deterministic given input)
 3. Noise points assigned to nearest discovered mode
-4. If 0-1 modes found → fallback to K-Means
-5. If modes > IPC → farthest-point sampling to select IPC most diverse modes
-6. If modes ≤ IPC → proportional IPC allocation, sub-cluster large modes with K-Means
+4. If 0-1 modes found → fallback to seeded K-Means with K=IPC
+5. If modes > IPC → farthest-point sampling selects IPC most diverse modes; unselected mode members are absorbed into the nearest selected mode
+6. If modes ≤ IPC → proportional IPC allocation (every mode gets ≥1 slot); parents that receive >1 slot are sub-clustered with seeded K-Means
 7. Medoid caption from each final cluster is the representative caption
 
 ### DINOv2 encoding
 - Model: `torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")`
 - Input: images resized to 224×224, ImageNet normalization
 - Output: CLS token features (N, 768)
-- Purpose: DINOv2 produces semantically rich features with natural cluster structure, better suited for mode discovery than VAE latents (which are smooth and high-dimensional)
+- Purpose: DINOv2 produces semantically rich features with natural cluster structure, better suited for mode discovery than VAE latents (which are smooth and high-dimensional).
 
 ### Output artifacts
 ```text
@@ -916,17 +908,16 @@ runs/stage3/<output_dir>/
 ├── encoded/
 │   ├── dino_embeds.pt              # (N, 768) DINOv2 CLS features
 │   ├── vae_latents.pt              # (optional, if --encode-vae)
-│   └── encode_index.json           # per-sample metadata with provenance (feature extractor, resolution, etc.)
-└── modes_<method>/                 # e.g. modes_kmeans, modes_hdbscan
-    ├── mode_centroids.pt           # (optional, if VAE latents available) VAE centroids for mode guidance
+│   └── encode_index.json           # per-sample metadata + provenance
+└── modes_hdbscan/
     ├── modes_index.json            # per-mode metadata (captions, cluster_sizes, weight, density)
-    └── stage3_summary.json         # clustering method + hyperparameters + provenance
+    └── stage3_summary.json         # method + hyperparameters + provenance + per-class diagnostics
 ```
 
 ### Key design decisions
-- **DINOv2 for clustering** (architecture-agnostic 768-dim features)
-- **Medoid caption as default**: the real sample closest to cluster centroid contributes its canonical caption. Caption diversity selection was tested and found to underperform — kept as opt-in flag.
-- **IPC as K**: K-Means uses K=IPC; HDBSCAN proportionally allocates IPC across discovered modes with sub-clustering
+- **DINOv2 for clustering**: architecture-agnostic 768-dim features.
+- **Medoid caption**: the real sample closest to the cluster centroid contributes its canonical caption. Jaccard-distance "caption diversification" was tested and removed on 2026-04-18 (it hurt accuracy).
+- **HDBSCAN + internal K-Means**: HDBSCAN is the top-level method; K-Means remains as the fallback and as the sub-clustering strategy inside the HDBSCAN allocator.
 
 ---
 
