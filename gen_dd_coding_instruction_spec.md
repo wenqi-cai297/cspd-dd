@@ -31,7 +31,6 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - **Stage 1 extraction** is implemented and runnable.
 - **Stage 1 normalization** is implemented as a deterministic-first canonicalization step with inline constrained VLM review enabled by default.
 - **Stage 1 render** is implemented as a deterministic archetype-template renderer.
-- **Stage 1 enrich** (optional) is implemented: VLM expands template captions with image-specific visual details.
 - **Stage 2 training** is implemented for both SDXL LoRA (**primary, validated**) and SD v1.5 full fine-tuning (tested but worse). SDXL is the mainline backbone.
 - **Stage 2 inference / sampling** script is implemented for LoRA vs baseline A/B comparison.
 - **Stage 3 mode discovery** is implemented: DINOv2 encoding + per-class clustering (K-Means or HDBSCAN) + medoid caption extraction (default) or diversity selection (opt-in via `--diversify-captions`).
@@ -49,7 +48,7 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 ### Important practical reading
 Right now, the repo is best understood as:
 - a working **Prep** pipeline for class metadata,
-- a working **Stage 1** pipeline consisting of extraction → normalization → render → optional VLM enrichment,
+- a working **Stage 1** pipeline consisting of extraction → normalization → render,
 - a working **Stage 2 SDXL LoRA** training pipeline (primary) that delegates to the official diffusers trainer; SD v1.5 full fine-tuning also available but underperforms,
 - a working **Stage 2 inference** script for sampling from trained LoRA weights,
 - a working **Stage 3** pipeline for DINOv2 encoding, per-class clustering (K-Means or HDBSCAN), and medoid caption extraction,
@@ -85,7 +84,6 @@ Right now, the repo is best understood as:
   - `render_pipeline.py`
   - `render_utils.py`
   - `templates.py`
-  - `enrich.py` — VLM-based caption enrichment (Stage 1D)
   - `vlm/base.py`
   - `vlm/factory.py`
   - `vlm/json_utils.py`
@@ -238,12 +236,6 @@ For implementation tracking in this repo, use the following stage view:
 1. **Stage 1A**: structured semantic extraction from real images
 2. **Stage 1B**: deterministic-first normalization with optional inline VLM review for ambiguous cases
 3. **Stage 1C**: canonical semantic rendering from normalized Stage 1 records
-
-### Stage 1D (optional)
-- VLM-based caption enrichment: expand template captions with image-specific visual details
-- VLM sees the image + template caption, adds details (lighting, texture, spatial layout) while keeping the template structure
-- Enriched captions used for Stage 2 training → LoRA learns on richer captions → Stage 4 text2img generates from them (in-distribution)
-- CLI: `cspd-stage1 enrich --input records.jsonl --dataset-root ... --output records_enriched.jsonl`
 
 ### Stage 2
 - generative-backbone adaptation / canonical-semantic-space familiarization
@@ -766,61 +758,6 @@ The normalization rules in `configs/stage1/normalization/stage1_attribute_normal
 
 ---
 
-## 11.5 Stage 1D — VLM caption enrichment (optional)
-
-### Implementation status
-**Implemented in repo. Not yet evaluated end-to-end.**
-
-### Core purpose
-Expand template captions with image-specific visual details using a VLM. Solves the caption homogeneity problem: template captions within a class are too similar (same slot values), leading to homogeneous generated images in Stage 4.
-
-### Main code
-- `src/cspd_stage1/enrich.py`
-- CLI: `cspd-stage1 enrich`
-
-### How it works
-1. Reads Stage 1C `records.jsonl` (template captions)
-2. For each record, loads the original image + template caption
-3. VLM generates an enriched caption (under 40 words) that keeps the template structure but adds image-specific details
-4. Outputs `records_enriched.jsonl` with enriched `canonical_caption` and preserved `template_caption`
-
-### VLM prompt design
-```
-You are enriching a template caption with visual details from the image.
-
-Template: "{template_caption}"
-Subject: {class_name}
-
-Rewrite as ONE sentence (under 40 words) following these rules:
-- Keep "{class_name}" as the subject, do not rename it
-- Keep the template's basic content (color, pose, background, viewpoint)
-- ADD details visible in the image that the template lacks
-- Do NOT invent details not visible in the image
-- Do NOT use lists or multiple sentences
-```
-
-### Why this must be at Stage 1 level, not Stage 3
-Stage 3 recaption (enriching only the K medoid captions) was tested and degraded accuracy by ~5% because the enriched captions were out-of-distribution for the Stage 2 LoRA. By enriching at Stage 1, the LoRA trains on enriched captions, so Stage 4 text2img uses them in-distribution.
-
-### CLI usage
-```bash
-cspd-stage1 enrich \
-  --input runs/stage1/render/.../records.jsonl \
-  --dataset-root /path/to/ImageNette/train \
-  --output runs/stage1/render/.../records_enriched.jsonl
-```
-
-### Output
-- `records_enriched.jsonl` — same format as `records.jsonl`, with:
-  - `canonical_caption`: enriched caption (used by Stage 2+)
-  - `template_caption`: original template caption (preserved for reference)
-  - `enrichment_status`: "success" or "failed"
-
-### Resume support
-If interrupted, re-running skips already-enriched records. Use `--no-resume` to force re-enrichment.
-
----
-
 ## 12. Stage 2 — Diffusion model LoRA training
 
 ### Implementation status
@@ -1151,10 +1088,10 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 This is a hard methodological boundary. Do not write normalization rules, render drop rules, or prompt guidance that references specific class names or class-level statistics. The only place class identity is used is in Prep (class-to-archetype mapping). Everything downstream operates on archetype + slot name only.
 
 ### 16.2 All stages + evaluation are implemented
-The repo covers Prep, Stage 1 (1A+1B+1C+optional 1D enrichment), Stage 2 (SDXL LoRA + inference), Stage 3 (DINOv2 encoding + clustering + medoid caption, with optional diversity selection), Stage 4 (text2img distilled generation), and Evaluation (classifier training + accuracy measurement). FID evaluation is not yet automated.
+The repo covers Prep, Stage 1 (1A+1B+1C), Stage 2 (SDXL LoRA + inference), Stage 3 (DINOv2 encoding + clustering + medoid caption, with optional diversity selection), Stage 4 (text2img distilled generation), and Evaluation (classifier training + accuracy measurement). FID evaluation is not yet automated.
 
 ### 16.8 Do not enrich captions at Stage 3 level
-Stage 3 VLM recaption (enriching only medoid captions) was tested and degraded accuracy by ~5% because enriched captions are OOD for the LoRA trained on template captions. If captions need enrichment, do it at Stage 1D so the LoRA trains on them.
+Stage 3 VLM recaption (enriching only medoid captions) was tested and degraded accuracy by ~5% because enriched captions are out-of-distribution for the LoRA trained on template captions. If caption enrichment is ever revisited, it must be applied at Stage 1 so the LoRA trains on the same caption distribution Stage 4 generates from.
 
 ### 16.9 Caption format and LoRA training must stay in sync
 The LoRA can only generate well from captions in the same format it was trained on. Changing caption format in later stages without retraining the LoRA will degrade generation quality.
@@ -1243,7 +1180,7 @@ Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed 
 - **text2img at 1024 + guidance 9.0**: sharper, but human anatomy artifacts on "being held" captions; resolution mismatch with 512-trained LoRA
 - **img2img from medoid (strength=0.8)**: more diverse images but eval accuracy significantly worse than text2img
 - **Conclusion**: text2img > img2img for classifier training; K-Means > HDBSCAN for mode selection
-- **Stage 3 recaption experiment**: VLM re-captioned medoid images with free-form descriptions → accuracy dropped from ~62% to ~57%. Cause: enriched captions are OOD for the LoRA trained on template captions. Fix: enrich at Stage 1 level so LoRA trains on enriched captions (Stage 1D).
+- **Stage 3 recaption experiment**: VLM re-captioned medoid images with free-form descriptions → accuracy dropped from ~62% to ~57%. Cause: enriched captions are OOD for the LoRA trained on template captions. Not pursued further; Stage 1 caption distribution is the committed design.
 
 ### Stage 2 cosine LR training arc (2026-04-14 → 2026-04-15)
 - Added cosine LR, warmup=500, noise_offset=0.05, snr_gamma=5.0
