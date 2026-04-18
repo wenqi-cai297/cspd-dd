@@ -7,57 +7,33 @@ import json
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="CSPD Stage 4 CLI for distilled dataset generation"
-    )
+    parser = argparse.ArgumentParser(description="CSPD Stage 4 CLI for distilled dataset generation")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # --- generate ---
     gen_parser = subparsers.add_parser(
         "generate",
-        help="Generate distilled dataset from Stage 3 modes using Stage 2 LoRA backbone",
+        help="Generate the distilled dataset from Stage 3 modes using the Stage 2 LoRA",
     )
-    gen_parser.add_argument("--modes-dir", required=True, help="Directory with Stage 3 mode outputs (modes_index.json)")
-    gen_parser.add_argument("--output-dir", required=True, help="Directory for distilled dataset output")
-    gen_parser.add_argument("--lora-weights", default=None, help="Path to Stage 2 LoRA weights (.safetensors). Omit for baseline.")
-    gen_parser.add_argument("--model-name", default="stable-diffusion-v1-5/stable-diffusion-v1-5", help="Diffusion model (SD v1.5 or SDXL)")
-    gen_parser.add_argument("--num-inference-steps", type=int, default=50, help="Diffusion sampling steps")
-    gen_parser.add_argument("--guidance-scale", type=float, default=7.5, help="Classifier-free guidance scale")
-    gen_parser.add_argument("--seed", type=int, default=42, help="RNG seed")
-    gen_parser.add_argument("--device", default="cuda", help="Torch device")
-    gen_parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"], help="Weight dtype")
-    gen_parser.add_argument("--resolution", type=int, default=512, help="Output image resolution")
-    gen_parser.add_argument("--refiner-model", default=None, help="SDXL refiner model ID (e.g. stabilityai/stable-diffusion-xl-refiner-1.0). Adds detail/sharpness.")
-    gen_parser.add_argument("--refiner-strength", type=float, default=0.3, help="Refiner denoising strength (0-1). Lower=more detail, less change.")
+    gen_parser.add_argument("--modes-dir", required=True, help="Stage 3 output dir with modes_index.json")
+    gen_parser.add_argument("--output-dir", required=True, help="Output dir for the distilled dataset")
+    gen_parser.add_argument("--lora-weights", default=None,
+                            help="Stage 2 LoRA weights (.safetensors) or a full fine-tuned checkpoint dir. Omit for baseline SDXL.")
+    gen_parser.add_argument("--model-name", default="stabilityai/stable-diffusion-xl-base-1.0",
+                            help="Base SDXL model identifier")
+    gen_parser.add_argument("--num-inference-steps", type=int, default=50)
+    gen_parser.add_argument("--guidance-scale", type=float, default=7.5)
+    gen_parser.add_argument("--seed", type=int, default=42)
+    gen_parser.add_argument("--device", default="cuda")
+    gen_parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"])
+    gen_parser.add_argument("--resolution", type=int, default=512)
     gen_parser.add_argument("--visual-mode", default="none", choices=["none", "medoid"],
-                            help="'none' for text2img (recommended), 'medoid' for img2img from real medoid image")
+                            help="'none' for text2img (baseline) or 'medoid' for img2img from the real medoid image")
     gen_parser.add_argument("--strength", type=float, default=0.8,
-                            help="Img2img denoising strength (0-1). Ignored when visual-mode=none.")
-    gen_parser.add_argument("--mode-guidance-scale", type=float, default=0.0,
-                            help="Mode guidance strength (0=disabled, 0.1=MGD3 default). Steers generation toward VAE latent centroids.")
-    gen_parser.add_argument("--mode-guidance-stop-step", type=int, default=25,
-                            help="Stop mode guidance after this many steps (from start). Default 25 = 50%% of 50 steps, matching MGD3.")
-    gen_parser.add_argument("--num-candidates", type=int, default=1,
-                            help="Generate N candidates per mode and select the best (1=no selection, 10-20 recommended)")
-    gen_parser.add_argument("--candidate-beta", type=float, default=0.5,
-                            help="Diversity weight in candidate scoring. 0=pure discriminative, higher=more diversity.")
-    gen_parser.add_argument("--candidate-probe-dir", default=None,
-                            help="Directory with DINOv2 features for building class prototypes (default: auto-detect from modes_dir/../encoded)")
-    gen_parser.add_argument("--eval-representativeness", action="store_true",
-                            help="After generation, evaluate set-level representativeness (MMD + coverage) per class")
-    gen_parser.add_argument("--set-level-selection", action="store_true",
-                            help="Phase 3 refinement: after generating N candidates per mode, greedy-pick "
-                                 "one per mode to minimize set-level distance to the real class distribution. "
-                                 "Requires --num-candidates > 1 and --visual-mode none.")
-    gen_parser.add_argument("--set-objective", default="moments", choices=["moments", "mmd"],
-                            help="Objective for set-level selection: 'moments' (D3HR-style mean+std+0.1*skew) "
-                                 "or 'mmd' (DAP linear kernel). Default: moments.")
-    gen_parser.add_argument("--set-feature-space", default="vae", choices=["vae", "dinov2"],
-                            help="Feature space for set-level moment/MMD matching. "
-                                 "'vae' (default): SDXL VAE latents (model-native space, "
-                                 "matches D3HR's in-latent approach; requires Stage 3 ran with --encode-vae). "
-                                 "'dinov2': DINOv2 CLS features (proxy space, L2-normalized; "
-                                 "regressed -2.8%% on first A/B).")
+                            help="Img2img denoising strength; only used when --visual-mode medoid")
+    gen_parser.add_argument("--refiner-model", default=None,
+                            help="Optional SDXL refiner model id (e.g. stabilityai/stable-diffusion-xl-refiner-1.0)")
+    gen_parser.add_argument("--refiner-strength", type=float, default=0.3,
+                            help="Refiner denoising strength (0-1); lower = less change, more detail")
 
     return parser
 
@@ -84,15 +60,6 @@ def main() -> None:
             visual_mode=args.visual_mode,
             refiner_model=args.refiner_model,
             refiner_strength=args.refiner_strength,
-            mode_guidance_scale=args.mode_guidance_scale,
-            mode_guidance_stop_step=args.mode_guidance_stop_step,
-            num_candidates=args.num_candidates,
-            candidate_beta=args.candidate_beta,
-            candidate_probe_dir=args.candidate_probe_dir,
-            eval_representativeness=args.eval_representativeness,
-            set_level_selection=args.set_level_selection,
-            set_objective=args.set_objective,
-            set_feature_space=args.set_feature_space,
         )
         print(json.dumps({
             "output_dir": result.output_dir,

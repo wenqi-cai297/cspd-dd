@@ -191,7 +191,7 @@ for IPC in $IPC_LIST; do
   echo "############################################################"
 
   # --- Stage 3B: Cluster ---
-  MODES_DIR="runs/stage3/${DATASET_LABEL}/ipc${IPC}/modes_kmeans"
+  MODES_DIR="runs/stage3/${DATASET_LABEL}/ipc${IPC}/modes_hdbscan"
   if [[ -f "${MODES_DIR}/modes_index.json" ]]; then
     echo "[IPC=$IPC] Stage 3B: modes found at ${MODES_DIR}, skipping."
   else

@@ -37,7 +37,7 @@ for IPC in 10; do
   echo "############################################################"
 
   # Stage 3B: cluster
-  MODES_DIR="runs/stage3/ImageNette_train/ipc${IPC}/modes_kmeans"
+  MODES_DIR="runs/stage3/ImageNette_train/ipc${IPC}/modes_hdbscan"
   echo "[IPC=$IPC] Stage 3 cluster → $MODES_DIR"
   cspd-stage3 cluster \
     --encode-dir "$ENCODE_DIR" \

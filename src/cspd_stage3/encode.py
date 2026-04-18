@@ -1,10 +1,8 @@
 """Stage 3A — Encode images to DINOv2 features for clustering.
 
-DINOv2 CLS features are the primary output (used by Stage 3B clustering).
-SDXL VAE latents are an optional secondary output (`--encode-vae`) consumed
-only by Stage 4 `--set-level-selection` when feature_space=vae. Text
-encoding is not needed because Stage 4 uses text2img generation with
-representative captions passed as plain strings.
+Only DINOv2 CLS features are needed: Stage 3B clusters on them and Stage 4
+text2img consumes representative captions as plain strings. SDXL VAE encoding
+was removed 2026-04-18 along with the set-level selection code that used it.
 """
 
 from __future__ import annotations
@@ -26,14 +24,12 @@ class EncodeResult:
     """Result of encoding a dataset split."""
 
     dino_embeds_path: str      # .pt file with stacked DINOv2 features
-    vae_latents_path: str | None  # .pt file with stacked VAE latents (if encode_vae=True)
     index_path: str            # .json mapping index → record metadata
     num_samples: int
     dino_embed_dim: int
 
 
 def _load_image(path: str | Path, resolution: int) -> Image.Image:
-    """Load an image as PIL RGB at target resolution."""
     img = Image.open(path).convert("RGB")
     img = img.resize((resolution, resolution), Image.LANCZOS)
     return img
@@ -55,10 +51,10 @@ def _load_render_records(render_input: str | Path) -> dict[str, dict[str, Any]]:
 
 
 def _load_pairs_index(render_input: str | Path, dataset_root: str | Path) -> list[dict[str, Any]]:
-    """Build a list of (image_path, caption, class, archetype, record_id) from render records.
+    """Build the (image_path, caption, class, archetype, record_id) list from render records.
 
-    Reads directly from Stage 1C render records.jsonl. Each record has a record_id
-    of the form class_name_raw::relative_path, which is used to reconstruct the
+    Reads Stage 1C render records.jsonl. Each record has a record_id of the
+    form ``class_name_raw::relative_path``, which is used to reconstruct the
     full image path under dataset_root.
     """
     dataset_root = Path(dataset_root)
@@ -68,7 +64,6 @@ def _load_pairs_index(render_input: str | Path, dataset_root: str | Path) -> lis
     for record_id, row in render_records.items():
         if row.get("render_status") != "success":
             continue
-        # record_id = "class_name_raw::relative_path" e.g. "n01440764::n01440764/img.JPEG"
         parts = record_id.split("::", 1)
         if len(parts) != 2:
             continue
@@ -76,7 +71,6 @@ def _load_pairs_index(render_input: str | Path, dataset_root: str | Path) -> lis
         relative_path = parts[1]
         image_path = dataset_root / relative_path
         if not image_path.exists():
-            # Try sample_id as fallback
             sample_id = row.get("sample_id", "")
             if sample_id:
                 image_path = dataset_root / sample_id
@@ -90,7 +84,6 @@ def _load_pairs_index(render_input: str | Path, dataset_root: str | Path) -> lis
             "class_id": int(row.get("class_id", 0) or 0),
             "archetype": row.get("archetype", ""),
         })
-    # Sort by record_id for deterministic ordering
     pairs.sort(key=lambda p: p["record_id"])
     for i, p in enumerate(pairs):
         p["index"] = i
@@ -106,10 +99,8 @@ def encode_dataset(
     resolution: int = 512,
     batch_size: int = 8,
     device: str = "cuda",
-    encode_vae: bool = False,
-    vae_model_name: str = "stabilityai/stable-diffusion-xl-base-1.0",
 ) -> EncodeResult:
-    """Encode images to DINOv2 features for clustering, optionally SDXL VAE latents for Stage 4 set-level selection.
+    """Encode images to DINOv2 CLS features for Stage 3B clustering.
 
     Args:
         dataset_root: ImageFolder dataset root (same as Stage 2).
@@ -118,62 +109,20 @@ def encode_dataset(
         resolution: Image resolution for loading.
         batch_size: Encoding batch size.
         device: Torch device.
-        encode_vae: If True, also encode images to SDXL VAE latents (consumed by Stage 4 --set-level-selection feature_space=vae).
-        vae_model_name: SDXL model identifier for VAE loading.
 
     Returns:
         EncodeResult with paths to features and metadata.
     """
-    import numpy as np
-
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build pairs index
     print("[Stage 3A] Building pairs index...")
     pairs = _load_pairs_index(render_input, dataset_root)
     if not pairs:
         raise ValueError("No pairs found. Check dataset_root and render_input paths.")
     print(f"[Stage 3A] Found {len(pairs)} paired samples")
 
-    # --- VAE encoding (optional, for Stage 4 set-level selection) ---
-    vae_latents_path = None
-    if encode_vae:
-        from diffusers import AutoencoderKL
-
-        print(f"[Stage 3A] Loading VAE from {vae_model_name}...")
-        vae = AutoencoderKL.from_pretrained(vae_model_name, subfolder="vae", torch_dtype=torch.float32).to(device)
-        vae.eval()
-        vae_scaling_factor = vae.config.scaling_factor
-
-        print(f"[Stage 3A] Encoding {len(pairs)} images to VAE latents (float32)...")
-        all_latents = []
-        for i in tqdm(range(0, len(pairs), batch_size), desc="VAE encode"):
-            batch_pairs = pairs[i : i + batch_size]
-            images = [_load_image(p["image_path"], resolution) for p in batch_pairs]
-            tensors = []
-            for img in images:
-                arr = np.array(img, dtype=np.float32) / 255.0
-                t = torch.from_numpy(arr).permute(2, 0, 1)  # HWC → CHW
-                t = t * 2.0 - 1.0
-                tensors.append(t)
-            pixel_values = torch.stack(tensors).to(device, dtype=torch.float32)
-            latent_dist = vae.encode(pixel_values).latent_dist
-            latents = latent_dist.sample() * vae_scaling_factor
-            all_latents.append(latents.cpu().float())
-
-        all_latents = torch.cat(all_latents, dim=0)  # (N, 4, H/8, W/8)
-        print(f"[Stage 3A] VAE latent shape: {list(all_latents.shape)}")
-
-        vae_latents_path_obj = output_dir / "vae_latents.pt"
-        torch.save(all_latents, vae_latents_path_obj)
-        vae_latents_path = str(vae_latents_path_obj)
-
-        del vae
-        torch.cuda.empty_cache()
-
-    # --- DINOv2 encoding ---
-    print(f"[Stage 3A] Loading DINOv2 (dinov2_vitb14)...")
+    print("[Stage 3A] Loading DINOv2 (dinov2_vitb14)...")
     dino_model = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
     dino_model = dino_model.to(device)
     dino_model.eval()
@@ -201,13 +150,10 @@ def encode_dataset(
     del dino_model
     torch.cuda.empty_cache()
 
-    # Save tensors
     dino_embeds_path = output_dir / "dino_embeds.pt"
     index_path = output_dir / "encode_index.json"
-
     torch.save(all_dino_embeds, dino_embeds_path)
 
-    # Save index with full provenance metadata
     index_data = {
         "num_samples": len(pairs),
         "encoding": {
@@ -217,8 +163,6 @@ def encode_dataset(
             "dino_normalization": "ImageNet (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])",
             "dino_output_dim": int(all_dino_embeds.shape[1]),
             "dino_embed_shape": list(all_dino_embeds.shape),
-            "vae_encoded": encode_vae,
-            "vae_model": vae_model_name if encode_vae else None,
             "image_load_resolution": resolution,
         },
         "source": {
@@ -232,7 +176,6 @@ def encode_dataset(
     print(f"[Stage 3A] Encoding complete. Saved to {output_dir}")
     return EncodeResult(
         dino_embeds_path=str(dino_embeds_path),
-        vae_latents_path=vae_latents_path,
         index_path=str(index_path),
         num_samples=len(pairs),
         dino_embed_dim=all_dino_embeds.shape[-1],

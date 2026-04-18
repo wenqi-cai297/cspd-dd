@@ -34,7 +34,7 @@ Do not keep stale "should do" descriptions here when the code says otherwise.
 - **Stage 2 training** is implemented for SDXL LoRA (mainline, 63.27% baseline). Other families are out of scope.
 - **Stage 2 inference / sampling** script is implemented for LoRA vs baseline A/B comparison.
 - **Stage 3 mode discovery** is implemented: DINOv2 encoding + per-class HDBSCAN clustering (with internal K-Means fallback / sub-clustering) + medoid caption extraction.
-- **Stage 4 distilled dataset generation** is implemented: text-to-image generation with optional multi-candidate selection — per-mode prototype+diversity (Phase 2) or set-level greedy matching in VAE or DINOv2 feature space (Phase 3) — plus set-level representativeness evaluation and legacy img2img/mode guidance paths.
+- **Stage 4 distilled dataset generation** is implemented: SDXL LoRA text2img by default (current baseline) with an optional img2img-from-medoid path and an optional SDXL refiner pass.
 - **Evaluation** is implemented: train classifier (ConvNet-6/ResNet-18/ResNetAP-10) on distilled dataset, evaluate on real val set.
 - Supporting server scripts, metadata prep, mock/regression runs, and full workflow wiring exist.
 
@@ -103,10 +103,7 @@ Right now, the repo is best understood as:
 
 - `src/cspd_stage4/`
   - `__init__.py`
-  - `generate.py` — text2img distilled generation with multi-candidate selection, optional mode guidance/refiner/img2img
-  - `candidate_selection.py` — architecture-agnostic candidate scoring (prototype similarity + diversity, no proxy classifier)
-  - `representativeness.py` — set-level representativeness scoring (MMD + coverage) and gap detection
-  - `mode_guidance.py` — EulerModeGuidanceScheduler for latent centroid guidance (experimental, see 16.10)
+  - `generate.py` — text2img distilled generation with optional img2img-from-medoid and optional SDXL refiner
   - `cli.py` — CLI with `generate` subcommand
 
 - `src/cspd_eval/`
@@ -153,7 +150,6 @@ Right now, the repo is best understood as:
 - `scripts/eval/run_eval_pipeline.sh` — train classifier + evaluate
 - `scripts/pipelines/run_full_pipeline.sh` — end-to-end pipeline with resume support (Stage 1→2→3→4→Eval)
 - `scripts/pipelines/run_ipc_sweep.sh` — IPC sweep for Stage 3+4+Eval
-- `scripts/pipelines/run_candidate_sweep.sh` — IPC sweep with multi-candidate selection (10 candidates/mode)
 
 ### Stage 2 output-dir rule (must remember)
 - The repo-standard Stage 2 run root is:
@@ -849,8 +845,7 @@ Discover representative modes per class via DINOv2 clustering. Each mode's medoi
 ```
 Stage 3A: Encode
   images → DINOv2 (dinov2_vitb14) → CLS features (N, 768)
-  (optional: --encode-vae also saves SDXL VAE latents, consumed only by
-   Stage 4 --set-level-selection feature_space=vae)
+
 
 Stage 3B: Cluster + Extract
   per class: HDBSCAN discovers natural density modes, allocates IPC
@@ -862,7 +857,7 @@ Stage 3B: Cluster + Extract
 ```
 
 ### Main code
-- `src/cspd_stage3/encode.py` — DINOv2 feature encoding (optional SDXL VAE encoding)
+- `src/cspd_stage3/encode.py` — DINOv2 feature encoding
 - `src/cspd_stage3/cluster.py` — per-class HDBSCAN clustering + K-Means fallback/sub-clustering + medoid caption extraction
 - `src/cspd_stage3/cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
 
@@ -885,7 +880,7 @@ cspd-stage3 cluster \
 - **--min-cluster-size** (HDBSCAN): minimum points for a real cluster split. Default 15.
 - **--min-samples** (HDBSCAN): k-NN for core distance. Default 3.
 - **--pca-dim** (HDBSCAN): PCA dims, 0 to skip. Default 50. Reduces DINOv2 768-dim before HDBSCAN.
-- **--encode-vae** (Stage 3A): also compute SDXL VAE latents for Stage 4 set-level selection. Default OFF.
+
 
 ### HDBSCAN mode discovery flow
 1. Optional PCA dimensionality reduction (seeded)
@@ -907,7 +902,6 @@ cspd-stage3 cluster \
 runs/stage3/<output_dir>/
 ├── encoded/
 │   ├── dino_embeds.pt              # (N, 768) DINOv2 CLS features
-│   ├── vae_latents.pt              # (optional, if --encode-vae)
 │   └── encode_index.json           # per-sample metadata + provenance
 └── modes_hdbscan/
     ├── modes_index.json            # per-mode metadata (captions, cluster_sizes, weight, density)
@@ -937,42 +931,26 @@ Stage 3 mode → representative_caption (from medoid)
 ```
 
 ### Main code
-- `src/cspd_stage4/generate.py` — generation orchestration (text2img default, optional img2img/mode guidance)
-- `src/cspd_stage4/candidate_selection.py` — multi-candidate scoring (prototype + diversity)
-- `src/cspd_stage4/representativeness.py` — set-level MMD/moments/coverage evaluation
-- `src/cspd_stage4/mode_guidance.py` — EulerModeGuidanceScheduler (experimental, see 16.11)
-- `src/cspd_stage4/cli.py` — CLI with `generate` subcommand
+- `src/cspd_stage4/generate.py` — generation orchestration (text2img default, optional img2img-from-medoid, optional SDXL refiner)
+- `src/cspd_stage4/cli.py` — CLI with the `generate` subcommand
 - `scripts/stage4/run_stage4_pipeline.sh` — server pipeline script
 
 ### CLI usage
 ```bash
-# Default baseline: SDXL LoRA text2img
 cspd-stage4 generate \
   --modes-dir runs/stage3/.../modes_hdbscan \
   --lora-weights runs/stage2/.../checkpoint-7254/pytorch_lora_weights.safetensors \
-  --model-name stabilityai/stable-diffusion-xl-base-1.0 \
-  --output-dir runs/stage4/.../output \
-  --visual-mode none
+  --output-dir runs/stage4/.../output
 ```
 
 ### Key parameters
-- **--visual-mode**: `"none"` (recommended) for pure text2img. `"medoid"` for img2img from real medoid image.
-- **--strength**: Img2img denoising strength. Default `0.8`. Ignored when visual-mode=none.
-- **--resolution**: Output image resolution. Default `512` (matches Stage 2 LoRA training resolution).
+- **--visual-mode**: `"none"` (default, baseline) for text2img. `"medoid"` for img2img starting from the real medoid image.
+- **--strength**: Img2img denoising strength. Default `0.8`. Only used when `--visual-mode medoid`.
+- **--resolution**: Output image resolution. Default `512` (matches the Stage 2 LoRA training resolution).
 - **--guidance-scale**: CFG strength. Default `7.5`.
 - **--num-inference-steps**: Diffusion sampling steps. Default `50`.
-- **--refiner-model**: Optional SDXL refiner model ID. When set, runs refiner pass after base generation for added detail/sharpness.
-- **--refiner-strength**: Denoising strength for refiner pass (0-1). Default `0.3`.
-- **--mode-guidance-scale**: Mode guidance strength. Default `0.0` (disabled). Experimental — incompatible with detailed captions (see 16.11).
-- **--mode-guidance-stop-step**: Stop guidance after N steps. Default `25`.
-- **--num-candidates**: Generate N candidates per mode, select the best by prototype similarity + diversity scoring. Default `1` (no selection). Recommended `10-20`.
-- **--candidate-beta**: Diversity weight relative to prototype score. Default `0.5`. 0=pure prototype faithfulness, higher=more diversity. IPC-dependent: 0.3 for IPC=10, 0.5 for IPC=20, 0.7 for IPC=50.
-- **--candidate-probe-dir**: Directory with DINOv2 features for building class prototypes (default: auto-detect).
-- **--eval-representativeness**: After generation, evaluate set-level representativeness per class: MMD (linear kernel, per DAP), moment matching (mean+std+skewness, per D³HR), and coverage. Diagnostic only. Saves `representativeness_report.json`.
-- **--set-level-selection**: Phase 3 refinement. After generating N candidates per mode (`--num-candidates > 1`), greedy-pick one per mode to minimize set-level distance to the real class distribution. Replaces the per-mode prototype+diversity scoring (Phase 2) with D³HR-style set optimization, while preserving Stage 3's 1-per-mode structure. Requires `--visual-mode none`. Saves `set_level_selection_report.json`.
-- **--set-objective**: `"moments"` (default, D³HR mean+std+0.1·skew) or `"mmd"` (DAP linear kernel). Only used when `--set-level-selection` is set.
-- **--set-feature-space**: `"vae"` (default — SDXL VAE latents, flattened (4,64,64) → 16384-dim, no L2-normalization; model-native space, analogous to D³HR's in-latent approach; requires Stage 3 ran with `--encode-vae`) or `"dinov2"` (768-dim, L2-normalized; a proxy space which regressed −2.8% on first A/B, kept for ablation).
-- **--semantic-mode** (hidden, default `"caption"`): `"caption"` uses representative caption text as prompt. `"embedding"` uses mean text embedding (legacy baseline, blurry).
+- **--refiner-model**: Optional SDXL refiner model ID. When set, runs a refiner pass after the base generation for added detail / sharpness.
+- **--refiner-strength**: Denoising strength for the refiner pass (0-1). Default `0.3`.
 
 ### Output artifacts
 ```text
@@ -982,30 +960,28 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 │   │   ├── <class_raw>_mode000.png
 │   │   └── ...
 │   └── ...
-├── representativeness_report.json  # (if --eval-representativeness)
 ├── distilled_metadata.json    # per-image metadata with mode info
 └── stage4_summary.json        # generation summary
 ```
 
 ### Design decisions
-- **Text2img is the recommended default**: eval showed text2img significantly outperforms img2img for classifier training accuracy. Text2img produces more "prototypical" class representations even though images look more homogeneous to the human eye.
-- **Img2img from medoid available as alternative**: `--visual-mode medoid --strength 0.8` preserves diversity from real images but eval accuracy is lower.
-- **Per-image seeding, shared base per round (2026-04-18, after a brief detour on 2026-04-17)**: image `i` uses `torch.Generator().manual_seed(base_seed + mode_idx)`. The 3×3 protocol varies `base_seed` across three rounds while keeping the within-round per-image `+mode_idx` pattern. This lets the `base_seed=42` round reproduce the historical 62.33% baseline exactly while the three rounds capture generation variance. (An earlier change shared one seed across all 100 images within a round; reverted so the eval protocol can be compared against pre-2026-04-18 numbers.) Multi-candidate paths use `base_seed + mode_idx * num_candidates + cand_idx`.
-- **ImageFolder output structure**: images organized by class for downstream classifier training
-- **SDXL refiner**: optional second pass that adds detail/sharpness after base generation
+- **Text2img is the default**: eval showed text2img significantly outperforms img2img for classifier training accuracy. Img2img kept for ablation only.
+- **Per-image seeding, shared base per round**: image `i` uses `torch.Generator().manual_seed(base_seed + mode_idx)`. The 3×3 protocol varies `base_seed` across three rounds; the `base_seed=42` round reproduces the pre-3×3 baseline dataset byte-for-byte.
+- **ImageFolder output structure**: images organized by class for downstream classifier training.
+- **SDXL refiner**: optional second pass that can be chained to either text2img or img2img.
 
-### Evolution of generation strategy
+### Evolution of generation strategy (historical; cleanup summary at end)
 1. img2img + mean embedding → all-black (custom loop incompatible with SDXL)
-2. img2img + mean embedding + official pipeline → blurry (averaged embedding not real caption)
+2. img2img + mean embedding + official pipeline → blurry (averaged embedding not a real caption)
 3. img2img + representative caption → quality OK but Stage 2 vs 4 mismatch
 4. text2img + representative caption → matches Stage 2 inference, best eval accuracy
-5. img2img from medoid + representative caption → more diverse but eval accuracy significantly worse
-6. text2img + caption diversity selection (Jaccard greedy) → tested, hurt accuracy; kept as opt-in only
-7. text2img + mode guidance (MGD³-style) → failed: detailed captions dominate, no usable sweet spot (see 16.11)
-8. text2img + multi-candidate selection, per-mode (DINOv2 prototype + diversity) → tested, did not beat single-medoid baseline at IPC=10
-9. **text2img + HDBSCAN + medoid caption, 3×3 protocol** → current baseline (63.27% ± 0.19 on ImageNette IPC=10, best-of-3 per seed across 3 paired-seed rounds; 2026-04-18)
-10. text2img + multi-candidate selection, **set-level moments, DINOv2 space, L2-norm, 1-per-mode, N=10, IPC=10** → **59.53% ± 0.38, −2.80% vs baseline**; regression consistent across 3 repeats
-11. text2img + multi-candidate selection, **set-level moments, VAE latent space (SDXL-native, 16384-dim, no L2-norm), 1-per-mode, N=10, IPC=10** → **59.07% ± 0.25, −3.26% vs baseline**. Feature-space swap did not rescue the regression → objective itself is the bottleneck at IPC=10
+5. img2img from medoid + representative caption → more diverse but eval accuracy significantly worse (kept as `--visual-mode medoid` for ablation)
+6. text2img + caption diversity selection (Jaccard greedy) → hurt accuracy; **code removed 2026-04-18**
+7. text2img + mode guidance (MGD³-style) → failed: detailed captions dominate, no usable sweet spot (see 16.11); **code removed 2026-04-18**
+8. text2img + multi-candidate selection, per-mode (DINOv2 prototype + diversity) → did not beat single-medoid baseline at IPC=10; **code removed 2026-04-18**
+9. **text2img + HDBSCAN + medoid caption, 3×3 protocol** → current baseline (63.27% ± 0.19 on ImageNette IPC=10)
+10. text2img + multi-candidate set-level moments, DINOv2 L2-normalized → 59.53% ± 0.38 (−2.80%); **code removed 2026-04-18**
+11. text2img + multi-candidate set-level moments, VAE latents (16384-dim, no L2-norm) → 59.07% ± 0.25 (−3.26%); **code removed 2026-04-18**
 
 ---
 
@@ -1048,14 +1024,14 @@ Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditionin
 
 ## 17. Immediate next implementation work
 
-Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed at IPC=10):
+Given current repo state (as of 2026-04-18, after the set-level line was closed and its code removed):
 
 1. **IPC sweep on 3×3 baseline (in progress)**
    - Protocol (established 2026-04-18): for each seed in {42, 123, 456}, re-cluster Stage 3 → Stage 4 generate with `base_seed + mode_idx` per image → eval × 3 repeats. Aggregation: best-of-3 per seed, then mean/std/min/max across 3 per-seed bests.
    - **IPC=10 done: 63.27% ± 0.19** (63.4 / 63.0 / 63.4; replaces old 62.33).
    - **IPC=20 and IPC=50 pending**. Run: `IPC=20 bash scripts/pipelines/run_baseline_3x3.sh` and `IPC=50 bash scripts/pipelines/run_baseline_3x3.sh`.
    - Compare against published IPC-scaling baselines (MGD³, DD-VLCP, RDED, SRe2L).
-   - At IPC=20/50, also re-test set-level selection (`--set-level-selection`) — more images per class may change the trade-off that hurt it at IPC=10.
+
 
 2. **Multi-architecture benchmarking**
    - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10), 3 repeats
@@ -1071,7 +1047,7 @@ Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed 
    - The biggest research-value direction remaining after Phase 2/3 exhausted at IPC=10
 
 ### Closed (for now)
-- **Phase 3 set-level candidate selection at IPC=10** — both DINOv2 and VAE feature spaces regressed (−2.80% and −3.26%). Code remains in tree (`--set-level-selection`, `--set-feature-space {vae,dinov2}`, `--set-objective {moments,mmd}`) for possible re-test at higher IPC.
+- **Phase 2 multi-candidate selection**, **Phase 3 set-level selection**, and **MGD³-style mode guidance** were all tested, all regressed vs the single-medoid baseline at IPC=10, and their code was removed on 2026-04-18. See §18 experiment log for the numbers.
 
 ---
 
@@ -1151,7 +1127,7 @@ Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed 
   - Gap detection: `find_gap_modes()` identifies which modes need regeneration
 - **Enriched mode metadata**: Stage 3 now outputs per-mode weight, density, DINOv2 centroid
 - **Paper alignment verified**: D³HR source code (GitHub), DAP paper (arXiv), RDED source code (GitHub)
-- **Status**: Phase 2 alone did not improve on the single-medoid baseline at IPC=10. Phase 3 scoring path is diagnostic-only (`--eval-representativeness`).
+- **Status**: Phase 2 alone did not improve on the single-medoid baseline at IPC=10. Phase 3 scoring path was kept briefly as a diagnostic (`--eval-representativeness`) but removed with the rest of Phase 3 on 2026-04-18.
 
 ### Phase 3 refinement — set-level candidate selection (2026-04-17)
 - **Motivation**: Phase 3 scoring alone was unused in the mainline. Upgraded to a *refinement* loop that couples Phase 2 and Phase 3: generate N candidates per mode, then pick the set that best matches the real class distribution.
@@ -1169,7 +1145,7 @@ Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed 
 - **Interpretation**: both regressions are consistent (std ≤ 0.38 across 3 repeats). Since the feature space swap addressed the two a-priori most-likely causes (proxy-space mismatch + L2-normalization wiping magnitude) and the result did **not** move toward the baseline, the bottleneck is **not** the feature space. The most likely remaining explanation is the objective itself:
   - Medoid baseline: each mode contributes the real image closest to its own cluster centroid → diversity comes from the mode structure (inter-mode variation).
   - Set-level moment matching: greedy pulls the whole set toward the *class* mean/std. The first pick anchors near the class centroid, later picks compensate but the inter-mode spread gets smoothed out, producing a more homogeneous set than medoid → worse classifier training signal.
-- **Status — set-level line closed at IPC=10**. Per §17 decision rule ("still regresses → abandon"), stop iterating on this approach at IPC=10. Code stays in tree (`--set-level-selection`, both `--set-feature-space` variants) for future IPC=20/50 experiments where more images per class may change the trade-off. Next mainline: IPC sweep on the HDBSCAN + medoid baseline.
+- **Status — set-level line closed and code removed 2026-04-18**. Both feature spaces regressed at IPC=10, the feature-space swap did not change direction, and the objective itself (greedy class-mean matching) was judged harmful to inter-mode diversity. `representativeness.py` / `candidate_selection.py` / `mode_guidance.py` deleted from the repo along with the corresponding CLI flags.
 
 ### Current best configuration (as of 2026-04-18)
 - **Stage 2**: SDXL rank=64 LoRA, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, epoch 9 (checkpoint-7254)
@@ -1184,7 +1160,7 @@ Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed 
   - Multi-candidate selection with DINOv2 probe/prototype doesn't beat baseline (Phase 2)
   - Multi-candidate **set-level** selection with D³HR moments **regresses** in both DINOv2 space (59.53% ± 0.38, −2.80%) and VAE latent space (59.07% ± 0.25, −3.26%) at IPC=10. Feature-space swap did not change the direction → the objective itself (greedy class-mean matching) over-smooths inter-mode diversity at low IPC (Phase 3, 2026-04-17)
   - SD v1.5 full fine-tuning underperforms SDXL LoRA (see 16.10)
-- **Eval**: mode_guidance protocol — RRC → ToTensor → HFlip → custom ColorJitter → Lighting → Normalize
+- **Eval**: standard protocol — RRC → ToTensor → HFlip → custom ColorJitter → Lighting → Normalize
 
 ### Server environment
 - Path: `/media/4T_HDD/cai/cspd-dd/cspd-dd`

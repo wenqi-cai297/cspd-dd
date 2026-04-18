@@ -25,6 +25,8 @@ set -euo pipefail
 #   BASELINE_SEEDS="42 123 456"   (override to change seeds; paired across stages)
 #   EVAL_REPEAT=3
 
+# Legacy directory name from when we also encoded VAE latents. Only
+# dino_embeds.pt + encode_index.json are consumed now.
 ENCODE_DIR="runs/stage3/ImageNette_train/encoded_with_vae"
 LORA="runs/stage2/train/ImageNette_train/stabilityai_stable-diffusion-xl-base-1.0/2026-04-14_181645/official_output/checkpoint-7254/pytorch_lora_weights.safetensors"
 VAL_DIR="/media/4T_HDD/cai/datasets/ImageNette/val"
@@ -86,7 +88,6 @@ for SEED in $SEEDS; do
       --encode-dir "$ENCODE_DIR" \
       --output-dir "$MODES_DIR" \
       --ipc "$IPC" \
-      --cluster-method hdbscan \
       --seed "$SEED"
   fi
 
