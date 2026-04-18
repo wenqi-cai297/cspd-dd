@@ -160,7 +160,12 @@ LORA_WEIGHTS=""
 # Estimate steps/epoch for checkpoint path derivation
 NUM_PAIRS="$(wc -l < "$RENDER_INPUT" 2>/dev/null | tr -d ' ' || echo 0)"
 if [[ "$NUM_PAIRS" -lt 1 ]]; then NUM_PAIRS=1; fi
-STEPS_PER_EPOCH=$(( NUM_PAIRS / (STAGE2_BATCH_SIZE * STAGE2_NUM_PROCESSES) ))
+# Steps-per-epoch with ceiling division (accelerate + diffusers pads the
+# last batch rather than dropping it, so NUM_PAIRS=12894 with batch=8 and
+# num_processes=2 gives 806 steps/epoch, not 805). Getting this exact
+# matters for the checkpoint path derivation below.
+EFFECTIVE_BATCH=$(( STAGE2_BATCH_SIZE * STAGE2_NUM_PROCESSES ))
+STEPS_PER_EPOCH=$(( (NUM_PAIRS + EFFECTIVE_BATCH - 1) / EFFECTIVE_BATCH ))
 if [[ $STEPS_PER_EPOCH -lt 1 ]]; then STEPS_PER_EPOCH=100; fi
 TARGET_STEP=$(( STEPS_PER_EPOCH * STAGE2_BEST_EPOCH ))
 
