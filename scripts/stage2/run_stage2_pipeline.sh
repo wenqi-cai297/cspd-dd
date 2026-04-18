@@ -111,7 +111,6 @@ TRAIN_CMD=(
   --render-input "$RENDER_INPUT"
   --output-dir "$OUTPUT_DIR"
   --backbone-name "$BACKBONE_NAME"
-  --training-parameterization lora
   --adapter-rank "$RANK"
   --batch-size "$BATCH_SIZE"
   --epochs "$EPOCHS"

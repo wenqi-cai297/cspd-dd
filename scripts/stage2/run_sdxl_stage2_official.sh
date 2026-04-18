@@ -113,7 +113,6 @@ CMD=(
   --render-input "$RENDER_INPUT"
   --output-dir "$OUTPUT_DIR"
   --backbone-name "$BACKBONE_NAME"
-  --training-parameterization lora
   --batch-size "$BATCH_SIZE"
   --epochs "$EPOCHS"
   --resolution 512
