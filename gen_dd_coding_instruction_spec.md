@@ -830,7 +830,7 @@ If interrupted, re-running skips already-enriched records. Use `--no-resume` to 
 Train the diffusion model's UNet so it learns to recognize our Stage 1 canonical captions. Training pairs are `(real image, canonical_caption)` from Stage 1 render outputs.
 
 ### Backbone choice
-- **SDXL** (`stabilityai/stable-diffusion-xl-base-1.0`): **primary**. Native 1024 but trained at 512 (resolution mismatch); 2.6B params; dual CLIP text encoders. LoRA fine-tuning via `train_text_to_image_lora_sdxl.py`. Current best: **62.33% ± 1.47** on ImageNette IPC=10 (checkpoint-7254, rank=64, epoch 9 with cosine LR).
+- **SDXL** (`stabilityai/stable-diffusion-xl-base-1.0`): **primary**. Native 1024 but trained at 512 (resolution mismatch); 2.6B params; dual CLIP text encoders. LoRA fine-tuning via `train_text_to_image_lora_sdxl.py`. Current best: **63.27% ± 0.19** on ImageNette IPC=10 under the 3×3 protocol (checkpoint-7254, rank=64, epoch 9 with cosine LR).
 - **SD v1.5** (`stable-diffusion-v1-5/stable-diffusion-v1-5`): tested, underperforms SDXL. Native 512, CLIP ViT-L/14, ~860M params. Full fine-tuning via `train_text_to_image.py`. Despite the native-resolution advantage cited by DD-VLCP (ICCV 2025), visual quality was slightly better but eval accuracy was lower than SDXL LoRA.
 
 ### Architecture
@@ -966,7 +966,7 @@ The repo currently uses VLMs where semantic proposal or ambiguity resolution is 
 ## 14. Stage 3 — Mode discovery via DINOv2 clustering
 
 ### Implementation status
-**Implemented in repo. Current baseline: HDBSCAN + medoid caption, 62.33% on ImageNette IPC=10.**
+**Implemented in repo. Current baseline: HDBSCAN + medoid caption, 63.27% ± 0.19 on ImageNette IPC=10 (3×3 protocol, best-of-3 per seed).**
 
 ### Core purpose
 Discover representative modes per class via DINOv2 clustering. Each mode's medoid sample contributes its canonical caption to Stage 4 (one caption per mode generates one image).
@@ -1060,7 +1060,7 @@ runs/stage3/<output_dir>/
 ## 15. Stage 4 — Distilled dataset generation
 
 ### Implementation status
-**Implemented in repo. Current baseline: SDXL LoRA + text2img, 62.33% on ImageNette IPC=10.**
+**Implemented in repo. Current baseline: SDXL LoRA + text2img, 63.27% ± 0.19 on ImageNette IPC=10 (3×3 protocol).**
 
 ### Core purpose
 Generate the final distilled dataset. Default is text-to-image: use Stage 3 representative caption as prompt, generate one image per mode via Stage 2 LoRA-tuned SDXL.
@@ -1139,7 +1139,7 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 6. text2img + caption diversity selection (Jaccard greedy) → tested, hurt accuracy; kept as opt-in only
 7. text2img + mode guidance (MGD³-style) → failed: detailed captions dominate, no usable sweet spot (see 16.11)
 8. text2img + multi-candidate selection, per-mode (DINOv2 prototype + diversity) → tested, did not beat single-medoid baseline at IPC=10
-9. **text2img + HDBSCAN + medoid caption** → current baseline (62.33% on ImageNette IPC=10)
+9. **text2img + HDBSCAN + medoid caption, 3×3 protocol** → current baseline (63.27% ± 0.19 on ImageNette IPC=10, best-of-3 per seed across 3 paired-seed rounds; 2026-04-18)
 10. text2img + multi-candidate selection, **set-level moments, DINOv2 space, L2-norm, 1-per-mode, N=10, IPC=10** → **59.53% ± 0.38, −2.80% vs baseline**; regression consistent across 3 repeats
 11. text2img + multi-candidate selection, **set-level moments, VAE latent space (SDXL-native, 16384-dim, no L2-norm), 1-per-mode, N=10, IPC=10** → **59.07% ± 0.25, −3.26% vs baseline**. Feature-space swap did not rescue the regression → objective itself is the bottleneck at IPC=10
 
@@ -1186,29 +1186,23 @@ Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditionin
 
 Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed at IPC=10):
 
-1. **Rebaseline HDBSCAN + medoid under full 3×3 protocol (2026-04-18)**
-   - For each seed in {42, 123, 456}: re-run Stage 3 clustering with that seed (produces its own `modes_hdbscan_s<seed>` — HDBSCAN is deterministic but PCA pre-processing and the K-Means fallback/sub-clustering are seeded, so medoid selection changes between seeds); then Stage 4 generate with that seed as the base (image `i` uses `seed + mode_idx`); then eval with 3 repeats. The `seed=42` round should exactly reproduce the historical 62.33% baseline.
-   - The seed is **shared across Stage 3 and Stage 4** for each round (paired), so each round is a single coherent "random trajectory".
-   - **Aggregation rule**: for each seed take `max(3 eval repeats)` = best-of-3 (de-noising the eval-training axis); then report mean / std / min / max across the 3 per-seed bests.
-   - Measures **combined Stage 3 + Stage 4 generation variance**. Previous 62.33% ± 1.47 used a fixed Stage 3 modes + fixed per-image `+mode_idx` seeding at Stage 4, so it underestimated generation variance.
-   - Run: `bash scripts/server/run_baseline_3x3.sh`
-   - This replaces 62.33% ± 1.47 as the comparison baseline going forward.
+1. **IPC sweep on 3×3 baseline (in progress)**
+   - Protocol (established 2026-04-18): for each seed in {42, 123, 456}, re-cluster Stage 3 → Stage 4 generate with `base_seed + mode_idx` per image → eval × 3 repeats. Aggregation: best-of-3 per seed, then mean/std/min/max across 3 per-seed bests.
+   - **IPC=10 done: 63.27% ± 0.19** (63.4 / 63.0 / 63.4; replaces old 62.33).
+   - **IPC=20 and IPC=50 pending**. Run: `IPC=20 bash scripts/server/run_baseline_3x3.sh` and `IPC=50 bash scripts/server/run_baseline_3x3.sh`.
+   - Compare against published IPC-scaling baselines (MGD³, DD-VLCP, RDED, SRe2L).
+   - At IPC=20/50, also re-test set-level selection (`--set-level-selection`) — more images per class may change the trade-off that hurt it at IPC=10.
 
-2. **IPC sweep on baseline**
-   - Run IPC=10, 20, 50 with HDBSCAN + medoid caption, no candidate selection
-   - Compare against published baselines (MGD³, DD-VLCP, RDED, SRe2L)
-   - At IPC=20/50, re-test set-level selection — more images per class may change the trade-off that hurt us at IPC=10
-
-3. **Multi-architecture benchmarking**
+2. **Multi-architecture benchmarking**
    - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10), 3 repeats
    - Report mean ± std — not just ResNetAP-10
 
-4. **ImageNet-1k full pipeline**
+3. **ImageNet-1k full pipeline**
    - Stage 1 full run on ImageNet-1k in progress
    - After ImageNette benchmarking stabilizes, run full pipeline on 1K classes
    - Use `scripts/server/run_full_pipeline.sh` for resume support
 
-5. **Novel method exploration** (Phase 4 from plan.md)
+4. **Novel method exploration** (Phase 4 from plan.md)
    - Early vision-language fusion (EVLF-style) — lightweight visual-semantic adapter
    - The biggest research-value direction remaining after Phase 2/3 exhausted at IPC=10
 
@@ -1312,12 +1306,12 @@ Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed 
   - Set-level moment matching: greedy pulls the whole set toward the *class* mean/std. The first pick anchors near the class centroid, later picks compensate but the inter-mode spread gets smoothed out, producing a more homogeneous set than medoid → worse classifier training signal.
 - **Status — set-level line closed at IPC=10**. Per §17 decision rule ("still regresses → abandon"), stop iterating on this approach at IPC=10. Code stays in tree (`--set-level-selection`, both `--set-feature-space` variants) for future IPC=20/50 experiments where more images per class may change the trade-off. Next mainline: IPC sweep on the HDBSCAN + medoid baseline.
 
-### Current best configuration (as of 2026-04-17)
+### Current best configuration (as of 2026-04-18)
 - **Stage 2**: SDXL rank=64 LoRA, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, epoch 9 (checkpoint-7254)
 - **Stage 3**: DINOv2 HDBSCAN + medoid caption (no diversity selection), IPC=10
 - **Stage 4**: text2img (visual_mode=none), resolution=512, guidance=7.5, steps=50
-- **Baseline accuracy (old protocol, 1 generation × 3 eval repeats; per-image +mode_idx seeding)**: 62.33% ± 1.47 on ImageNette IPC=10 (ResNetAP-10). K-Means + medoid: 62.13% ± 0.68. These numbers only reflect eval variance, not generation variance, and used the pre-2026-04-18 per-image seeding.
-- **Baseline accuracy (new 3×3 protocol, per-image `seed + mode_idx` with three rounds of different base seeds)**: pending — run via `scripts/server/run_baseline_3x3.sh` with base seeds {42, 123, 456} × 3 eval repeats each. Aggregation: best-of-3 per seed, then mean/std/min/max across 3 per-seed bests. The `seed=42` round should reproduce 62.33%; the 3 numbers together will replace the single-point baseline going forward.
+- **Baseline accuracy (new 3×3 protocol, IPC=10, 2026-04-18)**: **63.27% ± 0.19** on ImageNette (ResNetAP-10). Per-seed best-of-3: seed=42 → 63.4, seed=123 → 63.0, seed=456 → 63.4; min=63.0, max=63.4. This replaces the old 62.33% ± 1.47 as the comparison baseline going forward.
+- **Baseline accuracy (old protocol, for reference)**: 62.33% ± 1.47 (HDBSCAN + medoid, single generation × mean of 3 eval repeats, per-image `seed + mode_idx` seeding). Note: the new seed=42 round (63.4) and the old 62.33 are **on the same dataset** — the only differences are (a) old used mean of 3 repeats, new uses max of 3; (b) old reported the population std of the 3 repeats, new reports spread across the 3 per-seed bests.
 - **Key insights (empirical)**:
   - Medoid caption (default) > diversity selection — kept medoid as default, diversity opt-in
   - HDBSCAN ≈ K-Means for medoid caption selection at IPC=10

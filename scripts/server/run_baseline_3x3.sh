@@ -16,9 +16,12 @@ set -euo pipefail
 #     then report mean / std / min / max across the 3 per-seed bests.
 #
 # Usage:
-#   bash scripts/server/run_baseline_3x3.sh
+#   bash scripts/server/run_baseline_3x3.sh           # IPC=10 (default)
+#   IPC=20 bash scripts/server/run_baseline_3x3.sh   # IPC=20
+#   IPC=50 bash scripts/server/run_baseline_3x3.sh   # IPC=50
 #
 # Environment:
+#   IPC=10                        (images per class; 10/20/50 recommended)
 #   BASELINE_SEEDS="42 123 456"   (override to change seeds; paired across stages)
 #   EVAL_REPEAT=3
 
@@ -27,7 +30,7 @@ LORA="runs/stage2/train/ImageNette_train/stabilityai_stable-diffusion-xl-base-1.
 VAL_DIR="/media/4T_HDD/cai/datasets/ImageNette/val"
 MODEL_NAME="stabilityai/stable-diffusion-xl-base-1.0"
 NCLASS=10
-IPC=10
+IPC="${IPC:-10}"
 
 SEEDS="${BASELINE_SEEDS:-42 123 456}"
 EVAL_REPEAT="${EVAL_REPEAT:-3}"
@@ -53,6 +56,7 @@ mkdir -p "$RUN_ROOT"
 
 echo "============================================================"
 echo "[baseline 3x3] HDBSCAN + medoid, full 3x3 (Stage 3 + Stage 4 paired)"
+echo "  IPC:        $IPC"
 echo "  encode:     $ENCODE_DIR"
 echo "  lora:       $LORA"
 echo "  seeds:      $SEEDS  (shared across Stage 3 and Stage 4)"
@@ -61,9 +65,10 @@ echo "  run root:   $RUN_ROOT"
 echo "============================================================"
 
 echo "# baseline 3x3 protocol (Stage 3 + Stage 4 + Eval, paired seeds)" > "$SUMMARY_FILE"
+echo "# IPC=$IPC" >> "$SUMMARY_FILE"
 echo "# encode=$ENCODE_DIR" >> "$SUMMARY_FILE"
 echo "# lora=$LORA" >> "$SUMMARY_FILE"
-echo "# per-round shared master seed for Stage 4; Stage 3 re-clustered per seed; eval_repeat=$EVAL_REPEAT" >> "$SUMMARY_FILE"
+echo "# within-round: image i uses seed + mode_idx; Stage 3 re-clustered per seed; eval_repeat=$EVAL_REPEAT" >> "$SUMMARY_FILE"
 echo "" >> "$SUMMARY_FILE"
 
 for SEED in $SEEDS; do
@@ -117,16 +122,17 @@ import json, glob, os, statistics
 
 run_root = "$RUN_ROOT"
 seeds = "$SEEDS".split()
+ipc = $IPC
 
 # Aggregation rule: for each gen_seed, take MAX over its 3 eval repeats
 # (best-of-3). Then compute mean/std/min/max across the 3 per-seed bests.
 per_seed_best = []  # list of (seed, best_of_3, runs, eval_path)
 for s in seeds:
     gen_dir = os.path.join(run_root, f"gen_seed{s}")
-    # Eval dirs are under runs/eval/<ts>_ipc10_resnet_ap; match by distilled_dir
+    # Eval dirs are under runs/eval/<ts>_ipc<IPC>_resnet_ap; match by distilled_dir
     # prefix and take the most recent if multiple.
     cand = []
-    for p in glob.glob("runs/eval/*_ipc10_resnet_ap/eval_resnet_ap.json"):
+    for p in glob.glob(f"runs/eval/*_ipc{ipc}_resnet_ap/eval_resnet_ap.json"):
         try:
             d = json.load(open(p))
             if d.get("distilled_dir", "").startswith(gen_dir):
