@@ -48,18 +48,18 @@ Right now, the repo is best understood as:
 - a working **Stage 2 SDXL LoRA** training pipeline that delegates to the official diffusers trainer,
 - a working **Stage 2 inference** script for sampling from trained LoRA weights,
 - a working **Stage 3** pipeline for DINOv2 encoding, per-class HDBSCAN mode discovery, and medoid caption extraction,
-- a working **Stage 4** pipeline for text-to-image distilled dataset generation with optional candidate selection and representativeness evaluation,
+- a working **Stage 4** pipeline for text-to-image distilled dataset generation (with optional img2img-from-medoid and optional SDXL refiner),
 - a working **Evaluation** pipeline for training classifiers on distilled datasets and evaluating on real validation sets,
 - where Stage 1 normalization is deterministic-first but can invoke constrained VLM review on ambiguous slots.
 
 ### Packaging / environment reality check
 - The installable project in `pyproject.toml` is currently named **`cspd-stage1`**.
 - The console scripts exposed there are now:
-  - **`cspd-stage1`** with Stage 1 subcommands such as `run`, `normalize`, and `render`
-  - **`cspd-stage2`** for Stage 2 scaffold / inspection / planning commands
-  - **`cspd-stage3`** for Stage 3 encoding / clustering / mode extraction
-  - **`cspd-stage4`** for Stage 4 distilled dataset generation (text2img + optional multi-candidate selection + representativeness evaluation)
-  - **`cspd-eval`** for classifier training and evaluation on distilled datasets
+  - **`cspd-stage1`** with Stage 1 subcommands `run`, `normalize`, `render`
+  - **`cspd-stage2`** with the single `train` subcommand (delegates to the official SDXL LoRA trainer)
+  - **`cspd-stage3`** with `encode`, `cluster`, `run` subcommands
+  - **`cspd-stage4`** with the single `generate` subcommand (text2img default, optional `--visual-mode medoid` and `--refiner-model`)
+  - **`cspd-eval`** with `run` and `run-all` subcommands for classifier training + validation
 - The repo now also bundles `environment.yml` for the shared conda environment name **`cspd-dd`** used by the server shell helpers.
 - Core dependencies: `torch`, `torchvision`, `numpy`, `tqdm`, `pillow`, `diffusers`, `transformers`, `accelerate`, `peft`, `sentencepiece`, `protobuf`, `tiktoken`, `safetensors`, `scikit-learn`, `hdbscan`, `qwen-vl-utils`.
 - Optional dependencies (declared in `pyproject.toml`): `wandb` (W&B logging), `xformers` (memory-efficient attention), `bitsandbytes` (8-bit Adam).
@@ -87,19 +87,18 @@ Right now, the repo is best understood as:
   - `vlm/qwen_local.py`
 - `src/cspd_stage2/`
   - `__init__.py`
-  - `cli.py`
-  - `training.py` — main training orchestration, config, dispatch
-  - `training_common.py` — shared training utilities (optimizer, scheduler, freeze logic)
-  - `data.py` — pairing, manifest, dataloader
-  - `backbone.py` — backbone loading, module inspection, LoRA injection
-  - `families/sdxl/backbone.py`, `families/sdxl/training.py` — SDXL LoRA family (**primary / mainline**)
-  - implements Stage 2 pairing / planning / backbone inspection / SDXL LoRA training via official diffusers delegation
+  - `cli.py` — CLI with the `train` subcommand
+  - `training.py` — Stage 2 orchestration: pairing → manifest → SDXL LoRA training dispatch
+  - `training_common.py` — small helpers (`derive_stage2_output_dir`, `_safe_write_json`)
+  - `data.py` — pairing + manifest writing
+  - `backbone.py` — single helper `infer_backbone_family` (SDXL only)
+  - `families/sdxl/backbone.py`, `families/sdxl/training.py` — SDXL LoRA trainer wrapper around the official diffusers script
 
 - `src/cspd_stage3/`
   - `__init__.py`
-  - `encode.py` — DINOv2 feature encoding + optional VAE latent encoding (Stage 3A)
+  - `encode.py` — DINOv2 feature encoding (Stage 3A)
   - `cluster.py` — per-class HDBSCAN clustering + K-Means fallback/sub-clustering + medoid caption extraction (Stage 3B+3C)
-  - `cli.py` — CLI with `encode`, `cluster`, and `run` subcommands
+  - `cli.py` — CLI with `encode`, `cluster`, `run` subcommands
 
 - `src/cspd_stage4/`
   - `__init__.py`
@@ -768,9 +767,9 @@ runs/stage2/train/<dataset_label>/<backbone_slug>/<timestamp>/
 ├── sdxl_official_launch_plan.json
 ├── sdxl_official_stdout.txt
 ├── sdxl_official_stderr.txt
-├── trainer_plan.json
 ├── stage2_config_snapshot.json
 ├── stage2_run_summary.json
+├── train_manifest.jsonl
 ├── train_manifest_summary.json
 ├── unmatched_images.jsonl
 └── unmatched_render_records.jsonl
@@ -991,7 +990,7 @@ runs/stage4/<dataset>/<ipc>/<lora_tag>/<timestamp>/
 This is a hard methodological boundary. Do not write normalization rules, render drop rules, or prompt guidance that references specific class names or class-level statistics. The only place class identity is used is in Prep (class-to-archetype mapping). Everything downstream operates on archetype + slot name only.
 
 ### 16.2 All stages + evaluation are implemented
-The repo covers Prep, Stage 1 (1A+1B+1C), Stage 2 (SDXL LoRA + inference), Stage 3 (DINOv2 encoding + clustering + medoid caption, with optional diversity selection), Stage 4 (text2img distilled generation), and Evaluation (classifier training + accuracy measurement). FID evaluation is not yet automated.
+The repo covers Prep, Stage 1 (1A+1B+1C), Stage 2 (SDXL LoRA + inference), Stage 3 (DINOv2 encoding + HDBSCAN clustering + medoid caption), Stage 4 (text2img distilled generation, optional img2img-from-medoid, optional refiner), and Evaluation (classifier training + accuracy measurement). FID evaluation is not yet automated.
 
 ### 16.8 Do not enrich captions at Stage 3 level
 Stage 3 VLM recaption (enriching only medoid captions) was tested and degraded accuracy by ~5% because enriched captions are out-of-distribution for the LoRA trained on template captions. If caption enrichment is ever revisited, it must be applied at Stage 1 so the LoRA trains on the same caption distribution Stage 4 generates from.
@@ -1018,36 +1017,42 @@ From checkpoint comparison on ImageNette with cosine LR. The checkpoint at step 
 Settled 2026-04-18. SD v1.5 full fine-tuning was tested end-to-end and eval'd worse than SDXL LoRA (61.3% vs 62.33% at the time). FLUX.1 and PixArt-Sigma never had a working training path on our stack despite the exploratory code. All three family subpackages (`families/{sd15,flux,pixart}`) and their server helpers were removed from the repo in the 2026-04-18 cleanup; the rule is simply: Stage 2 uses SDXL LoRA only.
 
 ### 16.11 Mode guidance (MGD³-style) is incompatible with detailed captions
-Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditioning is weak (class name only) but fails with our detailed structured captions. With strong text conditioning (CFG=7.5 + detailed caption), the UNet locks onto the caption's content. Mode guidance either has no effect (scale ≤ 0.1) or destroys image quality (scale ≥ 0.2). There is no sweet spot. The fundamental issue: text conditioning and latent guidance compete for control over the same features. MGD³ works because its text is weak ("tench"), leaving room for guidance. Our text is strong ("a brown speckled long and flat body tench being held in riverbank..."), leaving no room.
+Tested on 2026-04-16: MGD³ latent centroid guidance works when text conditioning is weak (class name only) but fails with our detailed structured captions. With strong text conditioning (CFG=7.5 + detailed caption), the UNet locks onto the caption's content. Mode guidance either has no effect (scale ≤ 0.1) or destroys image quality (scale ≥ 0.2). There is no sweet spot. The fundamental issue: text conditioning and latent guidance compete for control over the same features. MGD³ works because its text is weak ("tench"), leaving room for guidance. Our text is strong ("a brown speckled long and flat body tench being held in riverbank..."), leaving no room. Code removed on 2026-04-18 (`mode_guidance.py`, `--mode-guidance-scale`, `--mode-guidance-stop-step`, and the `use_mode_guidance` branches in `generate.py`).
 
 ---
 
 ## 17. Immediate next implementation work
 
-Given current repo state (as of 2026-04-18, after the set-level line was closed and its code removed):
+Method is locked in as of 2026-04-18 (HDBSCAN + medoid text2img SDXL LoRA; 3×3 protocol at IPC=10 → 63.27% ± 0.19). The repo has just finished a deep cleanup pass that removed every experimental side-branch. The remaining to-do list is entirely about running experiments, not building new machinery:
 
-1. **IPC sweep on 3×3 baseline (in progress)**
-   - Protocol (established 2026-04-18): for each seed in {42, 123, 456}, re-cluster Stage 3 → Stage 4 generate with `base_seed + mode_idx` per image → eval × 3 repeats. Aggregation: best-of-3 per seed, then mean/std/min/max across 3 per-seed bests.
-   - **IPC=10 done: 63.27% ± 0.19** (63.4 / 63.0 / 63.4; replaces old 62.33).
-   - **IPC=20 and IPC=50 pending**. Run: `IPC=20 bash scripts/pipelines/run_baseline_3x3.sh /path/to/ImageNette/train` and `IPC=50 bash scripts/pipelines/run_baseline_3x3.sh /path/to/ImageNette/train`.
+1. **IPC sweep on the 3×3 baseline (in progress)**
+   - Protocol: for each seed in {42, 123, 456}, re-cluster Stage 3 → Stage 4 generate with `base_seed + mode_idx` per image → eval × 3 repeats. Aggregation: best-of-3 per seed, then mean/std/min/max across the 3 per-seed bests.
+   - **IPC=10 done: 63.27% ± 0.19** (per-seed bests 63.4 / 63.0 / 63.4; replaces the old single-run 62.33%).
+   - **IPC=20 and IPC=50 pending**. Run:
+     ```bash
+     IPC=20 bash scripts/pipelines/run_baseline_3x3.sh /path/to/ImageNette/train
+     IPC=50 bash scripts/pipelines/run_baseline_3x3.sh /path/to/ImageNette/train
+     ```
    - Compare against published IPC-scaling baselines (MGD³, DD-VLCP, RDED, SRe2L).
 
-
 2. **Multi-architecture benchmarking**
-   - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10), 3 repeats
-   - Report mean ± std — not just ResNetAP-10
+   - Run all three eval architectures (ConvNet-6, ResNet-18, ResNetAP-10), 3 repeats each.
+   - The eval pipeline already supports this via `cspd-eval run-all` or `bash scripts/eval/run_eval_pipeline.sh ... all`. Report mean ± std, not just ResNetAP-10.
 
 3. **ImageNet-1k full pipeline**
-   - Stage 1 full run on ImageNet-1k in progress
-   - After ImageNette benchmarking stabilizes, run full pipeline on 1K classes
-   - Use `scripts/pipelines/run_full_pipeline.sh` for resume support
+   - Stage 1 full run on ImageNet-1k is in progress.
+   - Once it finishes, point the full-pipeline driver at it:
+     ```bash
+     bash scripts/pipelines/run_full_pipeline.sh /path/to/ImageNet1k/train
+     ```
+   - Idempotent stage-by-stage skipping means this tolerates interruptions.
 
 4. **Novel method exploration** (Phase 4 from plan.md)
-   - Early vision-language fusion (EVLF-style) — lightweight visual-semantic adapter
-   - The biggest research-value direction remaining after Phase 2/3 exhausted at IPC=10
+   - Early vision-language fusion (EVLF-style) — lightweight visual-semantic adapter.
+   - The biggest research-value direction remaining after Phase 2 (per-mode prototype+diversity) and Phase 3 (set-level distribution matching) were exhausted at IPC=10 and the code was removed.
 
 ### Closed (for now)
-- **Phase 2 multi-candidate selection**, **Phase 3 set-level selection**, and **MGD³-style mode guidance** were all tested, all regressed vs the single-medoid baseline at IPC=10, and their code was removed on 2026-04-18. See §18 experiment log for the numbers.
+- **Phase 2 multi-candidate selection**, **Phase 3 set-level selection**, and **MGD³-style mode guidance** were all tested, all regressed vs the single-medoid baseline at IPC=10, and their code was removed on 2026-04-18. See §18 experiment log for the numbers. If IPC=20 / IPC=50 ever behave differently enough to reopen any of these, the code can be restored from git history.
 
 ---
 
@@ -1146,6 +1151,21 @@ Given current repo state (as of 2026-04-18, after the set-level line was closed 
   - Medoid baseline: each mode contributes the real image closest to its own cluster centroid → diversity comes from the mode structure (inter-mode variation).
   - Set-level moment matching: greedy pulls the whole set toward the *class* mean/std. The first pick anchors near the class centroid, later picks compensate but the inter-mode spread gets smoothed out, producing a more homogeneous set than medoid → worse classifier training signal.
 - **Status — set-level line closed and code removed 2026-04-18**. Both feature spaces regressed at IPC=10, the feature-space swap did not change direction, and the objective itself (greedy class-mean matching) was judged harmful to inter-mode diversity. `representativeness.py` / `candidate_selection.py` / `mode_guidance.py` deleted from the repo along with the corresponding CLI flags.
+
+### Repo cleanup pass (2026-04-18)
+With the method locked in, the repo went through a multi-stage cleanup to drop every experimental side-branch and leave only the code that the locked-in pipeline actually reaches. Summary of what was removed:
+
+- **Stage 1D** (VLM caption enrichment): never integrated. Deleted `src/cspd_stage1/enrich.py` and the `cspd-stage1 enrich` subcommand.
+- **Stage 1 obsolete scripts**: sidecar VLM review (`scripts/data/review_normalization_with_vlm.py` + its shell wrapper), the pre-consolidation `run_stage1_full_workflow.sh`, VLM smoke tests (`scripts/vlm/test_*.py`), and the one-off `analyze_attribute_values.py`.
+- **Stage 2 non-SDXL families**: `families/{sd15,flux,pixart}/` subpackages, `mock_backbones.py`, their server helpers, and all the related CLI flags / config fields. The self-built LoRA injection machinery (`LoRALinearAdapter`, `inject_lora_adapters`, `inspect_target_modules`, `apply_trainable_parameter_selection`) and the orphan PixArt/FLUX dispatch wrappers / placeholder loop in `training.py` went with them. `training.py` went from 1839 lines to ~190; `backbone.py` from 759 to 18; `cli.py` from 814 to ~145; `training_common.py` from 272 to ~50. `inspect-targets`, `dump-modules`, `sample-baseline` CLI subcommands removed.
+- **Stage 3**: `_diversify_captions` + `--diversify-captions` CLI flag (tested, hurt accuracy); `--cluster-method` flag (HDBSCAN is the only top-level method, K-Means kept as internal fallback); `mode_centroids.pt` generation + VAE-latent threading (only consumer was the now-deleted mode guidance).
+- **Stage 4**: `candidate_selection.py` (Phase 2 per-mode scorer), `representativeness.py` (Phase 3 set-level scorer), `mode_guidance.py` (MGD³-style scheduler). Related CLI flags (`--num-candidates`, `--candidate-beta`, `--candidate-probe-dir`, `--eval-representativeness`, `--set-level-selection`, `--set-objective`, `--set-feature-space`, `--mode-guidance-*`). `generate.py` went from 814 to ~320 lines; kept text2img + img2img-medoid + optional refiner.
+- **Stage 3 VAE encoding** (`--encode-vae` / `--vae-model-name` flags, the VAE branch of `encode.py`): last consumer (Stage 4 set-level VAE feature space) is gone.
+- **Eval `train_utils.py`**: unused `Logger`, `TimeStamp`, `Plotter`, `CutOut`, custom `Normalize`, `dist_l2`, `get_time`. Kept only what `train.py` imports plus the internals `ColorJitter` composes.
+- **Pipeline scripts**: `run_ipc_sweep.sh`, `run_candidate_sweep.sh`, `run_setlevel_phase3.sh` deleted. `run_full_pipeline.sh` and `run_baseline_3x3.sh` rewritten to accept `<train_root> [val_root] [nclass]` as positional arguments (instead of hardcoded ImageNette paths) with sensible env overrides.
+- **Script layout**: `scripts/server/` flattened; everything now lives under stage-specific folders (`scripts/{prep,stage1,stage2,stage3,stage4,eval,pipelines}/`).
+
+Cumulative net change across all cleanup commits: roughly **−7700 lines** of source + scripts + spec dead weight.
 
 ### Current best configuration (as of 2026-04-18)
 - **Stage 2**: SDXL rank=64 LoRA, cosine LR (2e-5), warmup=500, noise_offset=0.05, snr_gamma=5.0, epoch 9 (checkpoint-7254)
