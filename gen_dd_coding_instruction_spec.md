@@ -1011,7 +1011,7 @@ VLM review is no longer limited to `review_required` slots. It also triggers `re
 Latest accelerate rejects `"none"` as an unsupported tracker. The repo already handles this by omitting `--report_to` when the value is `"none"`.
 
 ### 16.7 Stage 2 best known config is rank=64, epoch=9
-From checkpoint comparison on ImageNette with cosine LR. The checkpoint at step 7254 (epoch 9 of 15) gives the best quality. Cosine LR peaks earlier than constant LR.
+From the 2026-04-14 → 2026-04-15 checkpoint sweep over epochs 5–15 with cosine LR on ImageNette: epoch 9 (step 7254) gave the best eval accuracy; epochs 10–15 did not help and started overfitting. `run_full_pipeline.sh` therefore trains **9 epochs total** by default (`STAGE2_EPOCHS=9`) and consumes the final checkpoint. Historical `checkpoint-7254` on disk from older 15-epoch runs is still valid — it was produced by a 15-epoch cosine schedule that happened to pass through the same step, and the baseline 63.27% number comes from that checkpoint.
 
 ### 16.10 Non-SDXL generative backbones underperformed or were never usable
 Settled 2026-04-18. SD v1.5 full fine-tuning was tested end-to-end and eval'd worse than SDXL LoRA (61.3% vs 62.33% at the time). FLUX.1 and PixArt-Sigma never had a working training path on our stack despite the exploratory code. All three family subpackages (`families/{sd15,flux,pixart}`) and their server helpers were removed from the repo in the 2026-04-18 cleanup; the rule is simply: Stage 2 uses SDXL LoRA only.

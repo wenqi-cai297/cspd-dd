@@ -26,10 +26,15 @@ set -euo pipefail
 #   STAGE1_BACKEND=qwen_local              # or "mock" for a plumbing smoke run
 #   STAGE2_NUM_PROCESSES=2                 # accelerate --num_processes
 #   STAGE2_BATCH_SIZE=8
-#   STAGE2_EPOCHS=15                       # total training epochs
+#   STAGE2_EPOCHS=9                        # total training epochs.
+#                                          # Epoch 9 was empirically best on
+#                                          # ImageNette with cosine LR; training
+#                                          # beyond that overfits.
 #   STAGE2_RANK=64                         # LoRA rank
 #   STAGE2_BEST_EPOCH=9                    # which epoch checkpoint to consume
-#                                          # (0 => final weights)
+#                                          # (0 => final weights). When this
+#                                          # equals STAGE2_EPOCHS the target
+#                                          # checkpoint is the final one.
 #   DIFFUSERS_REPO_ROOT=./diffusers        # required for the Stage 2 trainer
 #   PIPELINE_IPC="10"                      # space-separated IPC values to sweep
 #   EVAL_ARCH=resnet_ap                    # single arch; use "all" for 3-arch
@@ -82,7 +87,7 @@ ENV_NAME="${CSPD_ENV_NAME:-cspd-dd}"
 STAGE1_BACKEND="${STAGE1_BACKEND:-qwen_local}"
 STAGE2_NUM_PROCESSES="${STAGE2_NUM_PROCESSES:-2}"
 STAGE2_BATCH_SIZE="${STAGE2_BATCH_SIZE:-8}"
-STAGE2_EPOCHS="${STAGE2_EPOCHS:-15}"
+STAGE2_EPOCHS="${STAGE2_EPOCHS:-9}"
 STAGE2_RANK="${STAGE2_RANK:-64}"
 STAGE2_BEST_EPOCH="${STAGE2_BEST_EPOCH:-9}"
 IPC_LIST="${PIPELINE_IPC:-10}"
