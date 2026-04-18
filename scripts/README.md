@@ -263,6 +263,21 @@ IPC=10 bash scripts/pipelines/run_baseline_3x3.sh <train_root> [val_root] [nclas
 - Aggregation: per-seed takes the max over eval repeats (best-of-3); the final report gives mean / std / min / max across the three per-seed bests.
 - Auto-detects the LoRA checkpoint at `STAGE2_BEST_EPOCH` (default 9); override explicitly via `LORA_WEIGHTS=<path>`.
 
+### Eval output layout
+
+Eval results are written to a path that mirrors the Stage 4 hierarchy, so you can tell at a glance which dataset / IPC / architecture / Stage 4 run produced any given result JSON without opening it:
+
+```text
+runs/eval/<dataset>/ipc<IPC>/<arch>/<stage4_tag>/<eval_timestamp>/eval_<arch>.json
+```
+
+`<stage4_tag>` mirrors the original `distilled_dir` path: the `runs/stage4/<dataset>/ipc<IPC>/` prefix and trailing `/images` are stripped, and the remaining segments are joined with `__`. For example,
+`runs/stage4/ImageNette_train/ipc10/lora/baseline_3x3_<TS>/gen_seed42/images`
+maps to
+`runs/eval/ImageNette_train/ipc10/resnet_ap/lora__baseline_3x3_<TS>__gen_seed42/<eval_ts>/eval_resnet_ap.json`.
+
+`EVAL_SAVE_DIR=<path>` on `run_eval_pipeline.sh` overrides the computed save dir if you want a custom location.
+
 ## Dataset assumption
 
 All Stage 1 run scripts assume an ImageFolder-style dataset layout:

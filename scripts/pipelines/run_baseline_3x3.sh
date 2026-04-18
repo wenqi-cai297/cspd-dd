@@ -215,13 +215,24 @@ run_root = "$RUN_ROOT"
 seeds = "$SEEDS".split()
 ipc = $IPC
 
-# Aggregation: for each seed take max over eval repeats (best-of-3),
-# then mean/std/min/max across the 3 per-seed bests.
+# Find eval JSON files that match each gen_seed directory under run_root.
+# Structure as of 2026-04-18:
+#   runs/eval/<dataset>/ipc<IPC>/<arch>/<stage4_tag>/<eval_ts>/eval_<arch>.json
+# The eval JSON's "distilled_dir" field carries the original Stage 4 images
+# path; that's what we match on (so the script keeps working even if the
+# on-disk convention shifts again).
+eval_candidates = glob.glob(
+    f"runs/eval/**/ipc{ipc}/resnet_ap/**/eval_resnet_ap.json", recursive=True,
+)
+# Also accept the older flat layout for back-compat on rigs that still have
+# old eval dirs around.
+eval_candidates += glob.glob(f"runs/eval/*_ipc{ipc}_resnet_ap/eval_resnet_ap.json")
+
 per_seed_best = []  # (seed, best_acc1, runs, eval_path)
 for s in seeds:
     gen_dir = os.path.join(run_root, f"gen_seed{s}")
     cand = []
-    for p in glob.glob(f"runs/eval/*_ipc{ipc}_resnet_ap/eval_resnet_ap.json"):
+    for p in eval_candidates:
         try:
             d = json.load(open(p))
             if d.get("distilled_dir", "").startswith(gen_dir):

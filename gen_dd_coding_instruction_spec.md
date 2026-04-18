@@ -1152,6 +1152,22 @@ Method is locked in as of 2026-04-18 (HDBSCAN + medoid text2img SDXL LoRA; 3×3 
   - Set-level moment matching: greedy pulls the whole set toward the *class* mean/std. The first pick anchors near the class centroid, later picks compensate but the inter-mode spread gets smoothed out, producing a more homogeneous set than medoid → worse classifier training signal.
 - **Status — set-level line closed and code removed 2026-04-18**. Both feature spaces regressed at IPC=10, the feature-space swap did not change direction, and the objective itself (greedy class-mean matching) was judged harmful to inter-mode diversity. `representativeness.py` / `candidate_selection.py` / `mode_guidance.py` deleted from the repo along with the corresponding CLI flags.
 
+### Eval output layout (2026-04-18)
+Eval runs now write their JSON into a hierarchical directory that mirrors Stage 4, so results are traceable to their distilled source without opening the JSON:
+
+```text
+runs/eval/<dataset>/ipc<IPC>/<arch>/<stage4_tag>/<eval_timestamp>/eval_<arch>.json
+```
+
+`<stage4_tag>` is computed from the Stage 4 `distilled_dir` path by stripping `runs/stage4/<dataset>/ipc<IPC>/` and joining the remaining segments with `__` — for example:
+
+| Stage 4 output | `<stage4_tag>` |
+| --- | --- |
+| `runs/stage4/ImageNette_train/ipc10/lora/2026-04-17_150048/images` | `lora__2026-04-17_150048` |
+| `runs/stage4/ImageNette_train/ipc10/lora/baseline_3x3_TS/gen_seed42/images` | `lora__baseline_3x3_TS__gen_seed42` |
+
+Old flat layout (`runs/eval/<timestamp>_ipc<IPC>_<arch>/eval_<arch>.json`) still on disk from pre-2026-04-18 runs is untouched; the 3×3 aggregator in `scripts/pipelines/run_baseline_3x3.sh` accepts both old and new layouts when looking up per-seed eval files.
+
 ### Repo cleanup pass (2026-04-18)
 With the method locked in, the repo went through a multi-stage cleanup to drop every experimental side-branch and leave only the code that the locked-in pipeline actually reaches. Summary of what was removed:
 
