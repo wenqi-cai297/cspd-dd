@@ -112,7 +112,7 @@ def main() -> None:
         return
 
     if args.command == "normalize":
-        script_path = Path(__file__).resolve().parents[2] / "scripts" / "data" / "normalize_stage1_attributes.py"
+        script_path = Path(__file__).resolve().parents[2] / "scripts" / "stage1" / "normalize_stage1_attributes.py"
         cmd = [
             sys.executable,
             str(script_path),

@@ -1,9 +1,15 @@
 # CSPD-DD
 
-Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipeline.
+Full end-to-end pipeline for **class-aware semantic-prompt distillation**: from raw ImageFolder dataset to a distilled training set plus classifier evaluation.
 
 - **Prep** = `classes.json` generation + `class -> archetype` mapping
-- **Stage 1** = attribute extraction + normalization + canonical semantic rendering
+- **Stage 1** = VLM attribute extraction + normalization + canonical semantic rendering
+- **Stage 2** = SDXL LoRA adaptation on real images paired with Stage 1 canonical captions
+- **Stage 3** = DINOv2 encoding + per-class HDBSCAN (K-Means fallback) clustering + medoid extraction
+- **Stage 4** = distilled-image generation via text2img (optional img2img from medoid) using the Stage 2 LoRA
+- **Eval** = ConvNet-6 / ResNet-18 / ResNetAP-10 classifiers trained on the distilled set, scored on the real val set
+
+See [gen_dd_coding_instruction_spec.md](gen_dd_coding_instruction_spec.md) for the authoritative technical spec covering all stages.
 
 ## Current repo scope
 
@@ -18,46 +24,69 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 
 - Unified attribute schema
 - Direct input from an **ImageFolder-style dataset root**
-- Pluggable VLM client interface
-- `mock` backend for local pipeline plumbing tests
-- `qwen_local` backend for real local GPU inference with Qwen2.5-VL
-- Prompting uses an explicit JSON template, plus a narrow fallback parser for bullet-style pseudo-JSON outputs
-- Optional class-name mapping for synset-style datasets such as ImageNette / ImageNet subsets
+- Pluggable VLM client interface (`mock` for plumbing tests, `qwen_local` for real local GPU inference with Qwen2.5-VL)
+- Explicit JSON prompting template plus narrow fallback parser for bullet-style pseudo-JSON outputs
+- Optional class-name mapping for synset-style datasets (ImageNette / ImageNet subsets)
 - Class-adaptive slot schemas chosen from the class semantic archetype
-- Retry + validation + failure logging
-- CLI progress bar with success / failure counters and current sample summary
-- Incremental JSONL flushing so partial results are visible on disk during long runs
-- Conservative normalization helper for `attributes.jsonl` outputs
+- Retry + validation + failure logging; incremental JSONL flushing during long runs
+- Deterministic normalization plus inline constrained VLM review for ambiguous slots
 - Deterministic canonical semantic rendering from normalized Stage 1 records
+
+### Stage 2
+
+- SDXL LoRA only (PixArt / FLUX / SD 1.5 surface was removed in the Stage 2 cleanup batches)
+- Wraps the official `diffusers` `train_text_to_image_lora_sdxl.py` trainer
+- Pairs ImageFolder images with Stage 1 canonical captions by stable identifier, materializing a diffusers imagefolder dataset under `sdxl_materialized_dataset/`
+- Mainline config (baseline 63.27% on ImageNette IPC=10): rank=64, cosine LR with 500-step warmup, noise_offset=0.05, snr_gamma=5.0, batch=8, epoch 9, 2 GPUs, 512 resolution
+
+### Stage 3
+
+- DINOv2 image encoding (3A), per-class clustering (3B, HDBSCAN with K-Means fallback on small clusters, PCA-optional), medoid + semantic-mode extraction (3C)
+- Output modes feed Stage 4 as visual anchors and semantic prompts
+
+### Stage 4
+
+- Distilled-image generation via SDXL text2img (default) or img2img from Stage 3 medoids
+- Optional Stage 2 LoRA weights; optional SDXL refiner pass
+- Writes distilled images under `runs/stage4/<dataset>/ipc<IPC>/lora/pipeline_<TS>/gen_seed<SEED>/images/`
+
+### Eval
+
+- Trains ConvNet-6, ResNet-18, or ResNetAP-10 classifiers on a Stage 4 distilled dataset
+- Reports top-1 / top-5 on the real validation set; supports `EVAL_REPEAT` independent runs per architecture
+- Output path mirrors the Stage 4 hierarchy so result JSON is self-identifying
 
 ### Main CLI entrypoints
 
 - `cspd-stage1 run --dataset-root ... --output-dir ...`
 - `cspd-stage1 render --input ... --output-dir ...`
 - `cspd-stage2 train --dataset-root ... --render-input ... [--output-dir ...]`
-- Canonical Stage 1 render implementation now lives under `src/cspd_stage1/`
-- Stage 2 now means generative-backbone adaptation / canonical-semantic-space familiarization; it no longer refers to render
+- `cspd-stage3 encode | cluster | run ...`
+- `cspd-stage4 generate ...`
+- `cspd-eval run | run-all ...`
 
 ### Main server helper scripts
 
-- `bash scripts/stage2/check_stage2_sdxl_env.sh [optional_explicit_sdxl_script_path]`
-- `bash scripts/stage2/run_sdxl_stage2_official.sh ...`
 - `bash scripts/prep/prepare_stage1_metadata.sh ...`
-- `bash scripts/stage1/run_stage1_pipeline.sh ...`
-- `bash scripts/stage1/run_stage1_qwen_local.sh ...`
-- `bash scripts/stage1/run_stage1_normalization.sh ...`
-- `bash scripts/stage1/run_stage1_render.sh ...`
-- `bash scripts/stage2/run_stage2_train.sh ...`
+- `bash scripts/stage1/run_stage1_pipeline.sh ...` (Stage 1A → 1B → 1C end-to-end)
+- `bash scripts/stage2/check_stage2_sdxl_env.sh [optional_explicit_sdxl_script_path]`
+- `bash scripts/stage2/run_sdxl_stage2_official.sh <dataset_root> <render_records.jsonl> <batch> <epochs>`
+- `bash scripts/stage3/run_stage3_pipeline.sh <dataset_root> <render_records.jsonl> <ipc>`
+- `bash scripts/stage4/run_stage4_pipeline.sh <stage3_modes_dir> <stage2_lora_weights|none>`
+- `bash scripts/eval/run_eval_pipeline.sh <distilled_dir> <val_dir> <nclass> <ipc> [arch|all]`
+- `bash scripts/pipelines/run_full_pipeline.sh <train_root> [val_root] [nclass]` (Stage 1 → Eval, 3×3 protocol by default)
 
 ### Default server-side output roots
 
 - Prep metadata: `runs/prep/...`
 - Stage 1 attributes: `runs/stage1/attributes/<dataset_name>/<backend>/<timestamp>`
 - Stage 1 render: `runs/stage1/render/<dataset_name>/<backend>/<timestamp>`
-- Stage 2 train scaffold: `runs/stage2/train/<dataset_label>/<backbone>/<timestamp>`
-- Stage 2 SDXL official wrapper materializes a diffusers imagefolder dataset under each run at `sdxl_materialized_dataset/` with `metadata.jsonl` and copied training images
+- Stage 2 train: `runs/stage2/train/<dataset_label>/<backbone>/<timestamp>`
   - default dataset label is the dataset-root basename, except split-only roots like `.../train` become `<parent>_train` (same for `val`/`valid`/`validation`/`test`/`testing`)
-  - optional override: set `STAGE2_DATASET_LABEL=...` before `bash scripts/stage2/run_stage2_train.sh ...`
+  - optional override: set `STAGE2_DATASET_LABEL=...` before invoking the helper
+- Stage 3 modes: `runs/stage3/<dataset>/ipc<IPC>/<timestamp>/modes/`
+- Stage 4 distilled: `runs/stage4/<dataset>/ipc<IPC>/lora/pipeline_<TS>/gen_seed<SEED>/images/`
+- Eval results: `runs/eval/<dataset>/ipc<IPC>/<arch>/<stage4_tag>/<eval_timestamp>/eval_<arch>.json`
 
 ## Expected dataset layout
 
@@ -245,4 +274,3 @@ See `scripts/README.md` for the recommended order and detailed examples.
 - `qwen_local` is intended for server-side GPU execution.
 - The pipeline enforces a unified schema and writes `unknown` / `not_applicable` / `null` when appropriate.
 - Real large-scale runs should still start with a small dataset slice first to inspect speed, failure rate, and output quality.
-tput quality.

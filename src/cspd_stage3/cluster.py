@@ -427,10 +427,6 @@ def run_stage3_clustering(
     dino_embeds = torch.load(encode_dir / "dino_embeds.pt", weights_only=True)
     print(f"[Stage 3] Loaded DINOv2 features: {list(dino_embeds.shape)}")
 
-    # The Stage 3 cluster step does not consume VAE latents directly (medoids
-    # are selected in DINOv2 space). VAE latents live under encode_dir and
-    # are consumed later by Stage 4 --set-level-selection.
-
     with open(encode_dir / "encode_index.json", encoding="utf-8") as f:
         encode_index = json.load(f)
     samples = encode_index["samples"]

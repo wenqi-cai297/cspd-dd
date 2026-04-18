@@ -1,11 +1,21 @@
 # Server helper scripts
 
-These scripts are meant to reduce repeated manual CLI typing on the Linux GPU server.
+These scripts are meant to reduce repeated manual CLI typing on the Linux GPU server. They cover the full pipeline:
+
+- **Prep** (`scripts/prep/`) — `classes.json` generation + `class -> archetype` mapping
+- **Stage 1** (`scripts/stage1/`) — attribute extraction + normalization + canonical render
+- **Stage 2** (`scripts/stage2/`) — SDXL LoRA adaptation
+- **Stage 3** (`scripts/stage3/`) — DINOv2 encoding + per-class clustering + medoid extraction
+- **Stage 4** (`scripts/stage4/`) — distilled-image generation
+- **Eval** (`scripts/eval/`) — classifier training + top-1/top-5 on real val set
+- **End-to-end pipeline** (`scripts/pipelines/`) — single driver that chains Stage 1 → Eval with the 3×3 measurement protocol
+
+For everyday runs, the end-to-end pipeline driver is usually what you want; see the "End-to-end pipeline driver" section below.
 
 ## Recommended Prep + Stage 1 order
 
-Prep now means `classes.json` generation plus `class -> archetype` mapping.
-Stage 1 now means attribute extraction, normalization, and canonical render.
+Prep means `classes.json` generation plus `class -> archetype` mapping.
+Stage 1 means attribute extraction, normalization, and canonical render.
 
 If you want the full workflow from environment checking to final canonical render, use these steps in order:
 
@@ -166,12 +176,7 @@ The output directory is generated automatically as:
 runs/stage1/render/<dataset_name>/<backend>/<timestamp>
 ```
 
-Migration note:
-- Canonical render code now lives under `src/cspd_stage1/`.
-- Use `bash scripts/stage1/run_stage1_render.sh ...` or `cspd-stage1 render ...`.
-- The old Stage 2 render compatibility entrypoints were removed because future Stage 2 will be different code.
-
-### Run Stage 2 v1 training scaffold
+### Run Stage 2 training (SDXL LoRA)
 
 Stage 2 now means generative-backbone adaptation / canonical-semantic-space familiarization.
 It consumes:
@@ -236,6 +241,59 @@ This helper:
 - keeps the run output under `runs/stage2/train/<dataset_label>/stabilityai__stable-diffusion-xl-base-1.0/<timestamp>/` unless `STAGE2_OUTPUT_DIR` is set
 
 Mainline training config (produces the 63.27% IPC=10 baseline): rank=64 LoRA, cosine LR with 500-step warmup, noise_offset=0.05, snr_gamma=5.0, batch=8, epoch 9 on 2 GPUs at 512 resolution.
+
+### Run Stage 3 (DINOv2 encoding + per-class clustering)
+
+```bash
+bash scripts/stage3/run_stage3_pipeline.sh <dataset_root> <stage1_render_records.jsonl> <ipc>
+```
+
+Example:
+
+```bash
+bash scripts/stage3/run_stage3_pipeline.sh \
+  /media/4T_HDD/cai/datasets/ImageNette/train \
+  runs/stage1/render/ImageNette_train/qwen_local/2026-04-12_XXXXXX/records.jsonl \
+  10
+```
+
+This helper:
+- runs Stage 3A (DINOv2 image encoding), then Stage 3B (per-class HDBSCAN with K-Means fallback on small clusters, PCA-optional), then Stage 3C (medoid + semantic-mode extraction)
+- writes modes under `runs/stage3/<dataset>/ipc<IPC>/<timestamp>/modes/`
+- useful env overrides: `STAGE3_BATCH_SIZE` (default 8), `STAGE3_DEVICE` (default `cuda`), `STAGE3_DTYPE` (default `float16`), `STAGE3_SEED` (default 42)
+
+### Run Stage 4 (distilled-image generation)
+
+```bash
+bash scripts/stage4/run_stage4_pipeline.sh <stage3_modes_dir> <stage2_lora_weights|none>
+```
+
+Example with LoRA:
+
+```bash
+bash scripts/stage4/run_stage4_pipeline.sh \
+  runs/stage3/ImageNette_train/ipc10/2026-04-14_XXXXXX/modes \
+  runs/stage2/train/ImageNette_train/.../checkpoint-8050/pytorch_lora_weights.safetensors
+```
+
+Baseline SDXL (no LoRA) by passing `none` as the second argument. Useful env overrides: `STAGE4_STEPS` (default 50), `STAGE4_GUIDANCE` (default 7.5), `STAGE4_SEED` (default 42), `STAGE4_VISUAL_MODE` (`medoid`/`centroid`/`none`, default `medoid`), `STAGE4_STRENGTH` (img2img denoising strength, default 0.8), `STAGE4_REFINER` (optional SDXL refiner model), `STAGE4_REFINER_STRENGTH` (default 0.3).
+
+### Run Eval (classifiers on distilled dataset)
+
+```bash
+bash scripts/eval/run_eval_pipeline.sh <distilled_dir> <val_dir> <nclass> <ipc> [arch|all]
+```
+
+`arch` can be `convnet`, `resnet18`, `resnet_ap`, or `all` (default). Example:
+
+```bash
+bash scripts/eval/run_eval_pipeline.sh \
+  runs/stage4/ImageNette_train/ipc10/lora/pipeline_<TS>/gen_seed42/images \
+  /media/4T_HDD/cai/datasets/ImageNette/val \
+  10 10 all
+```
+
+Useful env overrides: `EVAL_REPEAT` (default 3 independent runs per arch), `EVAL_SIZE` (default 224), `EVAL_BATCH_SIZE` (default 64), `EVAL_SEED` (default 0), `EVAL_SAVE_DIR` (explicit override of the computed output path).
 
 ## End-to-end pipeline driver
 
