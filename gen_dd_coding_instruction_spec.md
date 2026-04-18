@@ -125,7 +125,7 @@ Right now, the repo is best understood as:
   - `models/resnet_ap.py` — ResNetAP-10 architecture
 
 ### Inference scripts
-- `scripts/inference/sample_sdxl_lora.py` — SDXL LoRA sampling with baseline comparison support
+- `scripts/stage2/sample_sdxl_lora.py` — SDXL LoRA sampling with baseline comparison support
 
 ### Config / metadata
 - `classes.json`
@@ -136,40 +136,40 @@ Right now, the repo is best understood as:
 - `configs/stage1/normalization/stage1_attribute_normalization_rules.json`
 
 ### Data / analysis scripts
-- `scripts/data/convert_class_py_to_json.py`
-- `scripts/data/generate_class_to_archetype_map_vlm.py`
-- `scripts/data/normalize_stage1_attributes.py`
+- `scripts/prep/convert_class_py_to_json.py`
+- `scripts/prep/generate_class_to_archetype_map_vlm.py`
+- `scripts/stage1/normalize_stage1_attributes.py`
 
 ### Server-side execution scripts
-- `scripts/server/check_stage1_env.sh`
-- `scripts/server/setup_cspd_stage1.sh`
-- `scripts/server/prepare_stage1_metadata.sh`
-- `scripts/server/run_stage1_mock.sh`
-- `scripts/server/run_stage1_qwen_local.sh`
-- `scripts/server/run_stage1_normalization.sh`
-- `scripts/server/run_stage1_render.sh`
-- `scripts/server/generate_class_to_archetype_vlm.sh`
-- `scripts/server/check_stage2_sdxl_env.sh` — Stage 2 SDXL environment preflight
-- `scripts/server/stage2/run_sdxl_stage2_official.sh` — SDXL LoRA training launcher (default: 2 GPUs, 512 resolution)
-- `scripts/server/stage2/run_pixart_stage2_baseline_sampling.sh`
-- `scripts/server/stage2/run_pixart_stage2_wandb.sh`
-- `scripts/server/run_stage2_train.sh`
-- `scripts/server/dump_stage2_backbone_modules.sh`
-- `scripts/server/README.md` documents the recommended Prep + Stage 1 + Stage 2 helper flow
-- `scripts/server/stage1/run_stage1_pipeline.sh` — full Stage 1: extract → normalize → render
-- `scripts/server/stage2/run_stage2_pipeline.sh` — Stage 2 training + checkpoint sampling
-- `scripts/server/stage2/run_sd15_stage2_official.sh` — SD v1.5 full fine-tuning launcher (tested but worse than SDXL)
-- `scripts/server/stage3/run_stage3_pipeline.sh` — Stage 3 encode + cluster
-- `scripts/server/stage4/run_stage4_pipeline.sh` — Stage 4 generate distilled dataset
-- `scripts/server/eval/run_eval_pipeline.sh` — train classifier + evaluate
-- `scripts/server/run_full_pipeline.sh` — end-to-end pipeline with resume support (Stage 1→2→3→4→Eval)
-- `scripts/server/run_ipc_sweep.sh` — IPC sweep for Stage 3+4+Eval
-- `scripts/server/run_candidate_sweep.sh` — IPC sweep with multi-candidate selection (10 candidates/mode)
+- `scripts/stage1/check_stage1_env.sh`
+- `scripts/stage1/setup_cspd_stage1.sh`
+- `scripts/prep/prepare_stage1_metadata.sh`
+- `scripts/stage1/run_stage1_mock.sh`
+- `scripts/stage1/run_stage1_qwen_local.sh`
+- `scripts/stage1/run_stage1_normalization.sh`
+- `scripts/stage1/run_stage1_render.sh`
+- `scripts/prep/generate_class_to_archetype_vlm.sh`
+- `scripts/stage2/check_stage2_sdxl_env.sh` — Stage 2 SDXL environment preflight
+- `scripts/stage2/run_sdxl_stage2_official.sh` — SDXL LoRA training launcher (default: 2 GPUs, 512 resolution)
+- `scripts/stage2/run_pixart_stage2_baseline_sampling.sh`
+- `scripts/stage2/run_pixart_stage2_wandb.sh`
+- `scripts/stage2/run_stage2_train.sh`
+- `scripts/stage2/dump_stage2_backbone_modules.sh`
+- `scripts/README.md` documents the recommended Prep + Stage 1 + Stage 2 helper flow
+- `scripts/stage1/run_stage1_pipeline.sh` — full Stage 1: extract → normalize → render
+- `scripts/stage2/run_stage2_pipeline.sh` — Stage 2 training + checkpoint sampling
+- `scripts/stage2/run_sd15_stage2_official.sh` — SD v1.5 full fine-tuning launcher (tested but worse than SDXL)
+- `scripts/stage3/run_stage3_pipeline.sh` — Stage 3 encode + cluster
+- `scripts/stage4/run_stage4_pipeline.sh` — Stage 4 generate distilled dataset
+- `scripts/eval/run_eval_pipeline.sh` — train classifier + evaluate
+- `scripts/pipelines/run_full_pipeline.sh` — end-to-end pipeline with resume support (Stage 1→2→3→4→Eval)
+- `scripts/pipelines/run_ipc_sweep.sh` — IPC sweep for Stage 3+4+Eval
+- `scripts/pipelines/run_candidate_sweep.sh` — IPC sweep with multi-candidate selection (10 candidates/mode)
 
 ### Stage 2 output-dir rule (must remember)
 - The repo-standard Stage 2 run root is:
   - `runs/stage2/train/<dataset_label>/<backbone_slug>/<timestamp>`
-- `scripts/server/run_stage2_train.sh` already derives this automatically.
+- `scripts/stage2/run_stage2_train.sh` already derives this automatically.
 - `cspd-stage2 train` should follow the same convention by default when `--output-dir` is omitted; do **not** force routine users to hand-type run directories.
 - Dataset-label derivation rule:
   - default: `basename(dataset_root)`
@@ -277,10 +277,10 @@ For current repo semantics and workflow docs, **render belongs to Stage 1**, not
 
 ### Main files
 - `classes.json`
-- `scripts/data/convert_class_py_to_json.py`
-- `scripts/data/generate_class_to_archetype_map_vlm.py`
-- `scripts/server/prepare_stage1_metadata.sh`
-- `scripts/server/generate_class_to_archetype_vlm.sh`
+- `scripts/prep/convert_class_py_to_json.py`
+- `scripts/prep/generate_class_to_archetype_map_vlm.py`
+- `scripts/prep/prepare_stage1_metadata.sh`
+- `scripts/prep/generate_class_to_archetype_vlm.sh`
 
 ### Practical workflow note
 Prep artifacts are class-level / dataset-level metadata.
@@ -542,7 +542,7 @@ Implemented resume behavior:
 **Implemented in repo.**
 
 ### Main code and rules
-- `scripts/data/normalize_stage1_attributes.py`
+- `scripts/stage1/normalize_stage1_attributes.py`
 - `configs/stage1/normalization/stage1_attribute_normalization_rules.json`
 
 ### Main CLI / helper surface
@@ -552,7 +552,7 @@ cspd-stage1 normalize --input ... --output-dir ...
 ```
 
 ```bash
-bash scripts/server/run_stage1_normalization.sh <attr_dir_or_jsonl>
+bash scripts/stage1/run_stage1_normalization.sh <attr_dir_or_jsonl>
 ```
 
 Default helper output path:
@@ -658,10 +658,10 @@ cspd-stage1 render --input ... --output-dir ...
 ```
 
 ```bash
-bash scripts/server/run_stage1_render.sh /path/to/attributes_normalized.jsonl
+bash scripts/stage1/run_stage1_render.sh /path/to/attributes_normalized.jsonl
 ```
 
-There is no current `cspd-stage2 render` CLI entrypoint and no `scripts/server/run_stage2_render.sh` helper in the repo.
+There is no current `cspd-stage2 render` CLI entrypoint and no `scripts/stage2/run_stage2_render.sh` helper in the repo.
 The installable console script exposed by `pyproject.toml` is `cspd-stage1`.
 
 ### What Stage 1C does
@@ -773,9 +773,9 @@ Stage 2 delegates training to official diffusers training scripts. The repo owns
 - `src/cspd_stage2/families/sd15/training.py` — SD v1.5 full fine-tuning wrapper (tested but worse)
 - `src/cspd_stage2/training.py` — dispatch (detects `sdxl`/`sd15` family, routes to official wrapper)
 - `src/cspd_stage2/cli.py` — CLI with all SDXL-specific flags (`--sdxl-*`)
-- `scripts/server/stage2/run_sdxl_stage2_official.sh` — server helper (SDXL)
-- `scripts/server/stage2/run_sd15_stage2_official.sh` — server helper (SD v1.5)
-- `scripts/server/check_stage2_sdxl_env.sh` — environment check
+- `scripts/stage2/run_sdxl_stage2_official.sh` — server helper (SDXL)
+- `scripts/stage2/run_sd15_stage2_official.sh` — server helper (SD v1.5)
+- `scripts/stage2/check_stage2_sdxl_env.sh` — environment check
 
 ### Training configuration (current defaults, SDXL mainline)
 - backbone: **`stabilityai/stable-diffusion-xl-base-1.0`**
@@ -807,11 +807,11 @@ cspd-stage2 train \
 ### Server helper usage
 ```bash
 # SDXL LoRA (mainline)
-bash scripts/server/stage2/run_sdxl_stage2_official.sh \
+bash scripts/stage2/run_sdxl_stage2_official.sh \
   <dataset_root> <render_records_jsonl> [batch_size] [epochs] [extra args...]
 
 # SD v1.5 full fine-tuning (kept for reference, not recommended)
-bash scripts/server/stage2/run_sd15_stage2_official.sh \
+bash scripts/stage2/run_sd15_stage2_official.sh \
   <dataset_root> <render_records_jsonl> [batch_size] [epochs] [extra args...]
 ```
 
@@ -850,7 +850,7 @@ The official diffusers repo must be cloned and pip-installed from source (`pip i
 - known gap: generated images still differ from real dataset photos in detail, texture, and composition naturalness
 
 ### Inference / sampling script
-- `scripts/inference/sample_sdxl_lora.py`
+- `scripts/stage2/sample_sdxl_lora.py`
 - loads base SDXL + optional LoRA weights
 - generates images from canonical captions for visual A/B comparison
 - supports `--no-lora` baseline mode with same seed for fair comparison
@@ -1006,7 +1006,7 @@ Stage 3 mode → representative_caption (from medoid)
 - `src/cspd_stage4/representativeness.py` — set-level MMD/moments/coverage evaluation
 - `src/cspd_stage4/mode_guidance.py` — EulerModeGuidanceScheduler (experimental, see 16.11)
 - `src/cspd_stage4/cli.py` — CLI with `generate` subcommand
-- `scripts/server/stage4/run_stage4_pipeline.sh` — server pipeline script
+- `scripts/stage4/run_stage4_pipeline.sh` — server pipeline script
 
 ### CLI usage
 ```bash
@@ -1117,7 +1117,7 @@ Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed 
 1. **IPC sweep on 3×3 baseline (in progress)**
    - Protocol (established 2026-04-18): for each seed in {42, 123, 456}, re-cluster Stage 3 → Stage 4 generate with `base_seed + mode_idx` per image → eval × 3 repeats. Aggregation: best-of-3 per seed, then mean/std/min/max across 3 per-seed bests.
    - **IPC=10 done: 63.27% ± 0.19** (63.4 / 63.0 / 63.4; replaces old 62.33).
-   - **IPC=20 and IPC=50 pending**. Run: `IPC=20 bash scripts/server/run_baseline_3x3.sh` and `IPC=50 bash scripts/server/run_baseline_3x3.sh`.
+   - **IPC=20 and IPC=50 pending**. Run: `IPC=20 bash scripts/pipelines/run_baseline_3x3.sh` and `IPC=50 bash scripts/pipelines/run_baseline_3x3.sh`.
    - Compare against published IPC-scaling baselines (MGD³, DD-VLCP, RDED, SRe2L).
    - At IPC=20/50, also re-test set-level selection (`--set-level-selection`) — more images per class may change the trade-off that hurt it at IPC=10.
 
@@ -1128,7 +1128,7 @@ Given current repo state (as of 2026-04-17, after both set-level A/Bs regressed 
 3. **ImageNet-1k full pipeline**
    - Stage 1 full run on ImageNet-1k in progress
    - After ImageNette benchmarking stabilizes, run full pipeline on 1K classes
-   - Use `scripts/server/run_full_pipeline.sh` for resume support
+   - Use `scripts/pipelines/run_full_pipeline.sh` for resume support
 
 4. **Novel method exploration** (Phase 4 from plan.md)
    - Early vision-language fusion (EVLF-style) — lightweight visual-semantic adapter

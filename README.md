@@ -40,14 +40,14 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 
 ### Main server helper scripts
 
-- `bash scripts/server/check_stage2_sdxl_env.sh [optional_explicit_sdxl_script_path]`
-- `bash scripts/server/stage2/run_sdxl_stage2_official.sh ...`
-- `bash scripts/server/prepare_stage1_metadata.sh ...`
-- `bash scripts/server/stage1/run_stage1_pipeline.sh ...`
-- `bash scripts/server/run_stage1_qwen_local.sh ...`
-- `bash scripts/server/run_stage1_normalization.sh ...`
-- `bash scripts/server/run_stage1_render.sh ...`
-- `bash scripts/server/run_stage2_train.sh ...`
+- `bash scripts/stage2/check_stage2_sdxl_env.sh [optional_explicit_sdxl_script_path]`
+- `bash scripts/stage2/run_sdxl_stage2_official.sh ...`
+- `bash scripts/prep/prepare_stage1_metadata.sh ...`
+- `bash scripts/stage1/run_stage1_pipeline.sh ...`
+- `bash scripts/stage1/run_stage1_qwen_local.sh ...`
+- `bash scripts/stage1/run_stage1_normalization.sh ...`
+- `bash scripts/stage1/run_stage1_render.sh ...`
+- `bash scripts/stage2/run_stage2_train.sh ...`
 
 ### Default server-side output roots
 
@@ -57,7 +57,7 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 - Stage 2 train scaffold: `runs/stage2/train/<dataset_label>/<backbone>/<timestamp>`
 - Stage 2 SDXL official wrapper materializes a diffusers imagefolder dataset under each run at `sdxl_materialized_dataset/` with `metadata.jsonl` and copied training images
   - default dataset label is the dataset-root basename, except split-only roots like `.../train` become `<parent>_train` (same for `val`/`valid`/`validation`/`test`/`testing`)
-  - optional override: set `STAGE2_DATASET_LABEL=...` before `bash scripts/server/run_stage2_train.sh ...`
+  - optional override: set `STAGE2_DATASET_LABEL=...` before `bash scripts/stage2/run_stage2_train.sh ...`
 
 ## Expected dataset layout
 
@@ -86,7 +86,7 @@ Notes:
 ```bash
 conda env create -f environment.yml
 conda activate cspd-dd
-bash scripts/server/check_stage1_env.sh
+bash scripts/stage1/check_stage1_env.sh
 ```
 
 This is the intended one-command environment bootstrap for new servers.
@@ -127,7 +127,7 @@ cspd-stage1 run \
 Then normalize + render:
 
 ```bash
-python scripts/data/normalize_stage1_attributes.py \
+python scripts/stage1/normalize_stage1_attributes.py \
   --input runs/stage1/attributes/my_dataset/qwen_local/2026-03-25_170000/attributes.jsonl \
   --output-dir runs/stage1/attributes/my_dataset/qwen_local/2026-03-25_170000/normalization/2026-03-25_180000
 
@@ -140,7 +140,7 @@ Then build the Stage 2 canonical-caption-conditioned training run from real imag
 For routine server usage, prefer the helper so the output directory stays under the structured convention `runs/stage2/train/<dataset_label>/<backbone_slug>/<timestamp>`:
 
 ```bash
-STAGE2_NUM_PROCESSES=2 bash scripts/server/run_stage2_train.sh \
+STAGE2_NUM_PROCESSES=2 bash scripts/stage2/run_stage2_train.sh \
   /path/to/imagefolder_dataset \
   runs/stage1/render/my_dataset/qwen_local/2026-03-25_181500/records.jsonl \
   black-forest-labs/FLUX.1-Kontext-dev \
@@ -268,7 +268,7 @@ When W&B is enabled, the Stage 2 trainer logs loss / lr / gradient norm / traina
 For detached comparison against step-0 / periodic training-path samples, you can now run standalone pretrained PixArt sampling with the same prompt-file flow:
 
 ```bash
-bash scripts/server/stage2/run_pixart_stage2_baseline_sampling.sh
+bash scripts/stage2/run_pixart_stage2_baseline_sampling.sh
 ```
 
 Direct CLI equivalent:
@@ -391,7 +391,7 @@ The repo now also bundles a conda environment file at `environment.yml`, so new 
 If you want Qwen to generate `class -> archetype` mappings, the recommended path is the multimodal class-level mapper:
 
 ```bash
-python scripts/data/generate_class_to_archetype_map_vlm.py \
+python scripts/prep/generate_class_to_archetype_map_vlm.py \
   --input /path/to/classes.json \
   --dataset-root /path/to/imagefolder_dataset \
   --output /path/to/class_to_archetype.json \
@@ -403,7 +403,7 @@ python scripts/data/generate_class_to_archetype_map_vlm.py \
 Server helper (uses the repo-bundled `classes.json` by default):
 
 ```bash
-bash scripts/server/generate_class_to_archetype_vlm.sh /path/to/imagefolder_dataset 5
+bash scripts/prep/generate_class_to_archetype_vlm.sh /path/to/imagefolder_dataset 5
 ```
 
 ## Stage 1 normalization helper
@@ -411,7 +411,7 @@ bash scripts/server/generate_class_to_archetype_vlm.sh /path/to/imagefolder_data
 A conservative post-processing script is included for Stage 1 `attributes.jsonl` outputs. By default it now runs deterministic normalization first, then an inline constrained VLM review pass for only the ambiguous / review-required slots:
 
 ```bash
-python scripts/data/normalize_stage1_attributes.py \
+python scripts/stage1/normalize_stage1_attributes.py \
   --input /path/to/attributes.jsonl \
   --output-dir /path/to/normalized_artifacts
 ```
@@ -419,7 +419,7 @@ python scripts/data/normalize_stage1_attributes.py \
 Disable the inline VLM review if you want a purely deterministic run:
 
 ```bash
-python scripts/data/normalize_stage1_attributes.py \
+python scripts/stage1/normalize_stage1_attributes.py \
   --input /path/to/attributes.jsonl \
   --output-dir /path/to/normalized_artifacts \
   --disable-vlm-review
@@ -444,7 +444,7 @@ The script preserves the original row and writes these artifacts:
 
 ## Server shell scripts
 
-See `scripts/server/README.md` for the recommended order and detailed examples.
+See `scripts/README.md` for the recommended order and detailed examples.
 
 ## Notes
 
