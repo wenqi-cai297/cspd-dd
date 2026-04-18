@@ -148,8 +148,8 @@ Right now, the repo is best understood as:
 - `scripts/stage3/run_stage3_pipeline.sh` — Stage 3 encode + cluster
 - `scripts/stage4/run_stage4_pipeline.sh` — Stage 4 generate distilled dataset
 - `scripts/eval/run_eval_pipeline.sh` — train classifier + evaluate
-- `scripts/pipelines/run_full_pipeline.sh` — end-to-end pipeline with resume support (Stage 1→2→3→4→Eval)
-- `scripts/pipelines/run_ipc_sweep.sh` — IPC sweep for Stage 3+4+Eval
+- `scripts/pipelines/run_full_pipeline.sh <train_root> [val_root] [nclass]` — end-to-end driver: Stage 1 → Stage 2 → Stage 3 → Stage 4 → Eval. Idempotent per stage (skips work that already exists on disk). `PIPELINE_IPC="10 20 50"` controls the IPC sweep at the end.
+- `scripts/pipelines/run_baseline_3x3.sh <train_root> [val_root] [nclass]` — 3×3 measurement protocol (three paired seeds, each `(cluster, generate, eval)`). Assumes Stage 1 / 2 / 3A already done by the full-pipeline script; auto-detects the latest LoRA checkpoint under `STAGE2_BEST_EPOCH` (default 9).
 
 ### Stage 2 output-dir rule (must remember)
 - The repo-standard Stage 2 run root is:
@@ -1029,7 +1029,7 @@ Given current repo state (as of 2026-04-18, after the set-level line was closed 
 1. **IPC sweep on 3×3 baseline (in progress)**
    - Protocol (established 2026-04-18): for each seed in {42, 123, 456}, re-cluster Stage 3 → Stage 4 generate with `base_seed + mode_idx` per image → eval × 3 repeats. Aggregation: best-of-3 per seed, then mean/std/min/max across 3 per-seed bests.
    - **IPC=10 done: 63.27% ± 0.19** (63.4 / 63.0 / 63.4; replaces old 62.33).
-   - **IPC=20 and IPC=50 pending**. Run: `IPC=20 bash scripts/pipelines/run_baseline_3x3.sh` and `IPC=50 bash scripts/pipelines/run_baseline_3x3.sh`.
+   - **IPC=20 and IPC=50 pending**. Run: `IPC=20 bash scripts/pipelines/run_baseline_3x3.sh /path/to/ImageNette/train` and `IPC=50 bash scripts/pipelines/run_baseline_3x3.sh /path/to/ImageNette/train`.
    - Compare against published IPC-scaling baselines (MGD³, DD-VLCP, RDED, SRe2L).
 
 
