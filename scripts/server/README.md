@@ -65,30 +65,13 @@ Or use the helper script (it uses the repo-bundled `classes.json` by default):
 bash scripts/server/generate_class_to_archetype_vlm.sh /path/to/imagefolder_dataset 5
 ```
 
-### 3. Run the full Prep + Stage 1 workflow end-to-end
+### 3. Run the full Stage 1 pipeline end-to-end
 
 ```bash
-bash scripts/server/run_stage1_full_workflow.sh \
-  /path/to/dataset_root \
-  /path/to/classes.py \
-  /path/to/class_to_archetype.json \
-  IMAGENET2012_CLASSES \
-  256 \
-  /path/to/sample_image.jpg
+bash scripts/server/stage1/run_stage1_pipeline.sh /path/to/dataset_root [backend]
 ```
 
-This script performs the full chain:
-1. environment checks
-2. Prep: `classes.py -> classes.json`
-3. Prep: copy fixed `class_to_archetype.json`
-4. Qwen load test
-5. single-image inference test
-6. small mock smoke run on the first 3 classes with the first 10 images per class
-7. Stage 1 attribute extraction
-8. Stage 1 normalization
-9. Stage 1 canonical render
-
-If you omit the final sample-image argument, the script auto-picks the first image under the dataset root.
+Performs: Stage 1A extraction → Stage 1B normalization (with inline VLM review) → Stage 1C render. Assumes Prep metadata (`classes.json`, `class_to_archetype.json`) is already in place.
 
 ## Individual helper scripts
 
@@ -158,19 +141,6 @@ bash scripts/server/run_stage1_normalization.sh /path/to/attribute_run_dir qwen_
 
 The main normalized JSONL now keeps both deterministic `normalized_attributes` and `effective_normalized_attributes` plus per-slot `vlm_review` metadata; Stage 1 render prefers the effective attributes when present.
 
-### Run optional Stage 1 normalization-review VLM fallback
-
-This path is only for ambiguous cases already flagged by deterministic normalization (`status=review_required` or non-empty `review_reasons`). It does not replace the main deterministic normalization/render path.
-
-```bash
-bash scripts/server/run_stage1_normalization_review_vlm.sh /path/to/attributes_normalized.jsonl [backend] [max_new_tokens]
-```
-
-Example:
-
-```bash
-bash scripts/server/run_stage1_normalization_review_vlm.sh runs/stage1/attributes/ImageNette/qwen_local/2026-03-26_183111/normalization/2026-03-28_180021/attributes_normalized.jsonl qwen_local 256
-```
 
 The output directory is generated automatically as:
 

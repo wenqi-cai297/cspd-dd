@@ -43,11 +43,11 @@ Minimal executable scaffold for **Prep** plus **Stage 1** in the CSPD-DD pipelin
 - `bash scripts/server/check_stage2_sdxl_env.sh [optional_explicit_sdxl_script_path]`
 - `bash scripts/server/stage2/run_sdxl_stage2_official.sh ...`
 - `bash scripts/server/prepare_stage1_metadata.sh ...`
+- `bash scripts/server/stage1/run_stage1_pipeline.sh ...`
 - `bash scripts/server/run_stage1_qwen_local.sh ...`
 - `bash scripts/server/run_stage1_normalization.sh ...`
 - `bash scripts/server/run_stage1_render.sh ...`
 - `bash scripts/server/run_stage2_train.sh ...`
-- `bash scripts/server/run_stage1_full_workflow.sh ...`
 
 ### Default server-side output roots
 
@@ -406,19 +406,6 @@ Server helper (uses the repo-bundled `classes.json` by default):
 bash scripts/server/generate_class_to_archetype_vlm.sh /path/to/imagefolder_dataset 5
 ```
 
-## Attribute analysis helper
-
-To inspect slot/value distributions before writing normalization rules:
-
-```bash
-python scripts/data/analyze_attribute_values.py \
-  --input /path/to/attributes.jsonl \
-  --top-k 20 \
-  --print-top-k 10
-```
-
-This writes a JSON summary report next to the input file and prints per-archetype, per-slot top values to stdout.
-
 ## Stage 1 normalization helper
 
 A conservative post-processing script is included for Stage 1 `attributes.jsonl` outputs. By default it now runs deterministic normalization first, then an inline constrained VLM review pass for only the ambiguous / review-required slots:
@@ -454,30 +441,6 @@ The script preserves the original row and writes these artifacts:
 - `normalization_rules_snapshot.json`: exact rule snapshot used for the run
 
 `normalized_attributes` stays as the deterministic output for auditability. `effective_normalized_attributes` applies only the constrained inline VLM decisions (`replace_normalized` / `set_unknown`) and is what Stage 1 render uses by default when present.
-
-### Optional standalone VLM review helper for ambiguous normalization cases
-
-For rows that were already flagged by deterministic normalization, you can still run the separate constrained VLM review helper:
-
-```bash
-python scripts/data/review_normalization_with_vlm.py \
-  --input /path/to/attributes_normalized.jsonl \
-  --output-dir /path/to/review_vlm_artifacts \
-  --backend qwen_local
-```
-
-This helper only sends slots whose normalization metadata has `status=review_required` or non-empty `review_reasons`.
-It still does **not** overwrite `attributes_normalized.jsonl`; instead it writes sidecar review artifacts:
-- `normalization_review_vlm.jsonl`: one structured VLM decision per ambiguous slot
-- `normalization_review_vlm_summary.json`: aggregate counts and contract metadata
-
-Each VLM review decision is constrained to a fixed action set:
-- `keep_normalized`
-- `replace_normalized`
-- `set_unknown`
-- `defer`
-
-The review schema also keeps the original `record_id`, `archetype`, and `slot`, and the parser forces fallback to `defer` if the model tries to change the archetype or slot.
 
 ## Server shell scripts
 

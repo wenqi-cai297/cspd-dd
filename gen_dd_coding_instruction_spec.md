@@ -138,13 +138,7 @@ Right now, the repo is best understood as:
 ### Data / analysis scripts
 - `scripts/data/convert_class_py_to_json.py`
 - `scripts/data/generate_class_to_archetype_map_vlm.py`
-- `scripts/data/analyze_attribute_values.py`
 - `scripts/data/normalize_stage1_attributes.py`
-- `scripts/data/review_normalization_with_vlm.py` (kept as the original prototype / reference path)
-
-### VLM sanity / smoke test helpers
-- `scripts/vlm/test_qwen_vl_load.py`
-- `scripts/vlm/test_single_image_infer.py`
 
 ### Server-side execution scripts
 - `scripts/server/check_stage1_env.sh`
@@ -154,9 +148,7 @@ Right now, the repo is best understood as:
 - `scripts/server/run_stage1_qwen_local.sh`
 - `scripts/server/run_stage1_normalization.sh`
 - `scripts/server/run_stage1_render.sh`
-- `scripts/server/run_stage1_full_workflow.sh`
 - `scripts/server/generate_class_to_archetype_vlm.sh`
-- `scripts/server/run_stage1_normalization_review_vlm.sh` (prototype / sidecar helper retained)
 - `scripts/server/check_stage2_sdxl_env.sh` — Stage 2 SDXL environment preflight
 - `scripts/server/stage2/run_sdxl_stage2_official.sh` — SDXL LoRA training launcher (default: 2 GPUs, 512 resolution)
 - `scripts/server/stage2/run_pixart_stage2_baseline_sampling.sh`
@@ -671,7 +663,6 @@ bash scripts/server/run_stage1_render.sh /path/to/attributes_normalized.jsonl
 
 There is no current `cspd-stage2 render` CLI entrypoint and no `scripts/server/run_stage2_render.sh` helper in the repo.
 The installable console script exposed by `pyproject.toml` is `cspd-stage1`.
-Operationally, the server-side full workflow also runs `scripts/vlm/test_qwen_vl_load.py` and `scripts/vlm/test_single_image_infer.py`, and `scripts/server/run_stage1_full_workflow.sh` performs a default mock smoke run on the first 3 classes and first 10 images per class unless `--skip-smoke` is passed.
 
 ### What Stage 1C does
 Stage 1C converts normalized Stage 1 records into deterministic canonical captions using:
