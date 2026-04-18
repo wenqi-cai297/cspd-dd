@@ -237,17 +237,6 @@ This helper:
 
 Mainline training config (produces the 63.27% IPC=10 baseline): rank=64 LoRA, cosine LR with 500-step warmup, noise_offset=0.05, snr_gamma=5.0, batch=8, epoch 9 on 2 GPUs at 512 resolution.
 
-To inspect SDXL module names before choosing trainable-component groups:
-
-```bash
-bash scripts/stage2/dump_stage2_backbone_modules.sh \
-  stabilityai/stable-diffusion-xl-base-1.0 \
-  unet \
-  --local-files-only
-```
-
-This writes run artifacts under `runs/stage2/inspect/<backbone_slug>/<timestamp>/`.
-
 ## Dataset assumption
 
 All Stage 1 run scripts assume an ImageFolder-style dataset layout:

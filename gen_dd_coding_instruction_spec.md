@@ -145,7 +145,6 @@ Right now, the repo is best understood as:
 - `scripts/stage2/check_stage2_sdxl_env.sh` — Stage 2 SDXL environment preflight
 - `scripts/stage2/run_sdxl_stage2_official.sh` — SDXL LoRA training launcher (default: 2 GPUs, 512 resolution)
 - `scripts/stage2/run_stage2_train.sh`
-- `scripts/stage2/dump_stage2_backbone_modules.sh`
 - `scripts/README.md` documents the recommended Prep + Stage 1 + Stage 2 helper flow
 - `scripts/stage1/run_stage1_pipeline.sh` — full Stage 1: extract → normalize → render
 - `scripts/stage2/run_stage2_pipeline.sh` — Stage 2 training + checkpoint sampling
@@ -745,16 +744,15 @@ Stage 2 delegates training to official diffusers training scripts. The repo owns
 
 ### CLI usage
 ```bash
-# SDXL LoRA (mainline)
 cspd-stage2 train \
   --dataset-root /path/to/ImageNette/train \
   --render-input /path/to/records.jsonl \
-  --backbone-name stabilityai/stable-diffusion-xl-base-1.0 \
-  --training-parameterization lora \
   --adapter-rank 64 \
   --batch-size 8 --epochs 9 \
   --resolution 512
 ```
+
+`--backbone-name` defaults to `stabilityai/stable-diffusion-xl-base-1.0` (the only supported family). `--training-parameterization` / `--trainable-component-group` / `--wandb` / `--sample-*` / `--pixart-*` / `inspect-targets` / `dump-modules` / `sample-baseline` were removed in the 2026-04-18 Stage 2 cleanup.
 
 ### Server helper usage
 ```bash
