@@ -1,6 +1,7 @@
 """Evaluation: train a classifier on a distilled dataset and evaluate on the real test set.
 
-Protocol exactly follows https://github.com/jachansantiago/mode_guidance:
+Protocol is ported from the MGD³ reference eval
+(https://github.com/jachansantiago/mode_guidance):
 - SGD optimizer, lr=0.01, momentum=0.9, weight_decay=5e-4
 - MultiStepLR at 2/3 and 5/6 of total epochs, gamma=0.2
 - CutMix augmentation (beta=1.0, mix_p=1.0)
@@ -8,6 +9,10 @@ Protocol exactly follows https://github.com/jachansantiago/mode_guidance:
 - Epochs determined by IPC: IPC<=10 → 2000, IPC<=50 → 1500, etc.
 - Three architectures: ConvNet-6, ResNet-18, ResNetAP-10
 - Report best top-1 accuracy on real validation set
+
+(The upstream repo is named "mode_guidance" but this is only the eval
+protocol code — the MGD³-style latent guidance experiment in our Stage 4
+was abandoned and removed on 2026-04-18.)
 """
 
 from __future__ import annotations
@@ -54,7 +59,7 @@ IMAGENET_PCA_EIGVEC = [
 
 
 def ipc_epoch(ipc: int, factor: int = 1, nclass: int = 10) -> int:
-    """Compute training epochs based on IPC, matching mode_guidance protocol."""
+    """Compute training epochs based on IPC, matching the MGD³ reference eval."""
     effective_ipc = ipc * factor ** 2
     if effective_ipc == 1:
         epoch = 3000
@@ -109,10 +114,9 @@ def build_model(arch: str, nclass: int, size: int = 224, nch: int = 3) -> nn.Mod
 
 
 def build_train_transform(size: int) -> transforms.Compose:
-    """ImageNet train transform with RRC + augmentation (matching mode_guidance).
+    """ImageNet train transform with RRC + augmentation (matching the MGD³ eval protocol).
 
-    Order matches mode_guidance exactly:
-      RRC → ToTensor → HFlip → ColorJitter(custom, tensor-space) → Lighting → Normalize
+    Order: RRC → ToTensor → HFlip → ColorJitter(custom, tensor-space) → Lighting → Normalize.
     """
     return transforms.Compose([
         transforms.RandomResizedCrop(size, scale=(0.5, 1.0)),
@@ -125,7 +129,7 @@ def build_train_transform(size: int) -> transforms.Compose:
 
 
 def build_val_transform(size: int) -> transforms.Compose:
-    """ImageNet validation transform (matching mode_guidance)."""
+    """ImageNet validation transform (matching the MGD³ reference eval)."""
     return transforms.Compose([
         transforms.Resize(size),
         transforms.CenterCrop(size),

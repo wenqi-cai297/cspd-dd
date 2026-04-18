@@ -109,7 +109,7 @@ Right now, the repo is best understood as:
 - `src/cspd_eval/`
   - `__init__.py`
   - `train.py` — classifier training + evaluation (ConvNet-6, ResNet-18, ResNetAP-10)
-  - `train_utils.py` — training utilities (AverageMeter, accuracy, CutMix, etc.)
+  - `train_utils.py` — metrics (AverageMeter, accuracy), CutMix helpers (random_indices, rand_bbox), and the tensor-space ColorJitter + Lighting augmentations required to match the MGD³ reference eval
   - `models/convnet.py` — ConvNet-6 architecture
   - `models/resnet.py` — ResNet-18 architecture
   - `models/resnet_ap.py` — ResNetAP-10 architecture
