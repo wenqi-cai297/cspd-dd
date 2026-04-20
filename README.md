@@ -9,8 +9,6 @@ Full end-to-end pipeline for **class-aware semantic-prompt distillation**: from 
 - **Stage 4** = distilled-image generation via text2img (optional img2img from medoid) using the Stage 2 LoRA
 - **Eval** = ConvNet-6 / ResNet-18 / ResNetAP-10 classifiers trained on the distilled set, scored on the real val set
 
-See [gen_dd_coding_instruction_spec.md](gen_dd_coding_instruction_spec.md) for the authoritative technical spec covering all stages.
-
 ## Current repo scope
 
 ### Prep
