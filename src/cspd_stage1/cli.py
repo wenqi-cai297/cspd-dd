@@ -139,8 +139,10 @@ def main() -> None:
             cmd.append("--disable-review-fast-processor")
         if args.review_limit is not None:
             cmd.extend(["--review-limit", str(args.review_limit)])
-        result = subprocess.run(cmd, check=True, text=True, capture_output=True)
-        print(result.stdout.strip())
+        # Inherit stdout/stderr so VLM-review and progress lines stream live and
+        # are not buffered in this parent's RAM (large datasets can produce
+        # hundreds of MB of log text; capturing it killed ImageNet-1k runs).
+        subprocess.run(cmd, check=True)
         return
 
     if args.command == "render":

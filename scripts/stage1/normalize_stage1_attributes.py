@@ -712,96 +712,106 @@ def select_review_items(row: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]
     return items
 
 
-def run_inline_vlm_review(rows: list[dict[str, Any]], review_backend: str, review_model_name: str, review_torch_dtype: str, review_device_map: str, review_use_fast_processor: bool, review_max_new_tokens: int, review_limit: int | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    client: BaseVLMClient | None = None
-    if review_backend != "mock":
-        client = create_vlm_client(
-            review_backend,
-            model_name=review_model_name,
-            torch_dtype=review_torch_dtype,
-            device_map=review_device_map,
-            use_fast_processor=review_use_fast_processor,
-            max_new_tokens=review_max_new_tokens,
-        )
-    review_records: list[dict[str, Any]] = []
-    counts = Counter()
-    reason_counts = Counter()
-    action_counts = Counter()
-    for row in rows:
-        items = select_review_items(row)
-        if not items:
-            row["vlm_review"] = {"reviewed_slots": {}, "review_status": "not_needed"}
-            row["effective_normalized_attributes"] = dict(row.get("normalized_attributes") or {})
-            continue
-        reviewed_slots: dict[str, Any] = {}
-        effective_attributes = dict(row.get("normalized_attributes") or {})
-        for slot, slot_meta in items:
-            if review_limit is not None and counts["items_total"] >= review_limit:
-                break
-            counts["items_total"] += 1
-            review_reasons = [str(item) for item in slot_meta.get("review_reasons") or []]
-            for reason in review_reasons:
-                reason_counts[reason] += 1
-            record = {
-                "record_id": row.get("record_id"),
-                "image_path": row.get("image_path"),
-                "class_name": row.get("class_name"),
-                "class_name_raw": row.get("class_name_raw"),
-                "archetype": row.get("archetype"),
-                "slot": slot,
-                "slot_schema": row.get("slot_schema") or [],
-                "review_reasons": review_reasons,
-                "review_priority": int(slot_meta.get("review_priority") or compute_review_priority(slot, slot_meta)),
-                "raw_value": slot_meta.get("raw_value"),
-                "normalized_value": slot_meta.get("normalized_value"),
-                "review_status": "ok",
-            }
-            try:
-                if review_backend == "mock":
-                    parsed = run_mock_review(row, slot, slot_meta)
-                    raw_text = json.dumps(parsed, ensure_ascii=False)
-                else:
-                    assert client is not None
-                    response = client.extract_attributes(build_sample(row), build_review_prompt(row, slot, slot_meta), REVIEW_SYSTEM_PROMPT)
-                    parsed = parse_review_payload(response.payload, row, slot, slot_meta)
-                    raw_text = response.raw_text
-                counts["items_ok"] += 1
-            except (FileNotFoundError, VLMOutputParseError, ValueError, KeyError) as exc:
-                counts["items_failed"] += 1
-                parsed = {
-                    "record_id": str(row.get("record_id") or ""),
-                    "archetype": str(row.get("archetype") or ""),
-                    "slot": slot,
-                    "action": "defer",
-                    "reviewed_value": str(slot_meta.get("normalized_value") or "unknown"),
-                    "confidence": "low",
-                    "needs_manual_followup": True,
-                    "reason": f"review_failed: {exc}",
-                }
-                raw_text = None
-                record["review_status"] = "failed"
-                record["error_message"] = str(exc)
-            action_counts[parsed["action"]] += 1
-            apply_decision, application_reason = should_apply_review_decision(slot, slot_meta, parsed)
-            parsed["applied_to_effective_normalized_attributes"] = apply_decision
-            parsed["application_reason"] = application_reason
-            if apply_decision:
-                effective_attributes[slot] = parsed["reviewed_value"]
-            reviewed_slots[slot] = parsed
-            record["vlm_review"] = parsed
-            record["raw_model_output"] = raw_text
-            review_records.append(record)
-        row["effective_normalized_attributes"] = effective_attributes
-        row["vlm_review"] = {
-            "reviewed_slots": reviewed_slots,
-            "review_status": "completed" if reviewed_slots else "not_needed",
-            "backend": review_backend,
-            "model_name": review_model_name,
-            "allowed_actions": list(DEFAULT_ALLOWED_ACTIONS),
-        }
+def review_one_row(
+    row: dict[str, Any],
+    *,
+    client: BaseVLMClient | None,
+    review_backend: str,
+    review_model_name: str,
+    counts: Counter,
+    reason_counts: Counter,
+    action_counts: Counter,
+    review_records_out: list[dict[str, Any]],
+    review_limit: int | None,
+) -> None:
+    """Run VLM review for a single row in place.
+
+    Updates row['effective_normalized_attributes'] and row['vlm_review'] and
+    appends per-slot review records to `review_records_out`. Counters are
+    accumulated across rows by the caller.
+    """
+    items = select_review_items(row)
+    if not items:
+        row["vlm_review"] = {"reviewed_slots": {}, "review_status": "not_needed"}
+        row["effective_normalized_attributes"] = dict(row.get("normalized_attributes") or {})
+        return
+
+    reviewed_slots: dict[str, Any] = {}
+    effective_attributes = dict(row.get("normalized_attributes") or {})
+    for slot, slot_meta in items:
         if review_limit is not None and counts["items_total"] >= review_limit:
             break
-    summary = {
+        counts["items_total"] += 1
+        review_reasons = [str(item) for item in slot_meta.get("review_reasons") or []]
+        for reason in review_reasons:
+            reason_counts[reason] += 1
+        record = {
+            "record_id": row.get("record_id"),
+            "image_path": row.get("image_path"),
+            "class_name": row.get("class_name"),
+            "class_name_raw": row.get("class_name_raw"),
+            "archetype": row.get("archetype"),
+            "slot": slot,
+            "slot_schema": row.get("slot_schema") or [],
+            "review_reasons": review_reasons,
+            "review_priority": int(slot_meta.get("review_priority") or compute_review_priority(slot, slot_meta)),
+            "raw_value": slot_meta.get("raw_value"),
+            "normalized_value": slot_meta.get("normalized_value"),
+            "review_status": "ok",
+        }
+        try:
+            if review_backend == "mock":
+                parsed = run_mock_review(row, slot, slot_meta)
+                raw_text = json.dumps(parsed, ensure_ascii=False)
+            else:
+                assert client is not None
+                response = client.extract_attributes(build_sample(row), build_review_prompt(row, slot, slot_meta), REVIEW_SYSTEM_PROMPT)
+                parsed = parse_review_payload(response.payload, row, slot, slot_meta)
+                raw_text = response.raw_text
+            counts["items_ok"] += 1
+        except (FileNotFoundError, VLMOutputParseError, ValueError, KeyError) as exc:
+            counts["items_failed"] += 1
+            parsed = {
+                "record_id": str(row.get("record_id") or ""),
+                "archetype": str(row.get("archetype") or ""),
+                "slot": slot,
+                "action": "defer",
+                "reviewed_value": str(slot_meta.get("normalized_value") or "unknown"),
+                "confidence": "low",
+                "needs_manual_followup": True,
+                "reason": f"review_failed: {exc}",
+            }
+            raw_text = None
+            record["review_status"] = "failed"
+            record["error_message"] = str(exc)
+        action_counts[parsed["action"]] += 1
+        apply_decision, application_reason = should_apply_review_decision(slot, slot_meta, parsed)
+        parsed["applied_to_effective_normalized_attributes"] = apply_decision
+        parsed["application_reason"] = application_reason
+        if apply_decision:
+            effective_attributes[slot] = parsed["reviewed_value"]
+        reviewed_slots[slot] = parsed
+        record["vlm_review"] = parsed
+        record["raw_model_output"] = raw_text
+        review_records_out.append(record)
+    row["effective_normalized_attributes"] = effective_attributes
+    row["vlm_review"] = {
+        "reviewed_slots": reviewed_slots,
+        "review_status": "completed" if reviewed_slots else "not_needed",
+        "backend": review_backend,
+        "model_name": review_model_name,
+        "allowed_actions": list(DEFAULT_ALLOWED_ACTIONS),
+    }
+
+
+def build_review_summary(
+    review_backend: str,
+    review_model_name: str,
+    counts: Counter,
+    reason_counts: Counter,
+    action_counts: Counter,
+) -> dict[str, Any]:
+    return {
         "backend": review_backend,
         "model_name": review_model_name,
         "num_review_items": counts["items_total"],
@@ -815,7 +825,6 @@ def run_inline_vlm_review(rows: list[dict[str, Any]], review_backend: str, revie
             "application_policy": "Deterministic normalization is preserved in normalized_attributes. effective_normalized_attributes applies inline VLM decisions for render/use while vlm_review stores the constrained review metadata.",
         },
     }
-    return review_records, summary
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -834,7 +843,85 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def normalize_file(input_path: Path, output_dir: Path, rules_path: Path, *, enable_vlm_review: bool, review_backend: str, review_model_name: str, review_torch_dtype: str, review_device_map: str, review_use_fast_processor: bool, review_max_new_tokens: int, review_limit: int | None) -> dict[str, Any]:
+def _normalize_one_row(
+    normalizer: Normalizer,
+    row: dict[str, Any],
+    line_number: int,
+    summary: dict[str, Any],
+    enable_vlm_review: bool,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply deterministic normalization to one row.
+
+    Returns (normalized_row, audit_records_for_this_row, review_queue_records_for_this_row).
+    Updates `summary` counters in place.
+    """
+    summary["num_rows"] += 1
+    if row.get("extraction_status") == "success":
+        summary["num_success_rows"] += 1
+    class_name = str(row.get("class_name") or "")
+    class_name_raw = str(row.get("class_name_raw") or "")
+    archetype = str(row.get("archetype") or "")
+    raw_attributes = row.get("attributes", {})
+    if not isinstance(raw_attributes, dict):
+        raw_attributes = {}
+    normalized_attributes: dict[str, str] = {}
+    normalization_meta: dict[str, Any] = {}
+    per_slot_results: dict[str, dict[str, Any]] = {}
+    for slot, raw_value in raw_attributes.items():
+        result = normalizer.normalize_field(class_name, class_name_raw, archetype, slot, raw_value)
+        normalized_attributes[slot] = result["normalized_value"]
+        normalization_meta[slot] = {"raw_value": result["raw_value"], "normalized_value": result["normalized_value"], "status": result["status"], "applied_rules": result["applied_rules"], "review_reasons": result["review_reasons"]}
+        per_slot_results[slot] = result
+
+    apply_consistency_review_pass(archetype, normalized_attributes, normalization_meta)
+
+    audit_for_row: list[dict[str, Any]] = []
+    review_queue_for_row: list[dict[str, Any]] = []
+    row_has_review = False
+    for slot, slot_meta in normalization_meta.items():
+        result = per_slot_results[slot]
+        status = str(slot_meta.get("status") or result["status"])
+        reasons = [str(item) for item in slot_meta.get("review_reasons") or []]
+        applied_rules = [str(item) for item in slot_meta.get("applied_rules") or []]
+        summary["status_counts"][status] += 1
+        summary["slot_status_counts"][slot][status] += 1
+        summary["class_status_counts"][class_name_raw][status] += 1
+        for rule in applied_rules:
+            summary["rule_counts"][rule] += 1
+        for reason in reasons:
+            summary["review_reason_counts"][reason] += 1
+        changed = status in STATUS_CHANGED or str(slot_meta.get("normalized_value") or "") != str(result["cleaned_value"])
+        if changed or reasons:
+            audit_for_row.append({"line_number": line_number, "record_id": row.get("record_id"), "class_name_raw": class_name_raw, "slot": slot, "raw_value": slot_meta.get("raw_value"), "normalized_value": slot_meta.get("normalized_value"), "status": status, "applied_rules": applied_rules, "review_reasons": reasons, "review_priority": compute_review_priority(slot, slot_meta) if reasons or status == "review_required" else 0})
+        if status == "review_required" or reasons:
+            row_has_review = True
+            review_queue_for_row.append({"line_number": line_number, "record_id": row.get("record_id"), "class_name_raw": class_name_raw, "slot": slot, "raw_value": slot_meta.get("raw_value"), "normalized_value": slot_meta.get("normalized_value"), "review_reasons": reasons, "review_priority": compute_review_priority(slot, slot_meta)})
+
+    normalized_row = dict(row)
+    normalized_row["normalized_attributes"] = normalized_attributes
+    normalized_row["attribute_normalization"] = normalization_meta
+    normalized_row["normalization_review_required"] = row_has_review
+    normalized_row["effective_normalized_attributes"] = dict(normalized_attributes)
+    normalized_row["vlm_review"] = {"reviewed_slots": {}, "review_status": "disabled" if not enable_vlm_review else "pending"}
+    return normalized_row, audit_for_row, review_queue_for_row
+
+
+def normalize_file(input_path: Path, output_dir: Path, rules_path: Path, *, enable_vlm_review: bool, review_backend: str, review_model_name: str, review_torch_dtype: str, review_device_map: str, review_use_fast_processor: bool, review_max_new_tokens: int, review_limit: int | None, progress_every: int = 10000) -> dict[str, Any]:
+    """Streaming-friendly normalization.
+
+    Pass 1 (deterministic) reads `attributes.jsonl` row-by-row and writes
+    `attributes_normalized.jsonl` directly. Audit and review-queue records are
+    appended row-by-row as well; nothing is held in RAM beyond the current
+    line.
+
+    Pass 2 (inline VLM review) only runs when `enable_vlm_review=True`. It
+    streams the Pass-1 output back in, applies VLM review for any row that has
+    items to review, and rewrites the file to a sibling temp path before
+    atomic-renaming over the original. The VLM client is constructed exactly
+    once and reused across all rows so the model stays resident.
+    """
+    import os
+
     rules = json.loads(rules_path.read_text(encoding="utf-8"))
     normalizer = Normalizer(rules)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -846,65 +933,86 @@ def normalize_file(input_path: Path, output_dir: Path, rules_path: Path, *, enab
     review_vlm_summary_path = output_dir / "normalization_review_vlm_summary.json"
     snapshot_path = output_dir / "normalization_rules_snapshot.json"
     summary: dict[str, Any] = {"input_path": str(input_path.resolve()), "rules_path": str(rules_path.resolve()), "num_rows": 0, "num_success_rows": 0, "status_counts": Counter(), "slot_status_counts": defaultdict(Counter), "class_status_counts": defaultdict(Counter), "rule_counts": Counter(), "review_reason_counts": Counter()}
-    output_rows: list[dict[str, Any]] = []
-    audit_records: list[dict[str, Any]] = []
-    review_records: list[dict[str, Any]] = []
-    for line_number, row in iter_jsonl(input_path):
-        summary["num_rows"] += 1
-        if row.get("extraction_status") == "success":
-            summary["num_success_rows"] += 1
-        class_name = str(row.get("class_name") or "")
-        class_name_raw = str(row.get("class_name_raw") or "")
-        archetype = str(row.get("archetype") or "")
-        raw_attributes = row.get("attributes", {})
-        if not isinstance(raw_attributes, dict):
-            raw_attributes = {}
-        normalized_attributes: dict[str, str] = {}
-        normalization_meta: dict[str, Any] = {}
-        per_slot_results: dict[str, dict[str, Any]] = {}
-        for slot, raw_value in raw_attributes.items():
-            result = normalizer.normalize_field(class_name, class_name_raw, archetype, slot, raw_value)
-            normalized_attributes[slot] = result["normalized_value"]
-            normalization_meta[slot] = {"raw_value": result["raw_value"], "normalized_value": result["normalized_value"], "status": result["status"], "applied_rules": result["applied_rules"], "review_reasons": result["review_reasons"]}
-            per_slot_results[slot] = result
 
-        apply_consistency_review_pass(archetype, normalized_attributes, normalization_meta)
+    # ---- Pass 1: streaming deterministic normalization ----
+    print(f"[normalize] Pass 1 (deterministic) → {normalized_path}", flush=True)
+    with normalized_path.open("w", encoding="utf-8") as norm_out, \
+         audit_path.open("w", encoding="utf-8") as audit_out, \
+         review_path.open("w", encoding="utf-8") as review_out:
+        for line_number, row in iter_jsonl(input_path):
+            normalized_row, audit_for_row, review_queue_for_row = _normalize_one_row(
+                normalizer, row, line_number, summary, enable_vlm_review,
+            )
+            norm_out.write(json.dumps(normalized_row, ensure_ascii=False) + "\n")
+            for rec in audit_for_row:
+                audit_out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            for rec in review_queue_for_row:
+                review_out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            if progress_every and summary["num_rows"] % progress_every == 0:
+                print(f"[normalize] Pass 1 progress: {summary['num_rows']} rows", flush=True)
 
-        row_has_review = False
-        for slot, slot_meta in normalization_meta.items():
-            result = per_slot_results[slot]
-            status = str(slot_meta.get("status") or result["status"])
-            reasons = [str(item) for item in slot_meta.get("review_reasons") or []]
-            applied_rules = [str(item) for item in slot_meta.get("applied_rules") or []]
-            summary["status_counts"][status] += 1
-            summary["slot_status_counts"][slot][status] += 1
-            summary["class_status_counts"][class_name_raw][status] += 1
-            for rule in applied_rules:
-                summary["rule_counts"][rule] += 1
-            for reason in reasons:
-                summary["review_reason_counts"][reason] += 1
-            changed = status in STATUS_CHANGED or str(slot_meta.get("normalized_value") or "") != str(result["cleaned_value"])
-            if changed or reasons:
-                audit_records.append({"line_number": line_number, "record_id": row.get("record_id"), "class_name_raw": class_name_raw, "slot": slot, "raw_value": slot_meta.get("raw_value"), "normalized_value": slot_meta.get("normalized_value"), "status": status, "applied_rules": applied_rules, "review_reasons": reasons, "review_priority": compute_review_priority(slot, slot_meta) if reasons or status == "review_required" else 0})
-            if status == "review_required" or reasons:
-                row_has_review = True
-                review_records.append({"line_number": line_number, "record_id": row.get("record_id"), "class_name_raw": class_name_raw, "slot": slot, "raw_value": slot_meta.get("raw_value"), "normalized_value": slot_meta.get("normalized_value"), "review_reasons": reasons, "review_priority": compute_review_priority(slot, slot_meta)})
-        normalized_row = dict(row)
-        normalized_row["normalized_attributes"] = normalized_attributes
-        normalized_row["attribute_normalization"] = normalization_meta
-        normalized_row["normalization_review_required"] = row_has_review
-        normalized_row["effective_normalized_attributes"] = dict(normalized_attributes)
-        normalized_row["vlm_review"] = {"reviewed_slots": {}, "review_status": "disabled" if not enable_vlm_review else "pending"}
-        output_rows.append(normalized_row)
+    # ---- Pass 2: streaming inline VLM review (optional) ----
     if enable_vlm_review:
-        vlm_review_records, vlm_review_summary = run_inline_vlm_review(output_rows, review_backend, review_model_name, review_torch_dtype, review_device_map, review_use_fast_processor, review_max_new_tokens, review_limit)
+        print(f"[normalize] Pass 2 (inline VLM review, backend={review_backend})", flush=True)
+        client: BaseVLMClient | None = None
+        if review_backend != "mock":
+            client = create_vlm_client(
+                review_backend,
+                model_name=review_model_name,
+                torch_dtype=review_torch_dtype,
+                device_map=review_device_map,
+                use_fast_processor=review_use_fast_processor,
+                max_new_tokens=review_max_new_tokens,
+            )
+        counts: Counter = Counter()
+        reason_counts: Counter = Counter()
+        action_counts: Counter = Counter()
+        tmp_path = normalized_path.with_suffix(normalized_path.suffix + ".tmp")
+        with normalized_path.open("r", encoding="utf-8") as norm_in, \
+             tmp_path.open("w", encoding="utf-8") as norm_out, \
+             review_vlm_path.open("w", encoding="utf-8") as vlm_out:
+            review_records_buf: list[dict[str, Any]] = []
+            processed = 0
+            for line in norm_in:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                row = json.loads(stripped)
+                review_one_row(
+                    row,
+                    client=client,
+                    review_backend=review_backend,
+                    review_model_name=review_model_name,
+                    counts=counts,
+                    reason_counts=reason_counts,
+                    action_counts=action_counts,
+                    review_records_out=review_records_buf,
+                    review_limit=review_limit,
+                )
+                norm_out.write(json.dumps(row, ensure_ascii=False) + "\n")
+                # Flush per-slot review records out per row so the buffer stays small
+                for rec in review_records_buf:
+                    vlm_out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                review_records_buf.clear()
+                processed += 1
+                if progress_every and processed % progress_every == 0:
+                    print(f"[normalize] Pass 2 progress: {processed} rows, review items so far: {counts['items_total']}", flush=True)
+        # Atomic replace
+        os.replace(tmp_path, normalized_path)
+        vlm_review_summary = build_review_summary(review_backend, review_model_name, counts, reason_counts, action_counts)
+        # Free the model promptly so downstream stages don't compete for GPU
+        if client is not None:
+            del client
+            try:
+                import torch  # local import: only needed when VLM ran
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
     else:
-        vlm_review_records = []
+        review_vlm_path.write_text("", encoding="utf-8")
         vlm_review_summary = {"backend": None, "model_name": None, "num_review_items": 0, "num_ok": 0, "num_failed": 0, "review_reason_counts": {}, "action_counts": {}, "contract": {"allowed_actions": list(DEFAULT_ALLOWED_ACTIONS), "trigger": "disabled", "application_policy": "Inline VLM review disabled; effective_normalized_attributes matches deterministic normalized_attributes."}}
-    normalized_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in output_rows), encoding="utf-8")
-    audit_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in audit_records), encoding="utf-8")
-    review_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in review_records), encoding="utf-8")
-    review_vlm_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in vlm_review_records), encoding="utf-8")
+
     summary_payload = {"input_path": summary["input_path"], "rules_path": summary["rules_path"], "num_rows": summary["num_rows"], "num_success_rows": summary["num_success_rows"], "status_counts": dict(summary["status_counts"]), "slot_status_counts": {slot: dict(counter) for slot, counter in summary["slot_status_counts"].items()}, "class_status_counts": {cls: dict(counter) for cls, counter in summary["class_status_counts"].items()}, "rule_counts": dict(summary["rule_counts"].most_common()), "review_reason_counts": dict(summary["review_reason_counts"].most_common()), "vlm_review": {"enabled": enable_vlm_review, **vlm_review_summary}, "artifacts": {"attributes_normalized": str(normalized_path.resolve()), "normalization_audit": str(audit_path.resolve()), "normalization_review_queue": str(review_path.resolve()), "normalization_review_vlm": str(review_vlm_path.resolve()), "normalization_review_vlm_summary": str(review_vlm_summary_path.resolve()), "normalization_rules_snapshot": str(snapshot_path.resolve())}}
     summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     review_vlm_summary_path.write_text(json.dumps(vlm_review_summary, ensure_ascii=False, indent=2), encoding="utf-8")
