@@ -7,3 +7,4 @@ runs/
 # Research-facing planning/spec documents: kept local, not tracked.
 gen_dd_coding_instruction_spec.md
 plan.md
+PAPER_BRIEF.md
