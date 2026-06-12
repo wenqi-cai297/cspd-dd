@@ -310,11 +310,22 @@ def run_stage2_sdxl_official_training(*, config: Any, pairs: list[Any], run_dir:
             'last_known_phase': 'sdxl_launch_plan_ready',
         }
 
-    completed = subprocess.run(command, cwd=str(run_dir), check=False, capture_output=True, text=True)
+    # Stream stdout/stderr directly to log files instead of buffering both in
+    # parent RAM via capture_output=True. The official diffusers trainer prints
+    # one progress line per step, and a 9-epoch ImageNet-1k run is ~720k steps:
+    # buffered output can reach several GB and OOM-kill the parent (same root
+    # cause as the Stage 1B fix in commit c35f207).
     stdout_path = run_dir / 'sdxl_official_stdout.txt'
     stderr_path = run_dir / 'sdxl_official_stderr.txt'
-    stdout_path.write_text(completed.stdout or '', encoding='utf-8')
-    stderr_path.write_text(completed.stderr or '', encoding='utf-8')
+    with stdout_path.open('w', encoding='utf-8') as stdout_file, \
+         stderr_path.open('w', encoding='utf-8') as stderr_file:
+        completed = subprocess.run(
+            command,
+            cwd=str(run_dir),
+            check=False,
+            stdout=stdout_file,
+            stderr=stderr_file,
+        )
     return {
         'status': 'completed' if completed.returncode == 0 else 'failed',
         'implemented_training': completed.returncode == 0,
