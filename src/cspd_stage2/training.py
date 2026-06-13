@@ -94,6 +94,19 @@ def _config_to_dict(config: Stage2TrainConfig) -> dict[str, Any]:
     return payload
 
 
+def _read_text_tail(path_value: str | None, *, max_lines: int = 80) -> list[str]:
+    if not path_value:
+        return []
+    path = Path(path_value)
+    if not path.exists() or not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return lines[-max_lines:]
+
+
 def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
     """Build Stage 2 artifacts and launch the official SDXL LoRA training."""
     if not config.output_dir:
@@ -161,6 +174,13 @@ def run_stage2_training(config: Stage2TrainConfig) -> dict[str, Any]:
                     f"from backbone_name={config.backbone_name!r}."
                 ),
             }
+
+        if (
+            training_result.get("status") in {"failed", "failed_before_training", "failed_before_training_setup_complete"}
+            or int(training_result.get("returncode", 0) or 0) != 0
+        ):
+            training_result["stderr_tail"] = _read_text_tail(training_result.get("stderr_path"))
+            training_result["stdout_tail"] = _read_text_tail(training_result.get("stdout_path"), max_lines=40)
     except Exception as exc:  # noqa: BLE001
         top_level_failure = {
             "error_type": type(exc).__name__,

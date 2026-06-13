@@ -225,7 +225,7 @@ def _build_sdxl_official_command(*, config: Any, script_path: str, materialized:
         '--seed', str(int(getattr(config, 'seed', 42))),
     ])
     report_to = str(getattr(config, 'sdxl_report_to', 'none') or 'none').strip().lower()
-    if report_to and report_to != 'none':
+    if report_to:
         command.extend(['--report_to', report_to])
     if getattr(config, 'max_steps', None) is not None:
         command.extend(['--max_train_steps', str(int(getattr(config, 'max_steps')))])

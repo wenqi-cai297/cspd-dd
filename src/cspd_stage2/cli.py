@@ -135,6 +135,18 @@ def main() -> None:
     if args.command == "train":
         summary = run_stage2_training(config_from_args(args))
         print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        training_result = summary.get("training_result") if isinstance(summary, dict) else None
+        failed = bool(summary.get("top_level_failure")) if isinstance(summary, dict) else True
+        if isinstance(training_result, dict):
+            failed = failed or training_result.get("status") in {
+                "failed",
+                "failed_before_training",
+                "failed_before_training_setup_complete",
+                "unsupported_backbone",
+            }
+            failed = failed or int(training_result.get("returncode", 0) or 0) != 0
+        if failed:
+            raise SystemExit(1)
         return
 
     raise SystemExit(f"Unknown command: {args.command}")
