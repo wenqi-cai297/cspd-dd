@@ -117,7 +117,7 @@ CMD=(
   --epochs "$EPOCHS"
   --resolution 512
   --sdxl-mixed-precision fp16
-  --sdxl-report-to none
+  --sdxl-report-to tensorboard
 )
 
 STAGE2_NUM_PROCESSES="${STAGE2_NUM_PROCESSES:-2}"

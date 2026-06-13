@@ -70,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--sdxl-lr-warmup-steps", type=int, default=500)
     train_parser.add_argument("--sdxl-validation-epochs", type=int, default=1)
     train_parser.add_argument("--sdxl-validation-prompt", default=None)
-    train_parser.add_argument("--sdxl-report-to", default="none")
+    train_parser.add_argument("--sdxl-report-to", default="tensorboard")
     train_parser.add_argument("--sdxl-use-8bit-adam", action="store_true")
     train_parser.add_argument("--sdxl-enable-xformers", action="store_true")
     train_parser.add_argument("--sdxl-disable-gradient-checkpointing", action="store_true")

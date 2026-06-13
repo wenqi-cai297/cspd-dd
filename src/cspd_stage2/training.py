@@ -76,7 +76,7 @@ class Stage2TrainConfig:
     sdxl_lr_warmup_steps: int = 500
     sdxl_validation_epochs: int = 1
     sdxl_validation_prompt: str | None = None
-    sdxl_report_to: str = "none"
+    sdxl_report_to: str = "tensorboard"
     sdxl_use_8bit_adam: bool = False
     sdxl_enable_xformers: bool = False
     sdxl_gradient_checkpointing: bool = True

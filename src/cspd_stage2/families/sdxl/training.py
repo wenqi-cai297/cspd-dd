@@ -224,7 +224,9 @@ def _build_sdxl_official_command(*, config: Any, script_path: str, materialized:
         '--rank', str(int(getattr(config, 'adapter_plan').rank)),
         '--seed', str(int(getattr(config, 'seed', 42))),
     ])
-    report_to = str(getattr(config, 'sdxl_report_to', 'none') or 'none').strip().lower()
+    report_to = str(getattr(config, 'sdxl_report_to', 'tensorboard') or '').strip().lower()
+    if report_to in {'none', 'no', 'off', 'false', 'disable', 'disabled'}:
+        report_to = ''
     if report_to:
         command.extend(['--report_to', report_to])
     if getattr(config, 'max_steps', None) is not None:

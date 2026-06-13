@@ -53,7 +53,7 @@ python --version
 echo "[INFO] accelerate / diffusers imports"
 python - <<'PY'
 import importlib.util
-modules = ["torch", "diffusers", "accelerate", "transformers", "peft"]
+modules = ["torch", "diffusers", "accelerate", "transformers", "peft", "tensorboard", "absl", "tensorboardX"]
 for name in modules:
     print(name, importlib.util.find_spec(name) is not None)
 PY
